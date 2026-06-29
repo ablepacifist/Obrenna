@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import { ShieldCheck } from 'lucide-react'
+import { FolderOpen, ShieldCheck } from 'lucide-react'
 import {
   type AppSettings, type HardwareInfo, type ManagedPlan, type ModelEndpointConfig,
   getHardware, getManagedPlan, getModelCatalog, saveAppSettings, saveModelEndpoint, testModelEndpoint,
 } from '../lib/api'
 import { useReducedMotion } from '../hooks/useReducedMotion'
+import { useIsDesktop } from '../hooks/useIsDesktop'
+import { getDataDir } from '../lib/tauri'
 import { WelcomeStep } from './WelcomeStep'
 import { HardwareStep } from './HardwareStep'
 import { RecommendStep } from './RecommendStep'
@@ -17,8 +19,11 @@ interface SetupFlowProps {
 
 export function SetupFlow({ onFinish }: SetupFlowProps) {
   const rm = useReducedMotion()
+  const isDesktop = useIsDesktop()
   const [step, setStep] = useState(0)
   const [path, setPath] = useState<'managed' | 'byo' | null>(null)
+  const [dataDir, setDataDir] = useState('')
+  const [ollamaFound, setOllamaFound] = useState<boolean | null>(null)
 
   // managed flow
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
@@ -43,6 +48,20 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   })
   const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'failure'>('idle')
   const [latencyMs, setLatencyMs] = useState<number | undefined>()
+
+  // Desktop: load data dir and check for Ollama on mount
+  useEffect(() => {
+    if (!isDesktop) return
+    getDataDir().then(d => setDataDir(d)).catch(() => {})
+    fetch('http://localhost:11434/api/tags')
+      .then(r => r.ok ? setOllamaFound(true) : setOllamaFound(false))
+      .catch(() => setOllamaFound(false))
+  }, [isDesktop])
+
+  const handleOpenDataDir = async () => {
+    const { openDataDir } = await import('../lib/tauri')
+    await openDataDir().catch(() => {})
+  }
 
   // Fetch hardware when entering managed hardware step
   useEffect(() => {
@@ -160,8 +179,27 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
           <ShieldCheck className="w-3.5 h-3.5" /> Local-first workspace
         </div>
 
+        {isDesktop && step === 0 && (
+          <div className="mb-6 flex items-center justify-between text-[12px] text-(--ink-faint) bg-(--surface) border border-(--border) rounded-lg px-3 py-2">
+            <span className="truncate">{dataDir || 'Loading data directory…'}</span>
+            <button onClick={handleOpenDataDir} className="ml-2 inline-flex items-center gap-1 hover:text-(--accent) transition-colors">
+              <FolderOpen className="w-3 h-3" /> Open folder
+            </button>
+          </div>
+        )}
+
+        {isDesktop && step === 0 && ollamaFound === true && (
+          <div className="mb-4 text-[12px] text-(--ok) bg-(--ok)/5 border border-(--ok)/20 rounded-lg px-3 py-2">
+            Local Ollama server detected at localhost:11434
+          </div>
+        )}
+
         {step === 0 && (
-          <WelcomeStep onChoose={p => { setPath(p); setStep(1) }} />
+          <WelcomeStep
+            onChoose={p => { setPath(p); setStep(1) }}
+            isDesktop={isDesktop}
+            ollamaFound={ollamaFound}
+          />
         )}
 
         {step === 1 && path === 'managed' && (

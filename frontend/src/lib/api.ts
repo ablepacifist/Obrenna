@@ -1,9 +1,15 @@
 /** Typed fetch client for the GrebGlob backend. */
 
-const BASE = import.meta.env.VITE_API_BASE_URL ?? ''
+import { getConfig } from './config'
+
+async function getBase(): Promise<string> {
+  const config = await getConfig()
+  return config.apiUrl
+}
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const base = await getBase()
+  const res = await fetch(`${base}${path}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
@@ -112,7 +118,8 @@ export type FileDTO = {
 export async function uploadFile(file: File): Promise<FileDTO> {
   const fd = new FormData()
   fd.append('file', file)
-  const res = await fetch(`${BASE}/api/files/upload`, { method: 'POST', body: fd })
+  const base = await getBase()
+  const res = await fetch(`${base}/api/files/upload`, { method: 'POST', body: fd })
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`)
   return res.json()
 }
@@ -129,7 +136,10 @@ export const getArtifact = (id: string) => req<ArtifactResponse>('GET', `/api/ar
 export const exportPdf = (id: string) =>
   req<ExportPdfResponse>('POST', `/api/artifacts/${id}/export/pdf`)
 
-export const downloadPdfUrl = (id: string) => `${BASE}/api/artifacts/${id}/export/pdf/download`
+export async function downloadPdfUrl(id: string): Promise<string> {
+  const base = await getBase()
+  return `${base}/api/artifacts/${id}/export/pdf/download`
+}
 
 // ── chat ──────────────────────────────────────────────────────────────────────
 export type ChatMessageDTO = {

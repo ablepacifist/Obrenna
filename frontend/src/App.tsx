@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { getAppSettings } from './lib/api'
+import { getConfig } from './lib/config'
 import { SetupFlow } from './setup/SetupFlow'
 import { Sidebar } from './components/Sidebar'
 import { ChatThread } from './components/chat/ChatThread'
@@ -9,6 +10,7 @@ import { SettingsView } from './components/settings/SettingsView'
 
 export default function App() {
   const [setupDone, setSetupDone] = useState<boolean | null>(null)
+  const [loading, setLoading] = useState(true)
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const [openArtifactId, setOpenArtifactId] = useState<string | null>(null)
   const [panelWidth, setPanelWidth] = useState(480)
@@ -16,9 +18,18 @@ export default function App() {
   const [newChatTick, setNewChatTick] = useState(0)
 
   useEffect(() => {
-    getAppSettings()
-      .then(s => setSetupDone(s.setup_complete))
-      .catch(() => setSetupDone(false))
+    getConfig().then(async () => {
+      try {
+        const s = await getAppSettings()
+        setSetupDone(s.setup_complete)
+      } catch {
+        setSetupDone(false)
+      }
+      setLoading(false)
+    }).catch(() => {
+      setLoading(false)
+      setSetupDone(false)
+    })
   }, [])
 
   const onResizeStart = (e: React.MouseEvent) => {
@@ -37,7 +48,7 @@ export default function App() {
     document.addEventListener('mouseup', up)
   }
 
-  if (setupDone === null) {
+  if (loading || setupDone === null) {
     return (
       <ThemeProvider>
         <div className="min-h-screen bg-(--bg) flex items-center justify-center">

@@ -1,0 +1,13 @@
+{
+  "id": "default",
+  "description": "Default capability for GrebGlob desktop app.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "fs:default",
+    "dialog:default",
+    "updater:default",
+    "process:default"
+  ]
+}

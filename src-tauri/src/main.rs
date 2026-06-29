@@ -1,0 +1,83 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod backend;
+mod updater;
+
+use std::sync::{Arc, Mutex};
+
+use tauri::Manager;
+
+struct AppState {
+    backend_port: u16,
+}
+
+fn main() {
+    let port = backend::find_free_port();
+
+    let state = Arc::new(Mutex::new(AppState { backend_port: port }));
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .manage(state.clone())
+        .setup(move |app| {
+            let data_dir = get_data_dir(app)?;
+
+            backend::start_backend(app, port, &data_dir)?;
+
+            let state = state.lock().unwrap();
+            state.backend_port = port;
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            backend::get_api_base_url,
+            backend::get_data_dir,
+            backend::open_data_dir,
+            backend::open_logs_dir,
+            backend::get_logs_dir,
+            updater::check_update,
+            updater::install_update,
+            updater::get_app_version,
+        ])
+        .on_window_event(|app, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let state = state.lock().unwrap();
+                let port = state.backend_port;
+                drop(state);
+
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let url = format!("http://127.0.0.1:{}", port);
+                    if let Ok(client) = reqwest::Client::new()
+                        .post(format!("{}/api/shutdown", url))
+                        .send()
+                        .await
+                    {
+                        let _ = client;
+                    }
+                    let _ = app_handle.exit(0);
+                });
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running GrebGlob");
+}
+
+fn get_data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    let data_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("GrebGlob");
+
+    let data_dir_str = data_dir.to_string_lossy();
+    std::env::set_var("GREBGLOB_DATA_DIR", &data_dir_str);
+
+    if !data_dir.exists() {
+        let _ = std::fs::create_dir_all(&data_dir);
+    }
+
+    data_dir
+}
