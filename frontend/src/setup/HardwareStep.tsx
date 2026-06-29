@@ -1,11 +1,12 @@
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, ShieldCheck } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { StepCounter } from '../components/ui/StepCounter'
-import type { HardwareInfo } from '../lib/api'
+import type { HardwareInfo, ManagedPlan } from '../lib/api'
 
 interface HardwareStepProps {
   hardware: HardwareInfo | null
   done: boolean
+  plan: ManagedPlan | null
   onNext: () => void
   onBack: () => void
 }
@@ -17,12 +18,46 @@ function HardwareRow({ label, value, revealed, index }: { label: string; value: 
       style={{ opacity: revealed ? 1 : 0.4, transitionDelay: `${index * 120}ms` }}
     >
       <span className="text-(--ink-muted)">{label}</span>
-      <span className="font-medium text-(--ink)">{revealed ? value : 'Reading…'}</span>
+      <span className="font-medium text-(--ink)">{revealed ? value : '…'}</span>
     </div>
   )
 }
 
-export function HardwareStep({ hardware, done, onNext, onBack }: HardwareStepProps) {
+function PlanPreview({ plan }: { plan: ManagedPlan }) {
+  if (!plan) return null
+  const isReject = plan.path === 'reject'
+  const iconMap: Record<string, string> = {
+    gpu: 'GPU',
+    apple: 'Apple',
+    cpu_only: 'CPU',
+    reject: 'BYO',
+  }
+  const icon = iconMap[plan.path] || '—'
+
+  return (
+    <div className="mt-4 p-3 rounded-lg border border-(--border) bg-(--surface-2)">
+      <div className="flex items-center justify-between text-[12px]">
+        <span className="text-(--ink-muted)">Detected plan</span>
+        <span className="font-medium text-(--ink) flex items-center gap-1">
+          <ShieldCheck className="w-3.5 h-3.5 text-(--accent)" />
+          {plan.plan_id || icon}
+        </span>
+      </div>
+      {!isReject && plan.orchestrator && (
+        <div className="mt-1 text-[12px] text-(--ink-muted)">
+          {plan.orchestrator.model} {plan.orchestrator.quant} · {plan.helper_count} helpers
+        </div>
+      )}
+      {isReject && (
+        <div className="mt-1 text-[12px] text-red-600 dark:text-red-400">
+          Does not qualify for managed local setup
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function HardwareStep({ hardware, done, plan, onNext, onBack }: HardwareStepProps) {
   const rows = hardware
     ? [
         { key: 'cpu', label: 'Processor', value: hardware.cpu },
@@ -50,6 +85,10 @@ export function HardwareStep({ hardware, done, onNext, onBack }: HardwareStepPro
           <HardwareRow key={r.key} label={r.label} value={r.value} revealed={done} index={i} />
         ))}
       </div>
+
+      {done && plan && (
+        <PlanPreview plan={plan} />
+      )}
 
       {!done && (
         <div className="mt-5 flex items-center gap-2 text-[13px] text-(--ink-muted)">

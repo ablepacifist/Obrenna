@@ -17,12 +17,12 @@ export function DownloadStep({ models, progress, done, onFinish, onBack }: Downl
     <div>
       <StepCounter current={3} total={3} />
       <h2 className="mt-3 text-[22px] font-semibold tracking-tight text-(--ink)">
-        {done ? "You're ready" : 'Downloading models'}
+        {done ? 'You\'re ready' : 'Preparing your setup'}
       </h2>
       <p className="mt-2 text-[14px] text-(--ink-muted) leading-relaxed">
         {done
           ? 'All models are on your machine. Everything runs locally from here.'
-          : 'This runs in the background. The downloads will finish while you work.'}
+          : 'This runs in the background. Preparing models for your detected hardware.'}
       </p>
 
       <div className="mt-8 space-y-4">
@@ -43,6 +43,11 @@ export function DownloadStep({ models, progress, done, onFinish, onBack }: Downl
             </div>
           )
         })}
+        {selected.length === 0 && (
+          <div className="p-4 text-[13px] text-(--ink-muted) rounded-xl border border-(--border) bg-(--surface-2)">
+            No models to download for this configuration.
+          </div>
+        )}
       </div>
 
       <div className="mt-8 flex items-center justify-between">

@@ -31,6 +31,7 @@ export type AppSettings = {
   setup_mode: 'managed' | 'byo'
   theme: 'light' | 'dark' | 'system'
   active_models: string[]
+  managed_plan: Record<string, unknown>
 }
 
 export const getModelEndpoint = () => req<ModelEndpointConfig>('GET', '/api/settings/model-endpoint')
@@ -62,6 +63,41 @@ export type CatalogModel = {
   note: string
 }
 export const getModelCatalog = () => req<CatalogModel[]>('GET', '/api/models/catalog')
+
+// ── managed setup plan -------------------------------------------------------
+export type ModelRef = {
+  model: string
+  quant: string
+  device: string
+  ctx_min?: number
+  ctx_max?: number
+}
+
+export type ManagedPlan = {
+  path: 'apple' | 'gpu' | 'cpu_only' | 'reject'
+  plan_id?: string
+  plan_rank?: number
+  ctx?: number
+  helper_count: number
+  fingerprint_hash: string
+  runtime_priority: string[]
+  runtime_forbidden: string[]
+  required_launch_flags: string[]
+  recommended_setup_mode: 'managed' | 'byo'
+  action: string
+  reason?: string | null
+  detection_warnings: string[]
+  orchestrator: ModelRef | null
+  summarizer: ModelRef | null
+  utility: ModelRef | null
+  optional_orchestrator?: Record<string, unknown> | null
+  validation_stubbed: boolean
+}
+
+export type ConfirmPlanResponse = { confirmed: boolean; plan: ManagedPlan }
+
+export const getManagedPlan = () => req<ManagedPlan>('GET', '/api/setup/managed-plan')
+export const confirmManagedPlan = () => req<ConfirmPlanResponse>('POST', '/api/setup/managed-plan/confirm')
 
 // ── files ─────────────────────────────────────────────────────────────────────
 export type FileDTO = {
