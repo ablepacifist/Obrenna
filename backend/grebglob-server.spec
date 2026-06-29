@@ -1,0 +1,97 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+"""PyInstaller spec for GrebGlob backend."""
+
+import os
+import sys
+
+from PyInstaller.utils.hooks import collect_all
+
+block_cipher = None
+
+# Collect all data files from backend/app
+a = Analysis(
+    ['desktop_server.py'],
+    pathex=[],
+    binaries=[],
+    datas=[
+        ('app/services/hardware_catalog.json', 'app/services'),
+    ],
+    hiddenimports=[
+        'playwright',
+        'playwright.sync_api',
+        'langchain',
+        'langchain_core',
+        'langgraph',
+        'langgraph.graph',
+        'langgraph.checkpoint.memory',
+        'fastapi',
+        'uvicorn',
+        'sqlalchemy',
+        'sqlalchemy.orm',
+        'sqlalchemy.ext.asyncio',
+        'pandas',
+        'pydantic',
+        'jinja2',
+        'httpx',
+        'psutil',
+        'app',
+        'app.routers',
+        'app.routers.health',
+        'app.routers.settings',
+        'app.routers.files',
+        'app.routers.artifacts',
+        'app.routers.chat',
+        'app.routers.system',
+        'app.routers.models',
+        'app.routers.chats',
+        'app.routers.setup',
+        'app.model_runtime',
+        'app.model_runtime.client',
+        'app.model_runtime.config',
+        'app.schemas',
+        'app.schemas.api',
+        'app.services',
+        'app.services.hardware',
+        'app.services.hardware_resolver',
+        'app.services.hardware_catalog',
+        'app.services.pdf_export',
+        'app.services.storage',
+        'app.services.summarize',
+        'app.services.dashboard_builder',
+        'app.services.csv_profiler',
+        'app.services.model_catalog',
+        'app.graphs',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.files,
+    a.datas,
+    [],
+    name='grebglob-server',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

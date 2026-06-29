@@ -6,6 +6,7 @@ import { ModelsSettings } from './ModelsSettings'
 import { SetupSettings } from './SetupSettings'
 import { AppearanceSettings } from './AppearanceSettings'
 import { PrivacySettings } from './PrivacySettings'
+import { UpdateSettings } from './UpdateSettings'
 
 interface SettingsViewProps {
   onClose: () => void
@@ -15,6 +16,7 @@ interface SettingsViewProps {
 const TABS = [
   { id: 'models', label: 'Models' },
   { id: 'setup', label: 'Setup' },
+  { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'privacy', label: 'Privacy' },
 ] as const
@@ -47,6 +49,7 @@ export function SettingsView({ onClose, onRerunSetup }: SettingsViewProps) {
         <div className="flex-1 overflow-y-auto p-6">
           {tab === 'models' && <ModelsSettings />}
           {tab === 'setup' && <SetupSettings onRerunSetup={onRerunSetup} />}
+          {tab === 'updates' && <UpdateSettings />}
           {tab === 'appearance' && <AppearanceSettings />}
           {tab === 'privacy' && <PrivacySettings />}
         </div>

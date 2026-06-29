@@ -1,7 +1,8 @@
-import { RefreshCw } from 'lucide-react'
+import { FolderOpen, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { getAppSettings } from '../../lib/api'
 import { Button } from '../ui/Button'
+import { openLogsDir, isDesktop } from '../../lib/tauri'
 
 interface SetupSettingsProps {
   onRerunSetup: () => void
@@ -29,6 +30,14 @@ export function SetupSettings({ onRerunSetup }: SetupSettingsProps) {
           Switching will re-run the setup flow. Your chat history and files stay on the machine.
         </p>
       </div>
+
+      {isDesktop() && (
+        <div className="mt-5 pt-4 border-t border-(--border)">
+          <Button variant="ghost" onClick={() => openLogsDir().catch(() => {})}>
+            <FolderOpen className="w-3.5 h-3.5" /> Open logs folder
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

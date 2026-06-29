@@ -2,9 +2,11 @@ import { ArrowRight, Cpu, Server } from 'lucide-react'
 
 interface WelcomeStepProps {
   onChoose: (path: 'managed' | 'byo') => void
+  isDesktop?: boolean
+  ollamaFound?: boolean | null
 }
 
-export function WelcomeStep({ onChoose }: WelcomeStepProps) {
+export function WelcomeStep({ onChoose, isDesktop, ollamaFound }: WelcomeStepProps) {
   return (
     <div>
       <h1 className="text-[28px] font-semibold tracking-tight text-(--ink) leading-tight">
@@ -28,7 +30,9 @@ export function WelcomeStep({ onChoose }: WelcomeStepProps) {
               <div>
                 <div className="text-[15px] font-medium text-(--ink)">Set it up for me</div>
                 <div className="mt-1 text-[13px] text-(--ink-muted) leading-relaxed">
-                  We'll check what your machine can handle and install the right models automatically.
+                  {isDesktop
+                    ? 'We\'ll check your hardware and set up the right models locally.'
+                    : 'We\'ll check what your machine can handle and install the right models automatically.'}
                 </div>
               </div>
             </div>
