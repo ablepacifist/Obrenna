@@ -1,4 +1,4 @@
-/** Runtime configuration for GrebGlob.
+/** Runtime configuration for Obrenna.
 
 Resolves the API base URL at runtime:
 - In Tauri: calls `get_api_base_url` command
@@ -21,8 +21,8 @@ async function resolveApiUrl(): Promise<string> {
 
   if (typeof window !== 'undefined' && (window as any).__TAURI__) {
     try {
-      const { get_api_base_url } = await import('@tauri-apps/api/core')
-      const info: { base_url: string } = await get_api_base_url()
+      const { invoke } = await import('@tauri-apps/api/core')
+      const info: { base_url: string } = await invoke('get_api_base_url')
       return info.base_url
     } catch {
       return ''

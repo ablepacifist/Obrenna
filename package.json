@@ -1,5 +1,5 @@
 {
-  "name": "grebglob-workspace",
+  "name": "obrenna-workspace",
   "version": "0.1.0",
   "private": true,
   "description": "Local-first AI artifact workspace — monorepo root (codegen + convenience scripts)",

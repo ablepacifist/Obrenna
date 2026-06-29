@@ -47,14 +47,14 @@ jobs:
       - name: Build backend executable
         working-directory: backend
         run: |
-          pyinstaller grebglob-server.spec --clean
+          pyinstaller obrenna-server.spec --clean
         shell: bash
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:
           name: backend-${{ matrix.platform }}
-          path: dist/grebglob-server${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
+          path: dist/obrenna-server${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
           retention-days: 1
 
   build-tauri:
@@ -83,7 +83,7 @@ jobs:
           path: src-tauri/resources/backend
 
       - name: Make backend executable
-        run: chmod +x src-tauri/resources/backend/grebglob-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }}
+        run: chmod +x src-tauri/resources/backend/obrenna-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }}
         shell: bash
 
       - name: Install Node.js
@@ -116,14 +116,14 @@ jobs:
       - name: Rename backend for upload
         run: |
           mkdir -p release-assets
-          cp src-tauri/resources/backend/grebglob-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }} release-assets/grebglob-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }}
+          cp src-tauri/resources/backend/obrenna-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }} release-assets/obrenna-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }}
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            release-assets/grebglob-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }}
+            release-assets/obrenna-server${{ matrix.platform.os_name == 'windows' && '.exe' || '' }}
             src-tauri/target/${{ matrix.platform.target }}/release/bundle/**/*.exe
             src-tauri/target/${{ matrix.platform.target }}/release/bundle/**/*.msi
             src-tauri/target/${{ matrix.platform.target }}/release/bundle/**/*.dmg

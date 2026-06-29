@@ -64,16 +64,14 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running GrebGlob");
+        .expect("error while running Obrenna");
 }
 
 fn get_data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
-    let data_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("GrebGlob");
+    let data_dir = backend::migrate_data_dir();
 
     let data_dir_str = data_dir.to_string_lossy();
-    std::env::set_var("GREBGLOB_DATA_DIR", &data_dir_str);
+    std::env::set_var("OBRENNA_DATA_DIR", &data_dir_str);
 
     if !data_dir.exists() {
         let _ = std::fs::create_dir_all(&data_dir);

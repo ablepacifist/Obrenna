@@ -1,12 +1,12 @@
 [package]
-name = "grebglob"
+name = "obrenna"
 version = "0.1.0"
-description = "GrebGlob Desktop"
-authors = ["GrebGlob"]
+description = "Obrenna Desktop"
+authors = ["Obrenna"]
 edition = "2021"
 
 [lib]
-name = "grebglob_lib"
+name = "obrenna_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

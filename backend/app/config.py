@@ -6,7 +6,7 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-DATA_DIR = Path(os.getenv("GREBGLOB_DATA_DIR", str(BACKEND_DIR / "data"))).resolve()
+DATA_DIR = Path(os.getenv("OBRENNA_DATA_DIR", os.getenv("GREBGLOB_DATA_DIR", str(BACKEND_DIR / "data")))).resolve()
 UPLOADS_DIR = DATA_DIR / "uploads"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
 DB_PATH = DATA_DIR / "app.db"

@@ -1,7 +1,7 @@
 {
-  "productName": "GrebGlob",
+  "productName": "Obrenna",
   "version": "0.1.0",
-  "identifier": "com.grebglob.app",
+  "identifier": "com.obrenna.app",
   "build": {
     "beforeDevCommand": "npm --prefix frontend run dev",
     "beforeBuildCommand": "npm --prefix frontend run build",
@@ -12,7 +12,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "GrebGlob",
+        "title": "Obrenna",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -43,7 +43,7 @@
         "installerIcon": "icons/icon.ico",
         "headerImage": "icons/header.bmp",
         "sidebarImage": "icons/sidebar.bmp",
-        "licenseUrl": "https://github.com/GrebGlob/grebglob/blob/main/LICENSE",
+        "licenseUrl": "https://github.com/Obrenna/obrenna/blob/main/LICENSE",
         "languages": [
           "English",
           "SimplifiedChinese",
@@ -70,7 +70,7 @@
       "active": false,
       "pubkey": "",
       "endpoints": [
-        "https://github.com/GrebGlob/grebglob/releases/latest/download/latest.json"
+        "https://github.com/Obrenna/obrenna/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

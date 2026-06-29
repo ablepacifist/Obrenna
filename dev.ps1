@@ -1,9 +1,9 @@
-# GrebGlob dev launcher — starts backend (FastAPI) and frontend (Vite) concurrently.
+# Obrenna dev launcher — starts backend (FastAPI) and frontend (Vite) concurrently.
 # Usage: .\dev.ps1
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "Starting GrebGlob in dev mode..." -ForegroundColor Cyan
+Write-Host "Starting Obrenna in dev mode..." -ForegroundColor Cyan
 
 # Start backend
 $backend = Start-Process powershell -ArgumentList @(

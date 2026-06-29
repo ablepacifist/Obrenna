@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-"""PyInstaller spec for GrebGlob backend."""
+"""PyInstaller spec for Obrenna backend."""
 
 import os
 import sys
@@ -61,6 +61,10 @@ a = Analysis(
         'app.services.dashboard_builder',
         'app.services.csv_profiler',
         'app.services.model_catalog',
+        'app.services.migrations',
+        'app.services.embeddings',
+        'app.services.vector_store',
+        'app.services.memory',
         'app.graphs',
     ],
     hookspath=[],
@@ -82,7 +86,7 @@ exe = EXE(
     a.files,
     a.datas,
     [],
-    name='grebglob-server',
+    name='obrenna-server',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

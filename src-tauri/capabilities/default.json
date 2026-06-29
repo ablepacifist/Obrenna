@@ -1,6 +1,6 @@
 {
   "id": "default",
-  "description": "Default capability for GrebGlob desktop app.",
+  "description": "Default capability for Obrenna desktop app.",
   "windows": ["main"],
   "permissions": [
     "core:default",

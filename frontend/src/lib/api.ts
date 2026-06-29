@@ -1,4 +1,4 @@
-/** Typed fetch client for the GrebGlob backend. */
+/** Typed fetch client for the Obrenna backend. */
 
 import { getConfig } from './config'
 
@@ -150,7 +150,7 @@ export type ChatMessageDTO = {
   files: { name: string; size: number }[]
   created_at: string
 }
-export type ChatResponse = { chat_id: string; message: ChatMessageDTO }
+export type ChatResponse = { chat_id: string; message: ChatMessageDTO; memory_events?: MemoryEvent[] }
 export type ChatDTO = { id: string; title: string; folder_id?: string; created_at: string; updated_at: string }
 export type ChatDetailDTO = ChatDTO & { messages: ChatMessageDTO[] }
 
@@ -172,3 +172,28 @@ export const listFolders = () => req<FolderDTO[]>('GET', '/api/folders')
 export const createFolder = (name?: string) => req<FolderDTO>('POST', '/api/folders', { name: name ?? 'New folder' })
 export const renameFolder = (id: string, name: string) => req<FolderDTO>('PATCH', `/api/folders/${id}`, { name })
 export const deleteFolder = (id: string) => req<void>('DELETE', `/api/folders/${id}`)
+
+// ── memory ────────────────────────────────────────────────────────────────────
+export type MemoryFactDTO = {
+  id: string
+  fact_text: string
+  source_chat_id?: string | null
+  user_locked: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type MemoryEvent = {
+  type: string
+  fact_id?: string
+  text?: string
+  count?: number
+}
+
+export const getMemoryFacts = () => req<MemoryFactDTO[]>('GET', '/api/memory/facts')
+export const createMemoryFact = (fact_text: string) =>
+  req<MemoryFactDTO>('POST', '/api/memory/facts', { fact_text })
+export const updateMemoryFact = (id: string, fact_text: string) =>
+  req<MemoryFactDTO>('PATCH', `/api/memory/facts/${id}`, { fact_text })
+export const deleteMemoryFact = (id: string) =>
+  req<{ deleted: boolean; fact_id: string }>('DELETE', `/api/memory/facts/${id}`)

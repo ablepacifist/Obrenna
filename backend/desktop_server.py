@@ -1,28 +1,38 @@
-"""GrebGlob backend desktop launcher.
+"""Obrenna backend desktop launcher.
 
 Starts the FastAPI app on a specific port for the Tauri desktop shell.
-Must be run with GREBGLOB_DATA_DIR and GREBGLOB_PORT set.
+Must be run with OBRENNA_DATA_DIR and OBRENNA_PORT set.
 """
 import os
 import sys
 
+# Support old GREBGLOB_* env vars as fallback for backwards compatibility
+for old, new in [
+    ("GREBGLOB_DATA_DIR", "OBRENNA_DATA_DIR"),
+    ("GREBGLOB_PORT", "OBRENNA_PORT"),
+    ("GREBGLOB_HOST", "OBRENNA_HOST"),
+    ("GREBGLOB_DESKTOP", "OBRENNA_DESKTOP"),
+]:
+    if new not in os.environ and old in os.environ:
+        os.environ[new] = os.environ[old]
+
 # Ensure data dir is set before any imports that trigger config/db initialization
-if "GREBGLOB_DATA_DIR" not in os.environ:
+if "OBRENNA_DATA_DIR" not in os.environ:
     data_dir = os.path.join(
         os.path.expanduser("~"),
         "AppData",
         "Roaming",
-        "GrebGlob" if sys.platform == "win32" else "GrebGlob",
+        "Obrenna" if sys.platform == "win32" else "Obrenna",
     )
-    os.environ["GREBGLOB_DATA_DIR"] = data_dir
+    os.environ["OBRENNA_DATA_DIR"] = data_dir
 
 import uvicorn
 
 from main import app  # noqa: E402
 
 if __name__ == "__main__":
-    host = os.getenv("GREBGLOB_HOST", "127.0.0.1")
-    port = int(os.getenv("GREBGLOB_PORT", "8000"))
+    host = os.getenv("OBRENNA_HOST", "127.0.0.1")
+    port = int(os.getenv("OBRENNA_PORT", "8000"))
 
     uvicorn.run(
         "app.main:app",

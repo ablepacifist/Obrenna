@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Code generation for the GrebGlob workspace.
+ * Code generation for the Obrenna workspace.
  *
  *  shared/artifact-schema.json  (single source of truth)
  *     ├─ json-schema-to-typescript ─► frontend/src/lib/types/artifact.ts

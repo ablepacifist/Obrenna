@@ -58,7 +58,7 @@ REPORT_SPEC = {
     "created_at": "2024-01-01T00:00:00+00:00",
     "spec": {
         "prepared": "January 01, 2024",
-        "prepared_by": "GrebGlob (local)",
+        "prepared_by": "Obrenna (local)",
         "sections": [
             {
                 "heading": "Overview",

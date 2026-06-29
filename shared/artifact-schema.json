@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://grebglob.local/artifact-schema.json",
+  "$id": "https://obrenna.local/artifact-schema.json",
   "title": "Artifact",
   "description": "Canonical artifact spec. Source of truth for both the TypeScript renderers (frontend) and the Pydantic models (backend). The LLM/agent only ever emits these specs; the app renders them deterministically.",
   "oneOf": [

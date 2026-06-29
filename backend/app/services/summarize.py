@@ -113,7 +113,7 @@ def build_report_from_csv(
 
     spec = {
         "prepared": datetime.now(timezone.utc).strftime("%B %d, %Y"),
-        "prepared_by": "GrebGlob (local)",
+        "prepared_by": "Obrenna (local)",
         "sections": sections,
     }
     return _envelope("report", f"{name} report", "An auto-generated report from your file.", file_id, spec)

@@ -51,12 +51,18 @@ pub fn start_backend(app: &AppHandle, port: u16, data_dir: &PathBuf) -> Result<(
         .join("..")
         .join("resources")
         .join("backend")
-        .join("grebglob-server");
+        .join("obrenna-server");
 
     let backend_path = if backend_exe.exists() {
         backend_exe
     } else {
-        app.path().resolve("resources/backend/grebglob-server").map_err(|e| format!("resolve backend path: {}", e))?
+        // Fallback: check for old grebglob-server name for manual bundle compatibility
+        let old_path = app.path().resolve("resources/backend/grebglob-server").map_err(|e| format!("resolve backend path: {}", e))?;
+        if old_path.exists() {
+            old_path
+        } else {
+            return Err(format!("Backend executable not found at: {:?} or fallback {:?}", backend_exe, old_path));
+        }
     };
 
     if !backend_path.exists() {
@@ -68,9 +74,9 @@ pub fn start_backend(app: &AppHandle, port: u16, data_dir: &PathBuf) -> Result<(
     let api_url = format!("http://127.0.0.1:{}", port);
 
     let mut cmd = Command::new(&backend_path);
-    cmd.env("GREBGLOB_DATA_DIR", data_dir_str)
-        .env("GREBGLOB_PORT", port.to_string())
-        .env("GREBGLOB_DESKTOP", "1")
+    cmd.env("OBRENNA_DATA_DIR", data_dir_str)
+        .env("OBRENNA_PORT", port.to_string())
+        .env("OBRENNA_DESKTOP", "1")
         .current_dir(resource_dir);
 
     let child = cmd
@@ -116,20 +122,72 @@ pub fn get_api_base_url(app: AppHandle) -> Result<ApiResponse, String> {
     })
 }
 
-#[tauri::command]
-pub fn get_data_dir() -> String {
+fn get_obrenna_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("GrebGlob")
-        .to_string_lossy()
-        .to_string()
+        .join("Obrenna")
+}
+
+fn migrate_data_dir() -> PathBuf {
+    let new_dir = get_obrenna_dir();
+    let old_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("GrebGlob");
+
+    // If new dir already exists, use it
+    if new_dir.exists() {
+        return new_dir;
+    }
+
+    // If old dir exists, try to rename it to the new name
+    if old_dir.exists() {
+        // Try rename first
+        if std::fs::rename(&old_dir, &new_dir).is_ok() {
+            eprintln!("Migrated data from {:?} to {:?}", old_dir, new_dir);
+            return new_dir;
+        }
+
+        // If rename fails (e.g., cross-volume on Windows), try recursive copy
+        if std::fs::copy(&old_dir, &new_dir).is_ok()
+            || copy_dir_recursive(&old_dir, &new_dir).is_ok()
+        {
+            eprintln!("Copied data from {:?} to {:?}", old_dir, new_dir);
+            return new_dir;
+        }
+
+        eprintln!("Warning: Failed to migrate data from {:?} to {:?}", old_dir, new_dir);
+        // Fall back to old directory to avoid data loss
+        return old_dir;
+    }
+
+    // Neither exists — return new dir (will be created on demand)
+    new_dir
+}
+
+fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_data_dir() -> String {
+    migrate_data_dir().to_string_lossy().to_string()
 }
 
 #[tauri::command]
 pub fn open_data_dir() -> Result<(), String> {
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("GrebGlob");
+    let dir = migrate_data_dir();
 
     if !dir.exists() {
         let _ = std::fs::create_dir_all(&dir);
@@ -161,10 +219,7 @@ pub fn open_data_dir() -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_logs_dir() -> Result<(), String> {
-    let log_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("GrebGlob")
-        .join("logs");
+    let log_dir = get_obrenna_dir().join("logs");
 
     if !log_dir.exists() {
         let _ = std::fs::create_dir_all(&log_dir);
@@ -196,9 +251,7 @@ pub fn open_logs_dir() -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_logs_dir() -> String {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("GrebGlob")
+    get_obrenna_dir()
         .join("logs")
         .to_string_lossy()
         .to_string()

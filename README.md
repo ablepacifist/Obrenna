@@ -1,4 +1,4 @@
-# GrebGlob — local-first AI artifact workspace
+# Obrenna — local-first AI artifact workspace
 
 A downloadable private AI workspace that turns your files into polished artifacts — dashboards, PDF reports, charts, tables, and documents — using only local models. No cloud calls, no data leaving your machine.
 
@@ -126,7 +126,11 @@ POST /api/chats
 GET  /api/chats/{id}
 PATCH /api/chats/{id}
 DELETE /api/chats/{id}
-```
+ GET  /api/memory/facts
+ POST /api/memory/facts
+ PATCH /api/memory/facts/{id}
+ DELETE /api/memory/facts/{id}
+ ```
 
 Interactive docs: `http://localhost:8000/docs`
 

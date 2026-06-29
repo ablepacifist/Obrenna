@@ -1,6 +1,6 @@
 # Architecture
 
-GrebGlob is a **local-first AI artifact workspace**. It runs entirely on the user's
+Obrenna is a **local-first AI artifact workspace**. It runs entirely on the user's
 machine: files, prompts, and generated artifacts never leave the device unless the
 user explicitly shares them.
 
