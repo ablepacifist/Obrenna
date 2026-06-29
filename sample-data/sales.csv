@@ -1,0 +1,25 @@
+date,region,product,segment,sales_rep,deals,revenue,units
+2026-04-03,West,Maintenance plan,SMB,Maya,2,18400,2
+2026-04-08,East,Maintenance plan,Mid-market,Daniel,1,33700,1
+2026-04-14,West,Seasonal redesign,SMB,Noor,3,21200,5
+2026-04-19,Central,Maintenance plan,SMB,Sam,1,9800,1
+2026-04-25,East,Emergency response,Mid-market,Maya,2,41200,2
+2026-05-02,West,Maintenance plan,SMB,Daniel,1,12600,1
+2026-05-06,Central,Seasonal redesign,Enterprise,Noor,1,68400,1
+2026-05-11,East,Maintenance plan,Mid-market,Sam,2,33900,2
+2026-05-15,West,Emergency response,SMB,Maya,1,15400,1
+2026-05-20,Central,Maintenance plan,SMB,Daniel,3,28700,4
+2026-05-24,East,Seasonal redesign,Mid-market,Noor,1,24800,1
+2026-05-29,West,Maintenance plan,SMB,Sam,2,19300,2
+2026-06-02,Central,Emergency response,Enterprise,Maya,1,72300,1
+2026-06-07,East,Maintenance plan,Mid-market,Daniel,2,31400,2
+2026-06-12,West,Seasonal redesign,SMB,Noor,1,17600,2
+2026-06-16,Central,Maintenance plan,SMB,Sam,1,,1
+2026-06-21,East,Emergency response,Mid-market,Maya,2,38900,2
+2026-06-25,West,Maintenance plan,SMB,Daniel,1,11200,1
+2026-06-28,Central,Seasonal redesign,Enterprise,,1,61500,1
+2026-06-30,East,Maintenance plan,Mid-market,Noor,3,44700,3
+2026-04-11,West,Emergency response,SMB,Sam,1,14100,1
+2026-05-09,Central,Maintenance plan,SMB,Maya,2,20800,2
+2026-06-05,East,Seasonal redesign,Mid-market,Daniel,1,26300,1
+2026-06-18,West,Maintenance plan,Enterprise,Noor,1,57900,1

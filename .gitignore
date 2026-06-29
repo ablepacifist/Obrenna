@@ -1,0 +1,41 @@
+# --- Node / frontend ---
+node_modules/
+dist/
+.vite/
+*.local
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# --- App data (local-first, never committed) ---
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Generated codegen artifacts (regenerate with `npm run codegen`) ---
+# (kept out of ignore intentionally: generated TS/Pydantic ARE committed so apps build without codegen)
+frontend/src/lib/types/openapi.json
+
+# --- Playwright ---
+playwright-report/
+test-results/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

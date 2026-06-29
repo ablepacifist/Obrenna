@@ -1,0 +1,17 @@
+{
+  "name": "grebglob-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first AI artifact workspace — monorepo root (codegen + convenience scripts)",
+  "type": "module",
+  "scripts": {
+    "codegen": "node scripts/codegen.mjs",
+    "codegen:types": "json2ts -i shared/artifact-schema.json -o frontend/src/lib/types/artifact.ts --additionalProperties false",
+    "dev:web": "npm --prefix frontend run dev",
+    "dev:api": "echo \"Run the backend from backend/ — see README\""
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "^15.0.4",
+    "openapi-typescript": "^7.4.4"
+  }
+}

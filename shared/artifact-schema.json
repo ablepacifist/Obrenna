@@ -1,0 +1,213 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://grebglob.local/artifact-schema.json",
+  "title": "Artifact",
+  "description": "Canonical artifact spec. Source of truth for both the TypeScript renderers (frontend) and the Pydantic models (backend). The LLM/agent only ever emits these specs; the app renders them deterministically.",
+  "oneOf": [
+    { "$ref": "#/$defs/DashboardArtifact" },
+    { "$ref": "#/$defs/ReportArtifact" },
+    { "$ref": "#/$defs/ChartArtifact" },
+    { "$ref": "#/$defs/TableArtifact" },
+    { "$ref": "#/$defs/DocumentArtifact" }
+  ],
+  "$defs": {
+    "ArtifactType": {
+      "title": "ArtifactType",
+      "type": "string",
+      "enum": ["dashboard", "report", "chart", "table", "document"]
+    },
+    "Scalar": {
+      "title": "Scalar",
+      "type": ["string", "number"]
+    },
+    "Card": {
+      "title": "Card",
+      "description": "A single headline metric / KPI card.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value"],
+      "properties": {
+        "label": { "type": "string" },
+        "value": { "$ref": "#/$defs/Scalar" },
+        "delta": { "type": "string", "description": "e.g. '+11% vs Q1'" },
+        "trend": { "type": "string", "enum": ["up", "down", "flat"] },
+        "description": { "type": "string" }
+      }
+    },
+    "Series": {
+      "title": "Series",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "data"],
+      "properties": {
+        "name": { "type": "string" },
+        "data": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "Chart": {
+      "title": "Chart",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "x", "series"],
+      "properties": {
+        "type": { "type": "string", "enum": ["bar", "line", "area", "pie"] },
+        "title": { "type": "string" },
+        "x": { "type": "array", "items": { "type": "string" } },
+        "series": { "type": "array", "items": { "$ref": "#/$defs/Series" } },
+        "stacked": { "type": "boolean" },
+        "note": { "type": "string" }
+      }
+    },
+    "Table": {
+      "title": "Table",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "columns", "rows"],
+      "properties": {
+        "title": { "type": "string" },
+        "columns": { "type": "array", "items": { "type": "string" } },
+        "rows": {
+          "type": "array",
+          "items": { "type": "array", "items": { "$ref": "#/$defs/Scalar" } }
+        }
+      }
+    },
+    "ReportSection": {
+      "title": "ReportSection",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["heading", "paragraphs"],
+      "properties": {
+        "heading": { "type": "string" },
+        "paragraphs": { "type": "array", "items": { "type": "string" } },
+        "table": { "$ref": "#/$defs/Table" }
+      }
+    },
+    "DashboardSpec": {
+      "title": "DashboardSpec",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cards", "charts", "tables", "insights"],
+      "properties": {
+        "cards": { "type": "array", "items": { "$ref": "#/$defs/Card" } },
+        "charts": { "type": "array", "items": { "$ref": "#/$defs/Chart" } },
+        "tables": { "type": "array", "items": { "$ref": "#/$defs/Table" } },
+        "insights": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ReportSpec": {
+      "title": "ReportSpec",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sections"],
+      "properties": {
+        "prepared": { "type": "string" },
+        "prepared_for": { "type": "string" },
+        "prepared_by": { "type": "string" },
+        "sections": { "type": "array", "items": { "$ref": "#/$defs/ReportSection" } }
+      }
+    },
+    "ChartSpec": {
+      "title": "ChartSpec",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chart"],
+      "properties": {
+        "chart": { "$ref": "#/$defs/Chart" }
+      }
+    },
+    "TableSpec": {
+      "title": "TableSpec",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table"],
+      "properties": {
+        "table": { "$ref": "#/$defs/Table" }
+      }
+    },
+    "DocumentSpec": {
+      "title": "DocumentSpec",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["markdown"],
+      "properties": {
+        "markdown": { "type": "string" }
+      }
+    },
+    "DashboardArtifact": {
+      "title": "DashboardArtifact",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifact_type", "title", "created_at", "spec"],
+      "properties": {
+        "id": { "type": "string" },
+        "artifact_type": { "type": "string", "const": "dashboard" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_file_id": { "type": "string" },
+        "spec": { "$ref": "#/$defs/DashboardSpec" }
+      }
+    },
+    "ReportArtifact": {
+      "title": "ReportArtifact",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifact_type", "title", "created_at", "spec"],
+      "properties": {
+        "id": { "type": "string" },
+        "artifact_type": { "type": "string", "const": "report" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_file_id": { "type": "string" },
+        "spec": { "$ref": "#/$defs/ReportSpec" }
+      }
+    },
+    "ChartArtifact": {
+      "title": "ChartArtifact",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifact_type", "title", "created_at", "spec"],
+      "properties": {
+        "id": { "type": "string" },
+        "artifact_type": { "type": "string", "const": "chart" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_file_id": { "type": "string" },
+        "spec": { "$ref": "#/$defs/ChartSpec" }
+      }
+    },
+    "TableArtifact": {
+      "title": "TableArtifact",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifact_type", "title", "created_at", "spec"],
+      "properties": {
+        "id": { "type": "string" },
+        "artifact_type": { "type": "string", "const": "table" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_file_id": { "type": "string" },
+        "spec": { "$ref": "#/$defs/TableSpec" }
+      }
+    },
+    "DocumentArtifact": {
+      "title": "DocumentArtifact",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "artifact_type", "title", "created_at", "spec"],
+      "properties": {
+        "id": { "type": "string" },
+        "artifact_type": { "type": "string", "const": "document" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "created_at": { "type": "string" },
+        "source_file_id": { "type": "string" },
+        "spec": { "$ref": "#/$defs/DocumentSpec" }
+      }
+    }
+  }
+}

@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --bg: #FAF9F7;
+  --surface: #FFFFFF;
+  --surface-2: #F4F2EE;
+  --border: #E8E5E0;
+  --border-strong: #D4D0C9;
+  --ink: #1F1D1B;
+  --ink-muted: #6B6762;
+  --ink-faint: #A39E96;
+  --accent: #2D5A5F;
+  --accent-ink: #FFFFFF;
+  --ok: #4A7A52;
+  --warn: #A67535;
+  --err: #A5453A;
+  --shadow: 0 1px 2px rgba(28,25,22,.04), 0 8px 24px -8px rgba(28,25,22,.10);
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
+}
+
+.dark {
+  --bg: #1A1917;
+  --surface: #232220;
+  --surface-2: #2A2926;
+  --border: #35332F;
+  --border-strong: #45423D;
+  --ink: #EDEAE5;
+  --ink-muted: #8A867F;
+  --ink-faint: #605C56;
+  --accent: #6FB0B5;
+  --accent-ink: #1A1917;
+  --ok: #7AAE82;
+  --warn: #C99A5C;
+  --err: #C87064;
+}
+
+/* ── Reset ──────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Motion ──────────────────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
