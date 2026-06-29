@@ -147,6 +147,7 @@ class ChatMessageDTO(BaseModel):
 class ChatResponse(BaseModel):
     chat_id: str
     message: ChatMessageDTO
+    memory_events: list[dict] = []
 
 
 class ChatDTO(BaseModel):
@@ -184,3 +185,22 @@ class UpdateChatRequest(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None
     unfile: bool = False
+
+
+# --- memory -------------------------------------------------------------------
+
+class MemoryFactDTO(BaseModel):
+    id: str
+    fact_text: str
+    source_chat_id: Optional[str] = None
+    user_locked: bool = False
+    created_at: str
+    updated_at: str
+
+
+class MemoryFactCreateRequest(BaseModel):
+    fact_text: str = Field(..., min_length=1, max_length=1000)
+
+
+class MemoryFactUpdateRequest(BaseModel):
+    fact_text: str = Field(..., min_length=1, max_length=1000)

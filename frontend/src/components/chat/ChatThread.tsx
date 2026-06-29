@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChatDetailDTO } from '../../lib/api'
+import type { ChatDetailDTO, ChatResponse } from '../../lib/api'
 import { getChat, sendMessage, uploadFile } from '../../lib/api'
 import { Composer } from './Composer'
 import { EmptyState } from './EmptyState'
 import { MessageBubble } from './MessageBubble'
+import { useToast } from '../ui/Toast'
 
 interface ChatThreadProps {
   chatId: string | null
@@ -11,6 +12,7 @@ interface ChatThreadProps {
 }
 
 export function ChatThread({ chatId, onOpenArtifact }: ChatThreadProps) {
+  const { addToast } = useToast()
   const [chat, setChat] = useState<ChatDetailDTO | null>(null)
   const [sending, setSending] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -33,11 +35,19 @@ export function ChatThread({ chatId, onOpenArtifact }: ChatThreadProps) {
         const dto = await uploadFile(f)
         uploadedIds.push(dto.id)
       }
-      const resp = await sendMessage({
+      const resp: ChatResponse = await sendMessage({
         chat_id: chatId ?? undefined,
         message: text,
         file_ids: uploadedIds,
       })
+      // Show memory toast for relevant events
+      if (resp.memory_events && resp.memory_events.length > 0) {
+        for (const ev of resp.memory_events) {
+          if (ev.type === 'MEMORY_ACTIVE') {
+            addToast(`Added to memory (${ev.count} memories)`, 'success', 2500)
+          }
+        }
+      }
       // Reload chat to get fresh messages including the new assistant reply.
       const updated = await getChat(resp.chat_id)
       setChat(updated)

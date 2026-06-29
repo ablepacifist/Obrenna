@@ -1,4 +1,4 @@
-import { CheckCircle2, Loader2, Update } from 'lucide-react'
+import { CheckCircle2, Loader2, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Button } from '../ui/Button'
 import { checkUpdate, getAppVersion, installUpdate } from '../../lib/tauri'
@@ -64,7 +64,7 @@ export function UpdateSettings() {
       {updateAvailable && latestVersion && (
         <div className="mt-4 p-4 bg-(--surface) border border-(--border) rounded-lg">
           <div className="flex items-center gap-2 text-[14px] font-medium text-(--ink)">
-            <Update className="w-4 h-4 text-(--accent)" />
+            <RefreshCw className="w-4 h-4 text-(--accent)" />
             Update available
           </div>
           <div className="mt-2 text-[13px] text-(--ink-muted)">

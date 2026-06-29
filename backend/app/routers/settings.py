@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import AppSettings, ModelEndpoint
-from ..model_runtime.client import test_connection
+from ..model_runtime.client import test_connection_sync
 from ..model_runtime.config import RuntimeConfig
 from ..schemas.api import (
     AppSettingsDTO,
@@ -52,7 +52,7 @@ def test_model_endpoint(payload: ModelEndpointConfig, db: Session = Depends(get_
         api_key=payload.api_key or "",
         models=payload.models or {},
     )
-    result = test_connection(cfg)
+    result = test_connection_sync(cfg)
     return TestConnectionResult(**result)
 
 

@@ -3,10 +3,12 @@ import { ArrowRight, Cpu, Server } from 'lucide-react'
 interface WelcomeStepProps {
   onChoose: (path: 'managed' | 'byo') => void
   isDesktop?: boolean
-  ollamaFound?: boolean | null
 }
 
-export function WelcomeStep({ onChoose, isDesktop, ollamaFound }: WelcomeStepProps) {
+export function WelcomeStep({ onChoose, isDesktop }: WelcomeStepProps) {
+  // Use them to avoid unused variable errors if they are needed for logic but were marked unused
+  // Actually the error said they were never read, but line 33 clearly reads isDesktop.
+  // Maybe I misread the error or the compiler was confused.
   return (
     <div>
       <h1 className="text-[28px] font-semibold tracking-tight text-(--ink) leading-tight">

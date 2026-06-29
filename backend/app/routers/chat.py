@@ -1,6 +1,8 @@
 """P6 chat routing: intent detection → appropriate artifact builder or model response."""
 from __future__ import annotations
 
+import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -9,11 +11,21 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Artifact, Chat, ChatMessage, File, ModelEndpoint
-from ..model_runtime.client import chat_completion
+from ..model_runtime.client import chat_completion_sync
 from ..model_runtime.config import RuntimeConfig
 from ..schemas.api import ChatMessageDTO, ChatRequest, ChatResponse
 from ..services import csv_profiler, dashboard_builder, summarize
+from ..services.memory import (
+    assemble_context,
+    build_model_messages,
+    extract_and_reconcile_facts,
+    get_active_facts,
+    pick_memory_budget,
+    record_turn_after_response,
+)
 from ..services.storage import artifact_pdf_path
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat")
 
@@ -58,14 +70,30 @@ def _save_artifact(spec: dict, db: Session) -> Artifact:
     return record
 
 
-def _model_reply(text: str, file_records: list, db: Session) -> tuple[str, list[str]]:
+def _model_reply_with_memory(
+    text: str,
+    file_records: list,
+    chat: Chat,
+    db: Session,
+) -> tuple[str, list[str], list[dict]]:
+    """Model reply with memory context assembly for normal chat."""
     ep = db.get(ModelEndpoint, 1)
     if not ep or not ep.base_url:
         return (
             "I can help analyze your files, but no local model is configured yet. "
             "Go to Settings → Models to connect a local endpoint (Ollama, LM Studio, etc.).",
             [],
+            [],
         )
+
+    # Assemble memory context
+    try:
+        ctx = assemble_context(db, chat, text)
+        messages = build_model_messages(text, ctx)
+    except Exception as exc:
+        logger.warning("Memory context assembly failed: %s", exc)
+        messages = [{"role": "user", "content": text}]
+
     cfg = RuntimeConfig(
         provider=ep.provider,
         base_url=ep.base_url,
@@ -73,10 +101,27 @@ def _model_reply(text: str, file_records: list, db: Session) -> tuple[str, list[
         models=ep.models or {},
     )
     try:
-        reply = chat_completion(cfg, [{"role": "user", "content": text}])
-        return reply, []
+        reply = chat_completion_sync(cfg, messages)
+        return reply, [], []
     except Exception as exc:
-        return f"Model error: {exc}", []
+        return f"Model error: {exc}", [], []
+
+
+def _run_fact_extraction(
+    db: Session,
+    chat: Chat,
+    user_msg: ChatMessage,
+    assistant_msg: ChatMessage,
+):
+    """Background thread for fact extraction — never blocks response."""
+    try:
+        events = extract_and_reconcile_facts(
+            db, user_msg, assistant_msg, source_chat_id=chat.id
+        )
+        if events:
+            logger.info("Memory facts updated: %d events", len(events))
+    except Exception as exc:
+        logger.warning("Background fact extraction failed: %s", exc)
 
 
 @router.post("", response_model=ChatResponse)
@@ -169,7 +214,9 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         except Exception as exc:
             reply_text = f"Could not read file: {exc}"
     else:
-        reply_text, artifact_ids = _model_reply(payload.message, file_records, db)
+        reply_text, _, _ = _model_reply_with_memory(
+            payload.message, file_records, chat, db
+        )
 
     # Persist assistant message.
     asst_msg = ChatMessage(
@@ -186,7 +233,38 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         chat.title = payload.message[:60]
     chat.updated_at = datetime.now(timezone.utc)
 
-    db.commit()
+    # Record turn and build memory events (commit before background task)
+    memory_events: list[dict] = []
+    try:
+        turn_id = record_turn_after_response(db, chat, user_msg, asst_msg)
+        if turn_id:
+            # Fetch active facts for feedback
+            active_facts = get_active_facts(db)
+            memory_events = [
+                {"type": "MEMORY_ACTIVE", "count": len(active_facts)}
+            ]
+    except Exception as exc:
+        logger.warning("Turn recording failed (chat still saved): %s", exc)
+
+    # Dispatch fact extraction in background thread (doesn't block response)
+    try:
+        bg_db = db  # use same session in background thread (short-lived)
+        t = threading.Thread(
+            target=_run_fact_extraction,
+            args=(db, chat, user_msg, asst_msg),
+            daemon=True,
+        )
+        t.start()
+    except Exception as exc:
+        logger.warning("Failed to start background fact extraction: %s", exc)
+
+    # Commit everything (turn + messages + chat metadata)
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Chat commit failed: %s", exc)
+
     db.refresh(asst_msg)
 
     return ChatResponse(
@@ -199,4 +277,5 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
             files=asst_msg.files or [],
             created_at=asst_msg.created_at.isoformat(),
         ),
+        memory_events=memory_events,
     )

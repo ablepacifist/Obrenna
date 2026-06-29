@@ -5,6 +5,7 @@ at a local server.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 
 import httpx
@@ -12,6 +13,18 @@ import httpx
 from .config import RuntimeConfig
 
 DEFAULT_TIMEOUT = 30.0
+
+
+def _run(coro):
+    """Run an async coroutine in a fresh event loop (safe for sync callers)."""
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
 
 
 async def list_models(config: RuntimeConfig, timeout: float = 10.0) -> list[str]:
@@ -61,3 +74,29 @@ async def chat_completion(
         resp.raise_for_status()
         data = resp.json()
     return data["choices"][0]["message"]["content"]
+
+
+# ── sync wrappers for use from sync FastAPI routes ─────────────────────────────
+
+
+def chat_completion_sync(
+    config: RuntimeConfig,
+    messages: list[dict],
+    *,
+    model: str | None = None,
+    role: str = "main_reasoner",
+    temperature: float = 0.2,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> str:
+    """Synchronous wrapper around chat_completion for use in sync routes."""
+    return _run(
+        chat_completion(
+            config, messages, model=model, role=role,
+            temperature=temperature, timeout=timeout,
+        )
+    )
+
+
+def test_connection_sync(config: RuntimeConfig) -> dict:
+    """Synchronous wrapper around test_connection for use in sync routes."""
+    return _run(test_connection(config))

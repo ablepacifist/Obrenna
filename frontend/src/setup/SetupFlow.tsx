@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { FolderOpen, ShieldCheck } from 'lucide-react'
 import {
-  type AppSettings, type HardwareInfo, type ManagedPlan, type ModelEndpointConfig,
-  getHardware, getManagedPlan, getModelCatalog, saveAppSettings, saveModelEndpoint, testModelEndpoint,
+  type HardwareInfo, type ManagedPlan, type ModelEndpointConfig, type CatalogModel,
+  getHardware, getManagedPlan, saveAppSettings, saveModelEndpoint, testModelEndpoint,
 } from '../lib/api'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { useIsDesktop } from '../hooks/useIsDesktop'
@@ -30,10 +30,7 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   const [hardwareDone, setHardwareDone] = useState(false)
   const [plan, setPlan] = useState<ManagedPlan | null>(null)
   const [planConfirmed, setPlanConfirmed] = useState(false)
-  const [catalog] = useState(() => {
-    // Legacy catalog still used by old settings UI
-    return [] as { id: string; name: string; role: string; size: string; size_gb: number; fit: string; note: string }[]
-  })
+  const [catalog] = useState<CatalogModel[]>([])
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({})
   const [downloadDone, setDownloadDone] = useState(false)
 
@@ -155,8 +152,13 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   }
 
   const handleManagedFinish = async () => {
-    await saveAppSettings({ setup_complete: true, setup_mode: 'managed', theme: 'system', active_models: [] })
-      .catch(() => {})
+    await saveAppSettings({
+      setup_complete: true,
+      setup_mode: 'managed',
+      theme: 'system',
+      active_models: [],
+      managed_plan: {},
+    }).catch(() => {})
     onFinish()
   }
 
@@ -167,8 +169,13 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
       api_key: apiKey,
       models: { main_reasoner: roles.reasoner, summarizer: roles.summarizer, utility: roles.utility },
     }).catch(() => {})
-    await saveAppSettings({ setup_complete: true, setup_mode: 'byo', theme: 'system', active_models: [] })
-      .catch(() => {})
+    await saveAppSettings({
+      setup_complete: true,
+      setup_mode: 'byo',
+      theme: 'system',
+      active_models: [],
+      managed_plan: {},
+    }).catch(() => {})
     onFinish()
   }
 
@@ -198,7 +205,6 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
           <WelcomeStep
             onChoose={p => { setPath(p); setStep(1) }}
             isDesktop={isDesktop}
-            ollamaFound={ollamaFound}
           />
         )}
 
@@ -225,9 +231,9 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
         {step === 3 && path === 'managed' && (
           <DownloadStep
             models={plan ? [
-              { id: plan.orchestrator?.model || 'orchestrator', name: plan.orchestrator?.model || 'Orchestrator', role: 'Orchestrator', size: `${plan.orchestrator?.quant} ~2GB`, size_gb: 2, fit: 'ok', note: '' },
-              ...(plan.summarizer ? [{ id: plan.summarizer.model, name: plan.summarizer.model, role: 'Summarizer', size: `${plan.summarizer.quant} ~2GB`, size_gb: 2, fit: 'ok', note: '' }] : []),
-              ...(plan.utility ? [{ id: plan.utility.model, name: plan.utility.model, role: 'Utility', size: `${plan.utility.quant} ~1GB`, size_gb: 1, fit: 'ok', note: '' }] : []),
+              { id: plan.orchestrator?.model || 'orchestrator', name: plan.orchestrator?.model || 'Orchestrator', role: 'Orchestrator', size: `${plan.orchestrator?.quant} ~2GB`, size_gb: 2, fit: 'ok' as const, note: '' },
+              ...(plan.summarizer ? [{ id: plan.summarizer.model, name: plan.summarizer.model, role: 'Summarizer', size: `${plan.summarizer.quant} ~2GB`, size_gb: 2, fit: 'ok' as const, note: '' }] : []),
+              ...(plan.utility ? [{ id: plan.utility.model, name: plan.utility.model, role: 'Utility', size: `${plan.utility.quant} ~1GB`, size_gb: 1, fit: 'ok' as const, note: '' }] : []),
             ] : catalog}
             progress={downloadProgress}
             done={downloadDone}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ThemeProvider } from './theme/ThemeProvider'
+import { ToastProvider } from './components/ui/Toast'
 import { getAppSettings } from './lib/api'
 import { getConfig } from './lib/config'
 import { SetupFlow } from './setup/SetupFlow'
@@ -48,27 +49,32 @@ export default function App() {
     document.addEventListener('mouseup', up)
   }
 
-  if (loading || setupDone === null) {
-    return (
-      <ThemeProvider>
-        <div className="min-h-screen bg-(--bg) flex items-center justify-center">
-          <div className="text-[13px] text-(--ink-muted)">Loading…</div>
-        </div>
-      </ThemeProvider>
-    )
-  }
+ if (loading || setupDone === null) {
+     return (
+       <ThemeProvider>
+         <ToastProvider>
+           <div className="min-h-screen bg-(--bg) flex items-center justify-center">
+             <div className="text-[13px] text-(--ink-muted)">Loading…</div>
+           </div>
+         </ToastProvider>
+       </ThemeProvider>
+     )
+   }
 
-  if (!setupDone) {
-    return (
-      <ThemeProvider>
-        <SetupFlow onFinish={() => setSetupDone(true)} />
-      </ThemeProvider>
-    )
-  }
+   if (!setupDone) {
+     return (
+       <ThemeProvider>
+         <ToastProvider>
+           <SetupFlow onFinish={() => setSetupDone(true)} />
+         </ToastProvider>
+       </ThemeProvider>
+     )
+   }
 
   return (
-    <ThemeProvider>
-      <div className="h-screen w-screen flex bg-(--bg) text-(--ink) antialiased">
+     <ThemeProvider>
+       <ToastProvider>
+       <div className="h-screen w-screen flex bg-(--bg) text-(--ink) antialiased">
         <Sidebar
           activeChatId={activeChatId}
           onSelectChat={id => { setActiveChatId(id); setOpenArtifactId(null) }}
@@ -102,7 +108,8 @@ export default function App() {
             onRerunSetup={() => { setSettingsOpen(false); setSetupDone(false) }}
           />
         )}
-      </div>
-    </ThemeProvider>
-  )
+       </div>
+       </ToastProvider>
+     </ThemeProvider>
+   )
 }

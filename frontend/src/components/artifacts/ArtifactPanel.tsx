@@ -28,7 +28,8 @@ export function ArtifactPanel({ artifactId, onClose, onResizeStart }: ArtifactPa
     setExporting(true)
     try {
       await exportPdf(artifactId)
-      window.open(downloadPdfUrl(artifactId), '_blank')
+      const url = await downloadPdfUrl(artifactId)
+      window.open(url, '_blank')
     } catch {
       // silently fail — PDF may not be available
     } finally {

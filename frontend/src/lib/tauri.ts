@@ -16,7 +16,7 @@ async function ensureTauri() {
 export async function getApiBaseUrl(): Promise<string> {
   const api = await ensureTauri()
   if (!api) return ''
-  const info: { base_url: string } = await api.get_api_base_url()
+  const info: { base_url: string } = await api.invoke('get_api_base_url')
   return info.base_url
 }
 

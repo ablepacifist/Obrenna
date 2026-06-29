@@ -86,6 +86,8 @@ class Chat(Base):
     folder_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("folders.id", ondelete="SET NULL"), nullable=True
     )
+    rolling_summary: Mapped[str] = mapped_column(Text, default="")
+    summarized_upto_turn_index: Mapped[int] = mapped_column(Integer, default=-1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -93,6 +95,9 @@ class Chat(Base):
 
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="chat", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+    )
+    turns: Mapped[list["ChatTurn"]] = relationship(
+        back_populates="chat", cascade="all, delete-orphan"
     )
 
 
@@ -108,3 +113,45 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     chat: Mapped["Chat"] = relationship(back_populates="messages")
+
+
+class ChatTurn(Base):
+    """Paired turn archive for memory retrieval and vector indexing."""
+
+    __tablename__ = "chat_turns"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    chat_id: Mapped[str] = mapped_column(
+        ForeignKey("chats.id", ondelete="CASCADE"), nullable=False
+    )
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_message_id: Mapped[str] = mapped_column(
+        String, ForeignKey("chat_messages.id", ondelete="CASCADE"), nullable=False
+    )
+    assistant_message_id: Mapped[str] = mapped_column(
+        String, ForeignKey("chat_messages.id", ondelete="CASCADE"), nullable=False
+    )
+    user_text: Mapped[str] = mapped_column(Text, default="")
+    assistant_text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    chat: Mapped["Chat"] = relationship(back_populates="turns")
+
+
+class MemoryFact(Base):
+    """Local user-editable memory facts with tombstone support."""
+
+    __tablename__ = "memory_facts"
+
+    ACCOUNT_ID: str = "local-default"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    account_id: Mapped[str] = mapped_column(String, default=ACCOUNT_ID, nullable=False)
+    fact_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_chat_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    user_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )

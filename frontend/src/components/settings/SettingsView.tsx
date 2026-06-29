@@ -7,6 +7,7 @@ import { SetupSettings } from './SetupSettings'
 import { AppearanceSettings } from './AppearanceSettings'
 import { PrivacySettings } from './PrivacySettings'
 import { UpdateSettings } from './UpdateSettings'
+import { MemorySettings } from './MemorySettings'
 
 interface SettingsViewProps {
   onClose: () => void
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'setup', label: 'Setup' },
   { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' },
+  { id: 'memory', label: 'Memory' },
   { id: 'privacy', label: 'Privacy' },
 ] as const
 
@@ -51,6 +53,7 @@ export function SettingsView({ onClose, onRerunSetup }: SettingsViewProps) {
           {tab === 'setup' && <SetupSettings onRerunSetup={onRerunSetup} />}
           {tab === 'updates' && <UpdateSettings />}
           {tab === 'appearance' && <AppearanceSettings />}
+          {tab === 'memory' && <MemorySettings />}
           {tab === 'privacy' && <PrivacySettings />}
         </div>
         <div className="absolute top-3 right-3">

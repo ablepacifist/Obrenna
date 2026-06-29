@@ -1,4 +1,4 @@
-"""GrebGlob backend — FastAPI entry point."""
+"""Obrenna backend — FastAPI entry point."""
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import CORS_ORIGINS
 from app.db import init_db
-from app.routers import health, settings, files, artifacts, chat, system, models, chats, setup, shutdown
+from app.routers import health, settings, files, artifacts, chat, system, models, chats, setup, shutdown, memory
 
 
 @asynccontextmanager
@@ -15,7 +15,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GrebGlob", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Obrenna", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,3 +35,4 @@ app.include_router(models.router)
 app.include_router(chats.router)
 app.include_router(setup.router)
 app.include_router(shutdown.router)
+app.include_router(memory.router)

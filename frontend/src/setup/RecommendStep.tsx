@@ -1,6 +1,5 @@
 import { BadgeCheck, Cpu, HardDrive, Monitor, WifiOff } from 'lucide-react'
 import { Button } from '../components/ui/Button'
-import { FitBadge } from '../components/ui/FitBadge'
 import { StepCounter } from '../components/ui/StepCounter'
 import type { ManagedPlan } from '../lib/api'
 
@@ -45,8 +44,6 @@ function ModelRow({ label, model }: { label: string; model?: { model: string; qu
 
 export function RecommendStep({ plan, onNext, onBack, onConfirm, confirmed }: RecommendStepProps) {
   const isReject = plan.path === 'reject'
-  const isManaged = plan.recommended_setup_mode === 'managed'
-  const selected = [plan.orchestrator, plan.summarizer, plan.utility].filter(Boolean) as NonNullable<typeof plan.orchestrator>[]
 
   return (
     <div>

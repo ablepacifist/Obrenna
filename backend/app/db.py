@@ -33,6 +33,11 @@ def init_db() -> None:
 
     Base.metadata.create_all(engine)
 
+    # Run idempotent schema migrations (new tables, columns, backfill).
+    from .services import migrations
+    with SessionLocal() as db:
+        migrations.run_migrations(db)
+
     with SessionLocal() as db:
         if db.get(models.AppSettings, 1) is None:
             db.add(

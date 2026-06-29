@@ -3,6 +3,7 @@ import { ShieldCheck } from 'lucide-react'
 const ROWS = [
   { label: 'Where your files are stored', value: 'On this machine, in your user folder' },
   { label: 'Where prompts and outputs are stored', value: 'On this machine only' },
+  { label: 'Where memories are stored', value: 'On this machine only — view/edit in Settings > Memory' },
   { label: 'Cloud services used', value: 'None. The app does not contact external servers.' },
   { label: 'Telemetry', value: 'None collected' },
 ]

@@ -21,6 +21,9 @@ playwright>=1.45
 # Hardware detection
 psutil>=5.9
 
+# Local embedding runtime (ONNX-backed, CPU-friendly)
+fastembed>=0.3,<1.0
+
 # Dev / test
 pytest>=8.0
 jsonschema>=4.21
