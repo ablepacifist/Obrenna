@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
 import { ShieldCheck } from 'lucide-react'
 import {
-  type CatalogModel, type HardwareInfo, type ModelEndpointConfig,
-  getHardware, getModelCatalog,
-  saveAppSettings, saveModelEndpoint, testModelEndpoint,
+  type AppSettings, type HardwareInfo, type ManagedPlan, type ModelEndpointConfig,
+  getHardware, getManagedPlan, getModelCatalog, saveAppSettings, saveModelEndpoint, testModelEndpoint,
 } from '../lib/api'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { WelcomeStep } from './WelcomeStep'
@@ -24,7 +23,12 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   // managed flow
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [hardwareDone, setHardwareDone] = useState(false)
-  const [catalog, setCatalog] = useState<CatalogModel[]>([])
+  const [plan, setPlan] = useState<ManagedPlan | null>(null)
+  const [planConfirmed, setPlanConfirmed] = useState(false)
+  const [catalog] = useState(() => {
+    // Legacy catalog still used by old settings UI
+    return [] as { id: string; name: string; role: string; size: string; size_gb: number; fit: string; note: string }[]
+  })
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({})
   const [downloadDone, setDownloadDone] = useState(false)
 
@@ -40,7 +44,7 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'failure'>('idle')
   const [latencyMs, setLatencyMs] = useState<number | undefined>()
 
-  // Fetch hardware when entering hardware step
+  // Fetch hardware when entering managed hardware step
   useEffect(() => {
     if (step !== 1 || path !== 'managed') return
     getHardware()
@@ -52,25 +56,39 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
       .catch(() => setHardwareDone(true))
   }, [step, path, rm])
 
-  // Fetch catalog when entering recommend step
+  // Fetch managed plan when hardware is done
   useEffect(() => {
-    if (step !== 2 || path !== 'managed') return
-    getModelCatalog().then(setCatalog).catch(() => {})
-  }, [step, path])
+    if (step !== 1 || path !== 'managed' || !hardwareDone) return
+    setPlanConfirmed(false)
+    getManagedPlan()
+      .then(p => {
+        setPlan(p)
+        // If the plan routes to BYO, skip recommend step and go to BYO
+        if (p.recommended_setup_mode === 'byo') {
+          setPath('byo')
+          setStep(1)
+        }
+      })
+      .catch(() => {})
+  }, [step, path, hardwareDone])
 
   // Simulated download progress
   useEffect(() => {
     if (step !== 3 || path !== 'managed' || downloadDone) return
-    const selected = catalog.filter(m => m.fit === 'ok').map(m => m.id)
-    if (selected.length === 0) { setDownloadDone(true); return }
+    if (!plan) { setDownloadDone(true); return }
+    const selected = [
+      { id: plan.orchestrator?.model || 'orchestrator' },
+      ...(plan.summarizer ? [{ id: plan.summarizer.model }] : []),
+      ...(plan.utility ? [{ id: plan.utility.model }] : []),
+    ]
     const id = setInterval(() => {
       setDownloadProgress(prev => {
         const next = { ...prev }
         let allDone = true
-        for (const mid of selected) {
-          const cur = prev[mid] ?? 0
+        for (const m of selected) {
+          const cur = prev[m.id] ?? 0
           if (cur < 100) {
-            next[mid] = Math.min(100, cur + (rm ? 100 : Math.random() * 9 + 3))
+            next[m.id] = Math.min(100, cur + (rm ? 100 : Math.random() * 9 + 3))
             allDone = false
           }
         }
@@ -79,7 +97,7 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
       })
     }, rm ? 20 : 350)
     return () => clearInterval(id)
-  }, [step, path, downloadDone, catalog, rm])
+  }, [step, path, downloadDone, plan, rm])
 
   const runTest = async () => {
     setTestState('testing')
@@ -98,9 +116,27 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
     }
   }
 
+  const handlePlanConfirm = async () => {
+    if (!plan) return
+    // Save the managed plan to app settings
+    const activeModels: string[] = []
+    if (plan.orchestrator) activeModels.push(plan.orchestrator.model)
+    if (plan.summarizer) activeModels.push(plan.summarizer.model)
+    if (plan.utility) activeModels.push(plan.utility.model)
+
+    await saveAppSettings({
+      setup_complete: true,
+      setup_mode: plan.recommended_setup_mode === 'managed' ? 'managed' : 'byo',
+      theme: 'system',
+      active_models: activeModels,
+      managed_plan: { ...plan },
+    }).catch(() => {})
+
+    setPlanConfirmed(true)
+  }
+
   const handleManagedFinish = async () => {
-    const activeModels = catalog.filter(m => m.fit === 'ok').map(m => m.id)
-    await saveAppSettings({ setup_complete: true, setup_mode: 'managed', theme: 'system', active_models: activeModels })
+    await saveAppSettings({ setup_complete: true, setup_mode: 'managed', theme: 'system', active_models: [] })
       .catch(() => {})
     onFinish()
   }
@@ -132,22 +168,29 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
           <HardwareStep
             hardware={hardware}
             done={hardwareDone}
+            plan={plan}
             onNext={() => setStep(2)}
             onBack={() => setStep(0)}
           />
         )}
 
-        {step === 2 && path === 'managed' && (
+        {step === 2 && path === 'managed' && plan && (
           <RecommendStep
-            catalog={catalog}
+            plan={plan}
             onNext={() => setStep(3)}
             onBack={() => setStep(1)}
+            onConfirm={handlePlanConfirm}
+            confirmed={planConfirmed}
           />
         )}
 
         {step === 3 && path === 'managed' && (
           <DownloadStep
-            models={catalog}
+            models={plan ? [
+              { id: plan.orchestrator?.model || 'orchestrator', name: plan.orchestrator?.model || 'Orchestrator', role: 'Orchestrator', size: `${plan.orchestrator?.quant} ~2GB`, size_gb: 2, fit: 'ok', note: '' },
+              ...(plan.summarizer ? [{ id: plan.summarizer.model, name: plan.summarizer.model, role: 'Summarizer', size: `${plan.summarizer.quant} ~2GB`, size_gb: 2, fit: 'ok', note: '' }] : []),
+              ...(plan.utility ? [{ id: plan.utility.model, name: plan.utility.model, role: 'Utility', size: `${plan.utility.quant} ~1GB`, size_gb: 1, fit: 'ok', note: '' }] : []),
+            ] : catalog}
             progress={downloadProgress}
             done={downloadDone}
             onFinish={handleManagedFinish}

@@ -35,6 +35,7 @@ class AppSettingsDTO(BaseModel):
     setup_mode: Literal["managed", "byo"] = "managed"
     theme: Literal["light", "dark", "system"] = "system"
     active_models: list[str] = []
+    managed_plan: dict[str, Any] = {}
 
 
 # --- system / hardware ------------------------------------------------------
@@ -51,6 +52,37 @@ class HardwareInfo(BaseModel):
     gpu: list[GpuInfo] = []
     vram_gb: Optional[float] = None
     recommended_profile: Literal["local", "external_endpoint"] = "external_endpoint"
+
+
+# --- managed setup plan -----------------------------------------------------
+
+class ModelRef(BaseModel):
+    model: str
+    quant: str
+    device: str = "gpu"
+    ctx_min: Optional[int] = None
+    ctx_max: Optional[int] = None
+
+
+class ManagedPlanResponse(BaseModel):
+    path: Literal["apple", "gpu", "cpu_only", "reject"]
+    plan_id: Optional[str] = None
+    plan_rank: Optional[int] = None
+    ctx: Optional[int] = None
+    helper_count: int = 0
+    fingerprint_hash: str
+    runtime_priority: list[str] = []
+    runtime_forbidden: list[str] = []
+    required_launch_flags: list[str] = []
+    recommended_setup_mode: Literal["managed", "byo"] = "managed"
+    action: str = ""
+    reason: Optional[str] = None
+    detection_warnings: list[str] = []
+    orchestrator: Optional[ModelRef] = None
+    summarizer: Optional[ModelRef] = None
+    utility: Optional[ModelRef] = None
+    optional_orchestrator: Optional[dict] = None
+    validation_stubbed: bool = True
 
 
 # --- model catalog ----------------------------------------------------------
