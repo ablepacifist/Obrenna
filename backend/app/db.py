@@ -42,6 +42,7 @@ def init_db() -> None:
                     setup_mode="managed",
                     theme="light",
                     active_models=[],
+                    managed_plan={},
                 )
             )
         if db.get(models.ModelEndpoint, 1) is None:

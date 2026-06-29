@@ -1,0 +1,679 @@
+{
+  "$schema_version": "1.0",
+  "$description": "Deterministic hardware-to-model-plan catalog for a local-first AI workspace app. The resolver walks gpu_tiers.plans (or cpu_only_tiers.plans if no qualifying GPU) in descending rank order and returns the FIRST plan whose requires block is fully satisfied by the probed hardware fingerprint. This file is the single source of truth for model selection.",
+  "model_definitions": {
+    "$description": "Canonical model metadata, referenced by id from plans below.",
+    "qwen3.5-0.8b": {
+      "family": "qwen3.5",
+      "params_b": 0.8,
+      "role_class": ["utility"]
+    },
+    "qwen3.5-4b": {
+      "family": "qwen3.5",
+      "params_b": 4,
+      "role_class": ["orchestrator"]
+    },
+    "qwen3.5-9b": {
+      "family": "qwen3.5",
+      "params_b": 9,
+      "role_class": ["orchestrator"]
+    },
+    "qwen3.5-27b": {
+      "family": "qwen3.5",
+      "params_b": 27,
+      "role_class": ["orchestrator"]
+    },
+    "qwen3.6-35b-a3b": {
+      "family": "qwen3.6",
+      "params_b": 35,
+      "active_params_b": 3,
+      "moe": true,
+      "role_class": ["orchestrator"],
+      "notes": "MoE — only ~3B active params per token."
+    },
+    "gpt-oss-20b": {
+      "family": "gpt-oss",
+      "params_b": 21,
+      "active_params_b": 3.6,
+      "moe": true,
+      "role_class": ["orchestrator-optional"],
+      "notes": "OpenAI open-weight MoE. Evaluated and rejected as default due to hallucination on document-grounded tasks."
+    },
+    "granite4.0-h-micro-3b": {
+      "family": "granite4-h",
+      "params_b": 3,
+      "moe": false,
+      "hybrid_mamba": true,
+      "role_class": ["summarizer"],
+      "notes": "Hybrid Mamba-2/Transformer. Constant memory as context grows."
+    },
+    "granite4.0-h-tiny-7b-a1b": {
+      "family": "granite4-h",
+      "params_b": 7,
+      "active_params_b": 1,
+      "moe": true,
+      "hybrid_mamba": true,
+      "role_class": ["summarizer"],
+      "notes": "Hybrid MoE, 7B total / ~1B active."
+    },
+    "_quant_weight_table_gb": {
+      "$description": "MEASURED GGUF/MLX file sizes in GB, not theoretical estimates. Use this for all VRAM/RAM budgeting.",
+      "qwen3.5-0.8b": {
+        "Q6_K": 0.7,
+        "Q8_0": 0.85
+      },
+      "qwen3.5-4b": {
+        "Q4_K_M": 2.4,
+        "Q5_K_M": 3.0,
+        "Q6_K": 3.4
+      },
+      "qwen3.5-9b": {
+        "Q4_K_M": 5.5,
+        "Q5_K_M": 6.5,
+        "Q6_K": 7.4,
+        "Q8_0": 9.6
+      },
+      "qwen3.5-27b": {
+        "Q4_K_M": 16.5
+      },
+      "qwen3.6-35b-a3b": {
+        "Q4_K_M": 21.4,
+        "Q5_K_M": 24.8
+      },
+      "gpt-oss-20b": {
+        "Q4_K_M": 12.0,
+        "Q6_K": 18.5
+      },
+      "granite4.0-h-micro-3b": {
+        "Q5_K_M": 2.0,
+        "Q6_K": 2.3
+      },
+      "granite4.0-h-tiny-7b-a1b": {
+        "Q4_K_M": 4.2,
+        "Q5_K_M": 5.0
+      }
+    },
+    "_kv_cache_gb_per_1k_tokens": {
+      "$description": "Marginal memory cost of 1000 tokens of KV cache at q8_0 KV quantization.",
+      "qwen3.5-4b": 0.075,
+      "qwen3.5-9b": 0.09,
+      "qwen3.5-27b": 0.18,
+      "qwen3.6-35b-a3b": 0.12,
+      "gpt-oss-20b": 0.16
+    }
+  },
+  "global_constants": {
+    "$description": "Fixed overheads consumed by the fit() step.",
+    "gpu_display_overhead_gb": 1.3,
+    "gpu_framework_overhead_gb": 0.7,
+    "gpu_usable_fraction_of_free_vram": 0.85,
+    "ram_os_shell_overhead_gb": {
+      "windows": 4.0,
+      "macos": 3.0,
+      "linux": 2.5
+    },
+    "ram_runtime_overhead_gb": 1.5,
+    "ram_pdf_render_spike_gb": 2.5,
+    "ram_safety_margin_gb": 1.5,
+    "interactive_tok_s_floor_gpu": 8,
+    "interactive_tok_s_floor_cpu_only": 5
+  },
+  "gpu_tiers": {
+    "$description": "GPU-resident-orchestrator tiers. Plans sorted by rank DESC.",
+    "plans": [
+      {
+        "id": "T6-enthusiast",
+        "rank": 600,
+        "requires": {
+          "gpu_vram_gb": 32,
+          "gpu_fp16": true
+        },
+        "orchestrator": {
+          "model": "qwen3.6-35b-a3b",
+          "quant": "Q4_K_M",
+          "device": "gpu",
+          "ctx_min": 32768,
+          "ctx_max": 131072
+        },
+        "summarizer": {
+          "model": "granite4.0-h-tiny-7b-a1b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "resident": "always"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q8_0",
+          "device": "cpu",
+          "count_min": 3,
+          "count_max": 5,
+          "resident": "always"
+        },
+        "runtime_priority": ["cuda", "vulkan"]
+      },
+      {
+        "id": "T5-workstation",
+        "rank": 500,
+        "requires": {
+          "gpu_vram_gb": 24,
+          "gpu_fp16": true
+        },
+        "orchestrator": {
+          "model": "qwen3.5-27b",
+          "quant": "Q4_K_M",
+          "device": "gpu",
+          "ctx_min": 16384,
+          "ctx_max": 32768
+        },
+        "summarizer": {
+          "model": "granite4.0-h-tiny-7b-a1b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "resident": "always"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "count_min": 3,
+          "count_max": 5,
+          "resident": "always"
+        },
+        "runtime_priority": ["cuda", "rocm", "vulkan"]
+      },
+      {
+        "id": "T4-high",
+        "rank": 400,
+        "requires": {
+          "gpu_vram_gb": 16,
+          "gpu_fp16": true
+        },
+        "orchestrator": {
+          "model": "qwen3.5-9b",
+          "quant": "Q8_0",
+          "device": "gpu",
+          "ctx_min": 16384,
+          "ctx_max": 65536
+        },
+        "summarizer": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "resident": "always"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "count_min": 2,
+          "count_max": 4,
+          "resident": "lazy"
+        },
+        "runtime_priority": ["cuda", "rocm", "vulkan"],
+        "optional_orchestrator": {
+          "model": "gpt-oss-20b",
+          "quant": "Q4_K_M",
+          "ctx_min": 16384,
+          "ctx_max": 32768,
+          "offer_as": "power_user_opt_in_only"
+        }
+      },
+      {
+        "id": "T3-plus",
+        "rank": 300,
+        "requires": {
+          "gpu_vram_gb": 12,
+          "gpu_fp16": true
+        },
+        "orchestrator": {
+          "model": "qwen3.5-9b",
+          "quant": "Q6_K",
+          "device": "gpu",
+          "ctx_min": 8192,
+          "ctx_max": 32768
+        },
+        "summarizer": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "resident": "always"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "count_min": 2,
+          "count_max": 3,
+          "resident": "lazy"
+        },
+        "runtime_priority": ["cuda", "rocm", "vulkan"]
+      },
+      {
+        "id": "T2-standard-fp16",
+        "rank": 200,
+        "requires": {
+          "gpu_vram_gb": 8,
+          "gpu_fp16": true
+        },
+        "orchestrator": {
+          "model": "qwen3.5-9b",
+          "quant": "Q4_K_M",
+          "device": "gpu",
+          "ctx_min": 8192,
+          "ctx_max": 16384
+        },
+        "summarizer": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "resident": "lazy"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "count_min": 1,
+          "count_max": 2,
+          "resident": "lazy"
+        },
+        "runtime_priority": ["cuda", "rocm", "vulkan"]
+      },
+      {
+        "id": "T1-floor-fp32",
+        "rank": 100,
+        "requires": {
+          "gpu_vram_gb": 8,
+          "gpu_fp16": false,
+          "gpu_backend_any": ["vulkan"]
+        },
+        "orchestrator": {
+          "model": "qwen3.5-4b",
+          "quant": "Q5_K_M",
+          "device": "gpu",
+          "ctx_min": 8192,
+          "ctx_max": 16384
+        },
+        "summarizer": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "resident": "lazy"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "count_min": 1,
+          "count_max": 2,
+          "resident": "lazy"
+        },
+        "runtime_priority": ["vulkan"],
+        "runtime_forbidden": ["ollama"],
+        "required_launch_flags": [
+          "--device <discrete_gpu_vulkan_index>",
+          "--split-mode none",
+          "-ngl 99",
+          "-fa on",
+          "-ctk q8_0",
+          "-ctv q8_0",
+          "--parallel 1"
+        ]
+      },
+      {
+        "id": "T0-subfloor",
+        "rank": 50,
+        "requires": {
+          "gpu_vram_gb": 6,
+          "gpu_fp16": false
+        },
+        "orchestrator": {
+          "model": "qwen3.5-4b",
+          "quant": "Q4_K_M",
+          "device": "gpu",
+          "ctx_min": 4096,
+          "ctx_max": 8192
+        },
+        "summarizer": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "resident": "lazy"
+        },
+        "utility": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "count_min": 1,
+          "count_max": 1,
+          "resident": "lazy"
+        },
+        "runtime_priority": ["vulkan", "cuda"]
+      }
+    ],
+    "reject_below": {
+      "gpu_vram_gb": 6,
+      "action": "route_to_cpu_only_tiers_or_byom_or_cpu_lite"
+    }
+  },
+  "cpu_helper_concurrency_tiers": {
+    "$description": "Applies to CPU helper swarm concurrency on a machine with a qualifying discrete GPU.",
+    "plans": [
+      {
+        "id": "C0-minimum",
+        "rank": 0,
+        "requires": {
+          "physical_cores": 4,
+          "threads": 4,
+          "isa": ["avx2"]
+        },
+        "peak_concurrent_helpers": 1,
+        "execution_mode": "strict_serial"
+      },
+      {
+        "id": "C1-floor",
+        "rank": 100,
+        "requires": {
+          "physical_cores": 6,
+          "isa": ["avx2"]
+        },
+        "peak_concurrent_helpers": 2,
+        "execution_mode": "limited_parallel"
+      },
+      {
+        "id": "C2-standard",
+        "rank": 200,
+        "requires": {
+          "physical_cores": 6,
+          "threads": 12,
+          "isa": ["avx2"]
+        },
+        "peak_concurrent_helpers": 3,
+        "execution_mode": "parallel"
+      },
+      {
+        "id": "C3-strong",
+        "rank": 300,
+        "requires": {
+          "physical_cores": 8,
+          "threads": 16,
+          "isa": ["avx2"]
+        },
+        "peak_concurrent_helpers": 4,
+        "execution_mode": "parallel"
+      },
+      {
+        "id": "C4-high",
+        "rank": 400,
+        "requires": {
+          "physical_cores": 12,
+          "threads": 20,
+          "isa": ["avx2"]
+        },
+        "peak_concurrent_helpers": 5,
+        "execution_mode": "parallel"
+      },
+      {
+        "id": "C5-workstation",
+        "rank": 500,
+        "requires": {
+          "physical_cores": 16,
+          "threads": 24,
+          "isa": ["avx2"]
+        },
+        "peak_concurrent_helpers": 6,
+        "execution_mode": "parallel"
+      }
+    ]
+  },
+  "ram_residency_tiers_gpu_present": {
+    "$description": "How many helper models can stay resident in system RAM simultaneously.",
+    "plans": [
+      {
+        "id": "R-16gb",
+        "rank": 100,
+        "requires": {
+          "ram_gb": 16
+        },
+        "residency_ceiling": 3
+      },
+      {
+        "id": "R-24gb",
+        "rank": 200,
+        "requires": {
+          "ram_gb": 24
+        },
+        "residency_ceiling": 4
+      },
+      {
+        "id": "R-32gb",
+        "rank": 300,
+        "requires": {
+          "ram_gb": 32
+        },
+        "residency_ceiling": 6
+      },
+      {
+        "id": "R-48gb",
+        "rank": 400,
+        "requires": {
+          "ram_gb": 48
+        },
+        "residency_ceiling": 8
+      },
+      {
+        "id": "R-64gb-plus",
+        "rank": 500,
+        "requires": {
+          "ram_gb": 64
+        },
+        "residency_ceiling": 99
+      }
+    ]
+  },
+  "cpu_only_tiers": {
+    "$description": "Used when hardware fails every row in gpu_tiers.plans.",
+    "plans": [
+      {
+        "id": "CL0-lite",
+        "rank": 0,
+        "requires": {
+          "ram_gb": 16
+        },
+        "orchestrator": {
+          "model": "qwen3.5-4b",
+          "quant": "Q4_K_M",
+          "device": "cpu",
+          "ctx_min": 4096,
+          "ctx_max": 8192
+        },
+        "helpers": {
+          "count_max": 1,
+          "execution_mode": "strict_serial"
+        },
+        "expected_tok_s": "3-6"
+      },
+      {
+        "id": "CL1-minimum",
+        "rank": 100,
+        "requires": {
+          "ram_gb": 32,
+          "ram_type": "ddr5",
+          "ram_channels": 2,
+          "physical_cores": 6,
+          "isa": ["avx2"]
+        },
+        "orchestrator": {
+          "model": "qwen3.5-4b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "ctx_min": 8192,
+          "ctx_max": 12288
+        },
+        "helpers": {
+          "model": "qwen3.5-0.8b",
+          "quant": "Q6_K",
+          "count_max": 1,
+          "execution_mode": "serial"
+        },
+        "expected_tok_s": "6-10"
+      },
+      {
+        "id": "CL2-good",
+        "rank": 200,
+        "requires": {
+          "ram_gb": 48,
+          "ram_type": "ddr5",
+          "ram_channels": 2,
+          "physical_cores": 8,
+          "isa": ["avx2"]
+        },
+        "orchestrator": {
+          "model": "qwen3.5-4b",
+          "quant": "Q6_K",
+          "device": "cpu",
+          "ctx_min": 12288,
+          "ctx_max": 16384
+        },
+        "helpers": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q5_K_M",
+          "count_max": 2,
+          "execution_mode": "limited_parallel"
+        },
+        "expected_tok_s": "8-14"
+      },
+      {
+        "id": "CL3-strong",
+        "rank": 300,
+        "requires": {
+          "ram_gb": 64,
+          "ram_type": "ddr5",
+          "ram_channels": 2,
+          "physical_cores": 12,
+          "isa": ["avx2"]
+        },
+        "orchestrator": {
+          "model": "qwen3.6-35b-a3b",
+          "quant": "Q4_K_M",
+          "device": "cpu",
+          "ctx_min": 16384,
+          "ctx_max": 32768
+        },
+        "helpers": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q5_K_M",
+          "count_max": 2,
+          "execution_mode": "parallel"
+        },
+        "expected_tok_s": "10-18"
+      },
+      {
+        "id": "CL4-workstation",
+        "rank": 400,
+        "requires": {
+          "ram_gb": 96,
+          "ram_type": "ddr5",
+          "ram_channels": 4,
+          "physical_cores": 16,
+          "isa": ["avx2"]
+        },
+        "orchestrator": {
+          "model": "qwen3.6-35b-a3b",
+          "quant": "Q5_K_M",
+          "device": "cpu",
+          "ctx_min": 32768,
+          "ctx_max": 65536
+        },
+        "helpers": {
+          "model": "granite4.0-h-micro-3b",
+          "quant": "Q6_K",
+          "count_max": 3,
+          "execution_mode": "parallel"
+        },
+        "expected_tok_s": "15-25"
+      }
+    ],
+    "reject_below": {
+      "ram_gb": 16,
+      "action": "route_to_byom_or_cloud_key_setup"
+    }
+  },
+  "apple_silicon_tiers": {
+    "$description": "Apple Silicon (M1-M4+) uses unified memory.",
+    "plans": [
+      {
+        "id": "A0",
+        "rank": 0,
+        "requires": {
+          "unified_mem_gb": 8
+        },
+        "orchestrator": {
+          "model": "qwen3.5-4b",
+          "quant": "Q5_K_M",
+          "ctx_max": 16384
+        }
+      },
+      {
+        "id": "A1",
+        "rank": 100,
+        "requires": {
+          "unified_mem_gb": 16
+        },
+        "orchestrator": {
+          "model": "qwen3.5-9b",
+          "quant": "Q4_K_M",
+          "ctx_max": 16384
+        }
+      },
+      {
+        "id": "A2",
+        "rank": 200,
+        "requires": {
+          "unified_mem_gb": 24
+        },
+        "orchestrator": {
+          "model": "qwen3.5-9b",
+          "quant": "Q8_0",
+          "ctx_max": 32768
+        }
+      },
+      {
+        "id": "A3",
+        "rank": 300,
+        "requires": {
+          "unified_mem_gb": 32
+        },
+        "orchestrator": {
+          "model": "qwen3.5-27b",
+          "quant": "Q4_K_M",
+          "ctx_max": 32768
+        }
+      },
+      {
+        "id": "A4",
+        "rank": 400,
+        "requires": {
+          "unified_mem_gb": 48
+        },
+        "orchestrator": {
+          "model": "qwen3.6-35b-a3b",
+          "quant": "Q4_K_M",
+          "ctx_max": 65536
+        }
+      },
+      {
+        "id": "A5",
+        "rank": 500,
+        "requires": {
+          "unified_mem_gb": 96
+        },
+        "orchestrator": {
+          "model": "qwen3.6-35b-a3b",
+          "quant": "Q5_K_M",
+          "ctx_max": 131072
+        }
+      }
+    ],
+    "runtime_priority": ["mlx", "gguf-metal"]
+  }
+}

@@ -55,6 +55,7 @@ class AppSettings(Base):
     setup_mode: Mapped[str] = mapped_column(String, default="managed")  # managed | byo
     theme: Mapped[str] = mapped_column(String, default="light")  # light | dark
     active_models: Mapped[Any] = mapped_column(JSON, default=list)
+    managed_plan: Mapped[Any] = mapped_column(JSON, default=dict)
 
 
 class ModelEndpoint(Base):
