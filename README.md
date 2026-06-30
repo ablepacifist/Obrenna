@@ -90,15 +90,15 @@ The backend defaults to `http://localhost:11434/v1` (Ollama). To configure a dif
 1. Start the app and go through the setup flow → "Connect my own local server".
 2. Or `POST /api/settings/model-endpoint` with your provider URL.
 
-Recommended local models (from `backend/app/services/model_catalog.py`):
+Models are assigned automatically per hardware tier from `backend/app/services/hardware_catalog.json`. A typical mid-tier resolves to:
 
 | Model | Role | Size |
 |---|---|---|
-| Qwen 2.5 14B | Main reasoner | 9.2 GB |
-| Phi-3.5 Mini | Summarizer | 2.3 GB |
-| Llama 3.2 3B | Utility | 2.0 GB |
+| Qwen3.5 9B | Reasoner | 3.9 GB |
+| Granite 4.0 H Micro 3B | Summarizer | 2.0 GB |
+| Qwen3.5 0.8B | Utility | 0.5 GB |
 
-With **Ollama**: `ollama pull qwen2.5:14b && ollama pull phi3.5 && ollama pull llama3.2:3b`
+With **Ollama**: `ollama pull qwen3.5-9b-claude-opus-reasoning-distilled && ollama pull granite4.0-h-micro-3b && ollama pull qwen3.5-0.8b`
 
 ---
 
@@ -118,6 +118,11 @@ POST /api/artifacts/{id}/export/pdf
 GET  /api/artifacts/{id}/export/pdf/download
 POST /api/chat
 GET  /api/system/hardware
+GET  /api/setup/managed-plan
+POST /api/setup/managed-plan/confirm
+GET  /api/setup/provisioning/{job_id}
+GET  /api/setup/provisioning/{job_id}/events
+POST /api/setup/provisioning/{job_id}/retry
 GET  /api/models/catalog
 GET  /api/folders
 POST /api/folders
@@ -155,5 +160,5 @@ All defined in `shared/artifact-schema.json`. Five discriminated types:
 - [ ] Streaming assistant responses
 - [ ] Multi-file upload and cross-file analysis
 - [ ] PDF export: faithful browser rendering via Playwright (replace SVG approximation)
-- [ ] Managed model download via Ollama API
+- [x] Managed model download/provisioning via Ollama API (with SSE progress + retry)
 - [ ] Windows/macOS installer (Tauri or packaged Electron shell)

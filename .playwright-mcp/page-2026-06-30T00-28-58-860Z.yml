@@ -1,0 +1,37 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - button "New chat" [ref=e6]:
+      - img [ref=e7]
+      - text: New chat
+    - generic [ref=e9]:
+      - img [ref=e10]
+      - textbox "Search chats" [ref=e13]
+    - navigation [ref=e14]:
+      - button "New folder" [ref=e15]:
+        - img [ref=e16]
+        - text: New folder
+    - generic [ref=e18]:
+      - button "Settings" [ref=e19]:
+        - img [ref=e20]
+        - text: Settings
+      - button "Local status" [ref=e24]: Local
+  - main [ref=e27]:
+    - generic [ref=e29]:
+      - img "Obrenna logo" [ref=e31]
+      - paragraph [ref=e32]: Drop a file or describe the task. Everything runs on your machine.
+      - generic [ref=e34]:
+        - textbox "Ask anything, or drop a file" [ref=e35]
+        - generic [ref=e36]:
+          - generic [ref=e37]:
+            - button "Attach files" [ref=e38]:
+              - img [ref=e39]
+            - button "Web search" [disabled] [ref=e41]:
+              - img [ref=e42]
+              - text: Web search
+          - button "Send" [disabled]:
+            - img
+            - text: Send
+      - generic [ref=e45]:
+        - button "Summarize these files" [ref=e46]
+        - button "Turn a CSV into a dashboard" [ref=e47]
+        - button "Draft a report" [ref=e48]
