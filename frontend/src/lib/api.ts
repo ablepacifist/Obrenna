@@ -41,13 +41,15 @@ export type AppSettings = {
   theme: 'light' | 'dark' | 'system'
   active_models: string[]
   managed_plan: Record<string, unknown>
+  workers_enabled: boolean
 }
 
 export const getModelEndpoint = () => req<ModelEndpointConfig>('GET', '/api/settings/model-endpoint')
 export const saveModelEndpoint = (cfg: ModelEndpointConfig) => req<ModelEndpointConfig>('POST', '/api/settings/model-endpoint', cfg)
 export const testModelEndpoint = (cfg: ModelEndpointConfig) => req<TestConnectionResult>('POST', '/api/settings/model-endpoint/test', cfg)
 export const getAppSettings = () => req<AppSettings>('GET', '/api/settings/app')
-export const saveAppSettings = (s: AppSettings) => req<AppSettings>('POST', '/api/settings/app', s)
+export const updateAppSettings = (s: Partial<AppSettings>) => req<AppSettings>('POST', '/api/settings/app', s)
+export const saveAppSettings = updateAppSettings
 
 // ── system ────────────────────────────────────────────────────────────────────
 export type GpuInfo = { name: string; vram_gb?: number }
@@ -208,13 +210,14 @@ export type ChatMessageDTO = {
   artifacts: string[]
   files: { name: string; size: number }[]
   created_at: string
+  sources?: { title: string; url: string; snippet: string }[]
 }
 export type ChatResponse = { chat_id: string; message: ChatMessageDTO; memory_events?: MemoryEvent[] }
 export type ChatDTO = { id: string; title: string; folder_id?: string; created_at: string; updated_at: string }
 export type ChatDetailDTO = ChatDTO & { messages: ChatMessageDTO[] }
 
-export const sendMessage = (payload: { chat_id?: string; message: string; file_ids?: string[] }) =>
-  req<ChatResponse>('POST', '/api/chat', payload)
+export const sendMessage = (payload: { chat_id?: string; message: string; file_ids?: string[]; web_search?: boolean; workers_enabled?: boolean }) =>
+   req<ChatResponse>('POST', '/api/chat', payload)
 
 export const listChats = () => req<ChatDTO[]>('GET', '/api/chats')
 export const createChat = (title?: string, folder_id?: string) =>

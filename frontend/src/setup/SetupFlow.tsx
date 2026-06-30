@@ -37,7 +37,9 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   // managed flow
   const [hardware, setHardware] = useState<HardwareInfo | null>(null)
   const [hardwareDone, setHardwareDone] = useState(false)
+  const [hardwareError, setHardwareError] = useState(false)
   const [plan, setPlan] = useState<ManagedPlan | null>(null)
+  const [planError, setPlanError] = useState(false)
   const [planConfirmed, setPlanConfirmed] = useState(false)
   const [catalog, setCatalog] = useState<CatalogModel[]>([])
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({})
@@ -81,19 +83,28 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   // Fetch hardware when entering managed hardware step
   useEffect(() => {
     if (step !== 1 || path !== 'managed') return
+    setHardware(null)
+    setHardwareDone(false)
+    setHardwareError(false)
+    setPlan(null)
+    setPlanError(false)
     getHardware()
       .then(hw => {
         setHardware(hw)
         const delay = rm ? 50 : 1400
         setTimeout(() => setHardwareDone(true), delay)
       })
-      .catch(() => setHardwareDone(true))
+      .catch(() => {
+        setHardwareError(true)
+        setHardwareDone(true)
+      })
   }, [step, path, rm])
 
-  // Fetch managed plan when hardware is done
+  // Fetch managed plan when hardware is done (skip if hardware fetch failed)
   useEffect(() => {
-    if (step !== 1 || path !== 'managed' || !hardwareDone) return
+    if (step !== 1 || path !== 'managed' || !hardwareDone || hardwareError) return
     setPlanConfirmed(false)
+    setPlanError(false)
     getManagedPlan()
       .then(p => {
         setPlan(p)
@@ -103,8 +114,8 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
           setStep(1)
         }
       })
-      .catch(() => {})
-  }, [step, path, hardwareDone])
+      .catch(() => setPlanError(true))
+  }, [step, path, hardwareDone, hardwareError])
 
   // Managed provisioning progress via SSE (with polling fallback)
   useEffect(() => {
@@ -220,6 +231,29 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
     }
   }, [step, path, provisionJobId])
 
+  const handleHardwareRetry = () => {
+    // Reset all state — the useEffects for hardware + plan will re-fire
+    // once step/path/hardwareDone dependencies change. We trigger them by
+    // resetting hardwareDone back to false, which also re-enables the
+    // hardware effect on next render via the step+path guard.
+    setHardware(null)
+    setHardwareDone(false)
+    setHardwareError(false)
+    setPlan(null)
+    setPlanError(false)
+    // Directly re-run hardware fetch (useEffect won't re-fire since step/path/rm unchanged)
+    getHardware()
+      .then(hw => {
+        setHardware(hw)
+        const delay = rm ? 50 : 1400
+        setTimeout(() => setHardwareDone(true), delay)
+      })
+      .catch(() => {
+        setHardwareError(true)
+        setHardwareDone(true)
+      })
+  }
+
   const runTest = async () => {
     setTestState('testing')
     try {
@@ -321,6 +355,9 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
             hardware={hardware}
             done={hardwareDone}
             plan={plan}
+            hardwareError={hardwareError}
+            planError={planError}
+            onRetry={handleHardwareRetry}
             onNext={() => setStep(2)}
             onBack={() => setStep(0)}
           />

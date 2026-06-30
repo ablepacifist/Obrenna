@@ -1,4 +1,4 @@
-import { RefreshCw, ShieldCheck } from 'lucide-react'
+import { AlertCircle, RefreshCw, ShieldCheck } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { StepCounter } from '../components/ui/StepCounter'
 import type { HardwareInfo, ManagedPlan } from '../lib/api'
@@ -7,18 +7,21 @@ interface HardwareStepProps {
   hardware: HardwareInfo | null
   done: boolean
   plan: ManagedPlan | null
+  hardwareError: boolean
+  planError: boolean
+  onRetry: () => void
   onNext: () => void
   onBack: () => void
 }
 
-function HardwareRow({ label, value, revealed, index }: { label: string; value: string; revealed: boolean; index: number }) {
+function HardwareRow({ label, value, hasData, index }: { label: string; value: string; hasData: boolean; index: number }) {
   return (
     <div
       className="px-4 h-12 flex items-center justify-between text-[13px] transition-opacity duration-300"
-      style={{ opacity: revealed ? 1 : 0.4, transitionDelay: `${index * 120}ms` }}
+      style={{ opacity: hasData ? 1 : 0.4, transitionDelay: `${index * 120}ms` }}
     >
       <span className="text-(--ink-muted)">{label}</span>
-      <span className="font-medium text-(--ink)">{revealed ? value : '…'}</span>
+      <span className="font-medium text-(--ink)">{hasData ? value : '…'}</span>
     </div>
   )
 }
@@ -57,20 +60,16 @@ function PlanPreview({ plan }: { plan: ManagedPlan }) {
   )
 }
 
-export function HardwareStep({ hardware, done, plan, onNext, onBack }: HardwareStepProps) {
-  const rows = hardware
-    ? [
-        { key: 'cpu', label: 'Processor', value: hardware.cpu },
-        { key: 'ram_gb', label: 'Memory', value: hardware.ram_gb ? `${hardware.ram_gb} GB` : 'Unknown' },
-        { key: 'gpu', label: 'Graphics', value: hardware.gpu?.[0]?.name ?? 'Integrated' },
-        { key: 'vram_gb', label: 'Graphics memory', value: hardware.vram_gb ? `${hardware.vram_gb} GB` : 'Shared' },
-      ]
-    : [
-        { key: 'cpu', label: 'Processor', value: '…' },
-        { key: 'ram_gb', label: 'Memory', value: '…' },
-        { key: 'gpu', label: 'Graphics', value: '…' },
-        { key: 'vram_gb', label: 'Graphics memory', value: '…' },
-      ]
+export function HardwareStep({ hardware, done, plan, hardwareError, planError, onRetry, onNext, onBack }: HardwareStepProps) {
+  const rows = [
+    { key: 'cpu', label: 'Processor', value: hardware?.cpu ?? '…' },
+    { key: 'ram_gb', label: 'Memory', value: hardware ? (hardware.ram_gb ? `${hardware.ram_gb} GB` : 'Unknown') : '…' },
+    { key: 'gpu', label: 'Graphics', value: hardware ? (hardware.gpu?.[0]?.name ?? 'Integrated') : '…' },
+    { key: 'vram_gb', label: 'Graphics memory', value: hardware ? (hardware.vram_gb ? `${hardware.vram_gb} GB` : 'Shared') : '…' },
+  ]
+
+  const hasError = hardwareError || planError
+  const canContinue = done && !!plan && !hasError
 
   return (
     <div>
@@ -82,23 +81,46 @@ export function HardwareStep({ hardware, done, plan, onNext, onBack }: HardwareS
 
       <div className="mt-8 rounded-xl border border-(--border) bg-(--surface) divide-y divide-(--border)">
         {rows.map((r, i) => (
-          <HardwareRow key={r.key} label={r.label} value={r.value} revealed={done} index={i} />
+          <HardwareRow key={r.key} label={r.label} value={r.value} hasData={!!hardware} index={i} />
         ))}
       </div>
 
-      {done && plan && (
+      {canContinue && plan && (
         <PlanPreview plan={plan} />
       )}
 
-      {!done && (
+      {hasError && (
+        <div className="mt-5 flex items-center justify-between gap-3 rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3">
+          <div className="flex items-center gap-2 text-[13px] text-red-600 dark:text-red-400">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            {hardwareError
+              ? 'Could not read your hardware. Check that the backend is running.'
+              : 'Could not resolve a model plan for your hardware.'}
+          </div>
+          <button
+            onClick={onRetry}
+            className="shrink-0 text-[13px] font-medium text-(--accent) hover:underline"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {!done && !hasError && (
         <div className="mt-5 flex items-center gap-2 text-[13px] text-(--ink-muted)">
           <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Scanning…
         </div>
       )}
 
+      {done && !hasError && !plan && (
+        <div className="mt-5 flex items-center gap-2 text-[13px] text-(--ink-muted)">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Resolving plan…
+        </div>
+      )}
+
       <div className="mt-8 flex items-center justify-between">
         <Button variant="ghost" onClick={onBack}>Back</Button>
-        <Button onClick={onNext} disabled={!done}>Continue</Button>
+        <Button onClick={onNext} disabled={!canContinue}>Continue</Button>
       </div>
     </div>
   )

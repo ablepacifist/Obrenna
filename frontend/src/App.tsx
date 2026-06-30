@@ -21,6 +21,11 @@ export default function App() {
   const [sidebarTick, setSidebarTick] = useState(0)
 
   useEffect(() => {
+    const fallback = setTimeout(() => {
+      setLoading(false)
+      setSetupDone(false)
+    }, 8000)
+
     getConfig().then(async () => {
       try {
         const s = await getAppSettings()
@@ -28,11 +33,15 @@ export default function App() {
       } catch {
         setSetupDone(false)
       }
+      clearTimeout(fallback)
       setLoading(false)
     }).catch(() => {
+      clearTimeout(fallback)
       setLoading(false)
       setSetupDone(false)
     })
+
+    return () => clearTimeout(fallback)
   }, [])
 
   const onResizeStart = (e: React.MouseEvent) => {
@@ -51,19 +60,13 @@ export default function App() {
     document.addEventListener('mouseup', up)
   }
 
- if (loading || setupDone === null) {
-   return (
-        <ThemeProvider>
-          <AnimationPreferenceProvider>
-          <ToastProvider>
-            <div className="min-h-screen bg-(--bg) flex items-center justify-center">
-              <div className="text-[13px] text-(--ink-muted)">Loading…</div>
-            </div>
-          </ToastProvider>
-          </AnimationPreferenceProvider>
-        </ThemeProvider>
-      )
-   }
+  if (loading || setupDone === null) {
+    return (
+      <div style={{ minHeight: '100vh', background: 'var(--bg, #FAF9F7)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ fontSize: '14px', color: 'var(--ink-muted, #6B6762)' }}>Starting Obrenna…</div>
+      </div>
+    )
+  }
 
    if (!setupDone) {
      return (
