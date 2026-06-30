@@ -5,10 +5,6 @@ description = "Obrenna Desktop"
 authors = ["Obrenna"]
 edition = "2021"
 
-[lib]
-name = "obrenna_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2.5.0", features = [] }
 

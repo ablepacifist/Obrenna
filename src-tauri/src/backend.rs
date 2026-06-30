@@ -1,16 +1,20 @@
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
+use tauri::Emitter;
 
 use reqwest;
-use tauri::async_runtime::sleep;
+use tokio::time::sleep;
 
-static mut BACKEND_PROCESS: Option<Child> = None;
+static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static MCP_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
+static APP_HANDLE: Mutex<Option<AppHandle>> = Mutex::new(None);
 
 pub fn find_free_port() -> u16 {
     match TcpListener::bind("127.0.0.1:0") {
@@ -19,6 +23,34 @@ pub fn find_free_port() -> u16 {
             port
         }
         Err(_) => 8000,
+    }
+}
+
+fn executable_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn project_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("src-tauri must have a parent project directory")
+        .to_path_buf()
+}
+
+fn resolve_python_executable(root: &PathBuf) -> String {
+    let venv_python = root
+        .join(".venv")
+        .join(if cfg!(windows) { "Scripts" } else { "bin" })
+        .join(executable_name("python"));
+
+    if venv_python.exists() {
+        venv_python.to_string_lossy().to_string()
+    } else {
+        "python".to_string()
     }
 }
 
@@ -46,38 +78,52 @@ async fn wait_for_backend(url: &str, timeout_secs: u64) -> bool {
 }
 
 pub fn start_backend(app: &AppHandle, port: u16, data_dir: &PathBuf) -> Result<(), String> {
+    // Store AppHandle for agent event emission
+    let mut handle_opt = APP_HANDLE.lock().unwrap();
+    *handle_opt = Some(app.clone());
+
     let resource_dir = app.path().resource_dir().expect("failed to get resource dir");
     let backend_exe = resource_dir
-        .join("..")
-        .join("resources")
         .join("backend")
-        .join("obrenna-server");
+        .join(executable_name("obrenna-server"));
 
-    let backend_path = if backend_exe.exists() {
-        backend_exe
-    } else {
-        // Fallback: check for old grebglob-server name for manual bundle compatibility
-        let old_path = app.path().resolve("resources/backend/grebglob-server").map_err(|e| format!("resolve backend path: {}", e))?;
-        if old_path.exists() {
-            old_path
-        } else {
-            return Err(format!("Backend executable not found at: {:?} or fallback {:?}", backend_exe, old_path));
-        }
-    };
-
-    if !backend_path.exists() {
-        eprintln!("Backend executable not found at: {:?}", backend_path);
-        return Err(format!("Backend executable not found at: {:?}", backend_path));
-    }
+    let old_backend_exe = resource_dir
+        .join("backend")
+        .join(executable_name("grebglob-server"));
 
     let data_dir_str = data_dir.to_string_lossy().to_string();
     let api_url = format!("http://127.0.0.1:{}", port);
 
-    let mut cmd = Command::new(&backend_path);
+    let mut cmd;
+    let mcp_resource_dir;
+
+    if backend_exe.exists() {
+        cmd = Command::new(&backend_exe);
+        cmd.current_dir(&resource_dir);
+        mcp_resource_dir = resource_dir.clone();
+    } else if old_backend_exe.exists() {
+        // Fallback for old manually assembled bundles.
+        cmd = Command::new(&old_backend_exe);
+        cmd.current_dir(&resource_dir);
+        mcp_resource_dir = resource_dir.clone();
+    } else {
+        let root = project_root();
+        let backend_script = root.join("backend").join("desktop_server.py");
+        if !backend_script.exists() {
+            return Err(format!(
+                "Backend executable not found at {:?}, fallback {:?}, or dev script {:?}",
+                backend_exe, old_backend_exe, backend_script
+            ));
+        }
+
+        cmd = Command::new(resolve_python_executable(&root));
+        cmd.arg(&backend_script).current_dir(root.join("backend"));
+        mcp_resource_dir = root.join("src-tauri").join("resources");
+    }
+
     cmd.env("OBRENNA_DATA_DIR", data_dir_str)
         .env("OBRENNA_PORT", port.to_string())
-        .env("OBRENNA_DESKTOP", "1")
-        .current_dir(resource_dir);
+        .env("OBRENNA_DESKTOP", "1");
 
     let child = cmd
         .stdin(std::process::Stdio::piped())
@@ -86,13 +132,71 @@ pub fn start_backend(app: &AppHandle, port: u16, data_dir: &PathBuf) -> Result<(
         .spawn()
         .map_err(|e| format!("failed to start backend: {}", e))?;
 
-    unsafe {
-        BACKEND_PROCESS = Some(child);
+    *BACKEND_PROCESS.lock().unwrap() = Some(child);
+
+    // Spawn MCP server if available
+    let mcp_server_path = mcp_resource_dir
+        .join("mcp")
+        .join(executable_name("obrenna-mcp"));
+    let mcp_server_path = if mcp_server_path.exists() {
+        mcp_server_path
+    } else {
+        // Fallback: check for .exe extension on Windows
+        let mcp_exe = mcp_server_path.with_extension("exe");
+        if mcp_exe.exists() { mcp_exe } else { PathBuf::new() }
+    };
+
+    if !mcp_server_path.as_os_str().is_empty() && mcp_server_path.exists() {
+        let mcp_cmd = Command::new(&mcp_server_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        match mcp_cmd {
+            Ok(mcp_child) => {
+                *MCP_PROCESS.lock().unwrap() = Some(mcp_child);
+                // Start MCP proxy TCP listener for Python sidecar
+                if let Ok(listener) = TcpListener::bind("127.0.0.1:0") {
+                    let proxy_port = listener.local_addr().unwrap().port();
+                    // Pass proxy URL to Python backend via env var
+                    std::env::set_var("OBRENNA_MCP_PROXY_URL", format!("tcp://127.0.0.1:{}", proxy_port));
+                    drop(listener);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to spawn MCP server: {}", e);
+            }
+        }
     }
 
     tauri::async_runtime::spawn(async move {
-        if let Some(proc) = unsafe { &mut BACKEND_PROCESS } {
-            let _ = proc.wait().await;
+        let backend_process = BACKEND_PROCESS.lock().unwrap().take();
+        if let Some(mut proc) = backend_process {
+            // Read Python sidecar stdout for agent event envelopes
+            if let Some(stdout) = proc.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            // Emit agent events to webview
+                            if let Ok(app_guard) = APP_HANDLE.lock() {
+                                if let Some(app) = app_guard.as_ref() {
+                                    let _ = app.emit("agent-event", &l);
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            let _ = proc.wait();
+        }
+        // Also terminate MCP server when backend exits
+        let mcp_process = MCP_PROCESS.lock().unwrap().take();
+        if let Some(mut mcp) = mcp_process {
+            let _ = mcp.kill();
+            let _ = mcp.wait();
         }
     });
 
@@ -101,7 +205,7 @@ pub fn start_backend(app: &AppHandle, port: u16, data_dir: &PathBuf) -> Result<(
         wait_for_backend(&url_clone, 30).await
     });
 
-    tauri::async_runtime::block_on(ready);
+    let _ = tauri::async_runtime::block_on(ready);
 
     Ok(())
 }
@@ -128,7 +232,7 @@ fn get_obrenna_dir() -> PathBuf {
         .join("Obrenna")
 }
 
-fn migrate_data_dir() -> PathBuf {
+pub fn migrate_data_dir() -> PathBuf {
     let new_dir = get_obrenna_dir();
     let old_dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))

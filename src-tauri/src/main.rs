@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backend;
+mod mcp;
 mod updater;
 
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,8 @@ fn main() {
     let port = backend::find_free_port();
 
     let state = Arc::new(Mutex::new(AppState { backend_port: port }));
+    let setup_state = state.clone();
+    let window_state = state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
@@ -24,11 +27,11 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .manage(state.clone())
         .setup(move |app| {
-            let data_dir = get_data_dir(app)?;
+            let data_dir = get_data_dir();
 
-            backend::start_backend(app, port, &data_dir)?;
+            backend::start_backend(app.handle(), port, &data_dir)?;
 
-            let state = state.lock().unwrap();
+            let mut state = setup_state.lock().unwrap();
             state.backend_port = port;
 
             Ok(())
@@ -43,13 +46,13 @@ fn main() {
             updater::install_update,
             updater::get_app_version,
         ])
-        .on_window_event(|app, event| {
+        .on_window_event(move |app, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                let state = state.lock().unwrap();
+                let state = window_state.lock().unwrap();
                 let port = state.backend_port;
                 drop(state);
 
-                let app_handle = app.handle().clone();
+                let app_handle = app.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let url = format!("http://127.0.0.1:{}", port);
                     if let Ok(client) = reqwest::Client::new()
@@ -67,11 +70,11 @@ fn main() {
         .expect("error while running Obrenna");
 }
 
-fn get_data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+fn get_data_dir() -> std::path::PathBuf {
     let data_dir = backend::migrate_data_dir();
 
     let data_dir_str = data_dir.to_string_lossy();
-    std::env::set_var("OBRENNA_DATA_DIR", &data_dir_str);
+    std::env::set_var("OBRENNA_DATA_DIR", data_dir_str.as_ref());
 
     if !data_dir.exists() {
         let _ = std::fs::create_dir_all(&data_dir);
