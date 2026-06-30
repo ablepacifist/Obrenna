@@ -5,13 +5,25 @@ import type { CatalogModel } from '../lib/api'
 interface DownloadStepProps {
   models: CatalogModel[]
   progress: Record<string, number>
+  status: Record<string, string>
+  error: string | null
   done: boolean
+  onRetry: () => void
   onFinish: () => void
   onBack: () => void
 }
 
-export function DownloadStep({ models, progress, done, onFinish, onBack }: DownloadStepProps) {
+export function DownloadStep({ models, progress, status, error, done, onRetry, onFinish, onBack }: DownloadStepProps) {
   const selected = models.filter(m => m.fit === 'ok')
+
+  const labelForStatus = (s: string) => {
+    if (s === 'ready') return 'Ready'
+    if (s === 'failed') return 'Failed'
+    if (s === 'verifying') return 'Verifying'
+    if (s === 'downloading') return 'Downloading'
+    if (s === 'checking') return 'Checking'
+    return 'Queued'
+  }
 
   return (
     <div>
@@ -28,11 +40,12 @@ export function DownloadStep({ models, progress, done, onFinish, onBack }: Downl
       <div className="mt-8 space-y-4">
         {selected.map(m => {
           const pct = Math.round(progress[m.id] ?? 0)
+          const st = status[m.id] ?? 'queued'
           return (
             <div key={m.id}>
               <div className="flex items-center justify-between text-[13px] mb-1.5">
                 <span className="font-medium text-(--ink)">{m.name}</span>
-                <span className="text-(--ink-muted) tabular-nums">{pct}% · {m.size}</span>
+                <span className="text-(--ink-muted) tabular-nums">{labelForStatus(st)} · {pct}% · {m.size}</span>
               </div>
               <div className="h-1.5 rounded-full bg-(--surface-2) overflow-hidden">
                 <div
@@ -48,11 +61,19 @@ export function DownloadStep({ models, progress, done, onFinish, onBack }: Downl
             No models to download for this configuration.
           </div>
         )}
+        {error && (
+          <div className="p-4 text-[13px] text-(--err) rounded-xl border border-(--err)/25 bg-(--err)/5">
+            {error}
+          </div>
+        )}
       </div>
 
       <div className="mt-8 flex items-center justify-between">
         <Button variant="ghost" onClick={onBack} disabled={!done}>Back</Button>
-        <Button onClick={onFinish} disabled={!done}>Open workspace</Button>
+        <div className="flex items-center gap-2">
+          {error && !done && <Button variant="ghost" onClick={onRetry}>Retry failed</Button>}
+          <Button onClick={onFinish} disabled={!done}>Open workspace</Button>
+        </div>
       </div>
     </div>
   )
