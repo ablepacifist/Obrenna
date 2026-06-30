@@ -14,6 +14,8 @@ interface SidebarProps {
   onSelectChat: (id: string) => void
   onNewChat: () => void
   onOpenSettings: () => void
+  onDeleteActiveChat?: () => void
+  sidebarTick?: number
 }
 
 function timeGroup(updatedAt: string): string {
@@ -33,7 +35,7 @@ const GROUP_LABELS: Record<string, string> = {
   older: 'Older',
 }
 
-export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings }: SidebarProps) {
+export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings, onDeleteActiveChat, sidebarTick }: SidebarProps) {
   const [chats, setChats] = useState<ChatDTO[]>([])
   const [folders, setFolders] = useState<FolderDTO[]>([])
   const [q, setQ] = useState('')
@@ -51,7 +53,7 @@ export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings 
     })
   }
 
-  useEffect(() => { reload() }, [])
+  useEffect(() => { reload() }, [sidebarTick])
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase()
@@ -68,7 +70,6 @@ export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings 
     const chat = await createChat()
     setChats(prev => [chat, ...prev])
     onSelectChat(chat.id)
-    onNewChat()
   }
 
   const handleCreateFolder = async () => {
@@ -77,7 +78,7 @@ export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings 
     setOpenFolders(prev => ({ ...prev, [folder.id]: true }))
   }
 
-  const handleMoveChat = async (chatId: string, folderId: string | null) => {
+ const handleMoveChat = async (chatId: string, folderId: string | null) => {
     const updated = await updateChat(chatId, folderId === null ? { unfile: true } : { folder_id: folderId })
     setChats(prev => prev.map(c => c.id === chatId ? updated : c))
   }
@@ -85,6 +86,9 @@ export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings 
   const handleDeleteChat = async (chatId: string) => {
     await deleteChat(chatId)
     setChats(prev => prev.filter(c => c.id !== chatId))
+    if (activeChatId === chatId) {
+      onDeleteActiveChat?.()
+    }
   }
 
   const handleRenameFolder = async (fid: string, name: string) => {
