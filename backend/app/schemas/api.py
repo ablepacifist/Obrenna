@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 # --- settings: model endpoint ----------------------------------------------
 
 class ModelRoles(BaseModel):
-    main_reasoner: str = ""
+    orchestrator: str = ""
     summarizer: str = ""
     utility: str = ""
 

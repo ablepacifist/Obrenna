@@ -70,6 +70,63 @@ class ModelEndpoint(Base):
     models: Mapped[Any] = mapped_column(JSON, default=dict)
 
 
+class ProvisionJob(Base):
+    """Background model provisioning job started by managed setup confirm."""
+
+    __tablename__ = "provision_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    fingerprint_hash: Mapped[str] = mapped_column(String, index=True)
+    runtime_kind: Mapped[str] = mapped_column(String, default="openai_compatible_unknown")
+    status: Mapped[str] = mapped_column(String, default="queued")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    items: Mapped[list["ProvisionJobItem"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class ProvisionJobItem(Base):
+    """Per-model status row for a provisioning job."""
+
+    __tablename__ = "provision_job_items"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("provision_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String)
+    model_slug: Mapped[str] = mapped_column(String)
+    quant: Mapped[str] = mapped_column(String, default="")
+    status: Mapped[str] = mapped_column(String, default="queued")
+    progress_pct: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_downloaded: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_total: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+    job: Mapped["ProvisionJob"] = relationship(back_populates="items")
+
+
+class ProvisionEventLog(Base):
+    """Persisted provisioning events for replay/diagnostics."""
+
+    __tablename__ = "provision_event_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("provision_jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String)
+    payload: Mapped[Any] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Folder(Base):
     __tablename__ = "folders"
 
