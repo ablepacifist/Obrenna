@@ -23,7 +23,7 @@ from ..agent.runtime import (
     orchestrate_turn,
 )
 from ..db import get_db
-from ..models import Artifact, Chat, ChatMessage, File, ModelEndpoint
+from ..models import AppSettings, Artifact, Chat, ChatMessage, File, ModelEndpoint
 from ..model_runtime.client import chat_completion_sync
 from ..model_runtime.config import RuntimeConfig
 from ..schemas.api import ChatMessageDTO, ChatRequest, ChatResponse
@@ -90,7 +90,7 @@ def _save_artifact(spec: dict, db: Session) -> Artifact:
     return record
 
 
-def _get_hardware_plan(db: Session) -> dict:
+def _get_hardware_plan(db: Session, workers_enabled: bool = True) -> dict:
     """Resolve the hardware plan. Returns a fallback plan if resolution fails.
 
     Uses the SAME resolution path as the setup flow and the Local status pill
@@ -117,19 +117,25 @@ def _get_hardware_plan(db: Session) -> dict:
         return {
             "path": "fallback",
             "ctx": 8192,
-            "helper_count": 0,
+            "helper_count": 0 if not workers_enabled else 1,
             "orchestrator": {"model": ep.models.get("orchestrator") or ep.models.get("main_reasoner", "")},
             "summarizer": {},
-            "utility": {},
+            "utility": {} if workers_enabled else {},
         }
     return {
         "path": "fallback",
         "ctx": 8192,
-        "helper_count": 0,
+        "helper_count": 0 if not workers_enabled else 1,
         "orchestrator": {"model": ""},
         "summarizer": {},
         "utility": {},
     }
+
+
+def _get_global_workers_setting(db: Session) -> bool:
+    """Get the global workers setting from AppSettings."""
+    settings = db.get(AppSettings, 1)
+    return settings.workers_enabled if settings else True
 
 
 def _apply_runtime_model_refs(plan: dict, config: RuntimeConfig) -> None:
@@ -227,6 +233,7 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     logger.info("INTENT DETECTED: %s", intent)
     artifact_ids: list[str] = []
     reply_text = ""
+    msg_id: str | None = None
 
     csv_file = next((f for f in file_records if f.filename.lower().endswith(".csv")), None)
 
@@ -241,13 +248,15 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     else:
         logger.info("NORMAL CHAT PATH: delegating to agent runtime")
         # Normal chat — use agent runtime
-        reply_text, msg_id = _handle_normal_chat(db, chat, user_msg, payload)
+        reply_text, msg_id = _handle_normal_chat(db, chat, user_msg, payload,
+                                                  web_search=payload.web_search,
+                                                  workers_enabled=payload.workers_enabled if payload.workers_enabled is not None else _get_global_workers_setting(db))
 
-    logger.info("CHAT RESPONSE: reply=%r artifact_ids=%s msg_id=%s", reply_text, artifact_ids, 'msg_id' in dir())
+    logger.info("CHAT RESPONSE: reply=%r artifact_ids=%s msg_id=%s", reply_text, artifact_ids, msg_id)
 
     # Persist assistant message
     asst_msg = ChatMessage(
-        id=msg_id if 'msg_id' in dir() else uuid.uuid4().hex,
+        id=msg_id or uuid.uuid4().hex,
         chat_id=chat.id,
         role="assistant",
         text=reply_text,
@@ -368,13 +377,19 @@ def _handle_normal_chat(
     chat: Chat,
     user_msg: ChatMessage,
     payload: ChatRequest,
+    *,
+    web_search: bool = False,
+    workers_enabled: bool = True,
 ) -> tuple[str, str]:
     """Handle normal chat via the agent runtime."""
     msg_id = new_message_id()
 
+    # Determine worker setting: per-chat override or global default
+    workers_enabled = payload.workers_enabled if payload.workers_enabled is not None else _get_global_workers_setting(db)
+
     # Get hardware plan and runtime config
-    plan_result = _get_hardware_plan(db)
-    logger.info("HARDWARE PLAN: %s", plan_result)
+    plan_result = _get_hardware_plan(db, workers_enabled=workers_enabled)
+    logger.info("HARDWARE PLAN: workers_enabled=%s helper_count=%s", workers_enabled, plan_result.get("helper_count"))
     config = _get_runtime_config(db)
     # Translate catalog slugs to the runtime's actual pull refs before resolving.
     _apply_runtime_model_refs(plan_result, config)
@@ -410,6 +425,7 @@ def _handle_normal_chat(
                 resolved_plan,
                 assistant_message_id=msg_id,
                 previous_messages=previous_messages,
+                web_search=web_search,
             ):
                 if event.type == "token":
                     tokens.append(event.payload.get("text", ""))
@@ -420,7 +436,7 @@ def _handle_normal_chat(
         reply_text = _run(_collect())
     except Exception as exc:
         logger.error("Agent orchestration failed: %s", exc)
-        reply_text = f"Model error: {exc}"
+        raise HTTPException(status_code=503, detail=str(exc))
 
     return reply_text, msg_id
 

@@ -56,6 +56,7 @@ class AppSettings(Base):
     theme: Mapped[str] = mapped_column(String, default="light")  # light | dark
     active_models: Mapped[Any] = mapped_column(JSON, default=list)
     managed_plan: Mapped[Any] = mapped_column(JSON, default=dict)
+    workers_enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # NEW: Worker models toggle
 
 
 class ModelEndpoint(Base):

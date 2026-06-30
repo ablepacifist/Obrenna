@@ -67,6 +67,7 @@ def get_app_settings(db: Session = Depends(get_db)):
         theme=row.theme or "system",
         active_models=row.active_models or [],
         managed_plan=row.managed_plan or {},
+        workers_enabled=row.workers_enabled,
     )
 
 
@@ -78,6 +79,7 @@ def save_app_settings(payload: AppSettingsDTO, db: Session = Depends(get_db)):
     row.theme = payload.theme
     row.active_models = payload.active_models or []
     row.managed_plan = payload.managed_plan or {}
+    row.workers_enabled = payload.workers_enabled
     db.commit()
     db.refresh(row)
     return AppSettingsDTO(
@@ -86,4 +88,5 @@ def save_app_settings(payload: AppSettingsDTO, db: Session = Depends(get_db)):
         theme=row.theme or "system",
         active_models=row.active_models or [],
         managed_plan=row.managed_plan or {},
+        workers_enabled=row.workers_enabled,
     )

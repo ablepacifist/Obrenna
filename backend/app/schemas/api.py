@@ -36,6 +36,7 @@ class AppSettingsDTO(BaseModel):
     theme: Literal["light", "dark", "system"] = "system"
     active_models: list[str] = []
     managed_plan: dict[str, Any] = {}
+    workers_enabled: bool = True  # NEW: Worker models toggle
 
 
 # --- system / hardware ------------------------------------------------------
@@ -133,6 +134,8 @@ class ChatRequest(BaseModel):
     chat_id: Optional[str] = None
     message: str = ""
     file_ids: list[str] = []
+    workers_enabled: Optional[bool] = None  # NEW: Per-chat override
+    web_search: bool = False
 
 
 class ChatMessageDTO(BaseModel):

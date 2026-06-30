@@ -136,6 +136,10 @@ def _validate_config(config: dict[str, Any]) -> None:
         if key not in fm:
             raise ValueError(f"failure_modes missing key: {key}")
 
+    # services (optional section, but validate if present)
+    if "services" in config:
+        validate_services_config(config["services"])
+
 
 def _default_config() -> dict[str, Any]:
     """Return a minimal valid config when the JSON file is absent."""
@@ -190,6 +194,17 @@ def _default_config() -> dict[str, Any]:
             "orchestrator_error": "emit_typed_error_persist_clean_message",
             "frontend_disconnect": "reload_from_persisted_history",
         },
+        "services": {
+            "web_search": {
+                "provider": "duckduckgo",
+                "max_results_default": 5,
+                "max_results_limit": 10,
+                "timeout_seconds": 10,
+                "cache_ttl_seconds": 300,
+                "brave_api_key_env": "BRAVE_SEARCH_API_KEY",
+                "serpapi_key_env": "SERPAPI_API_KEY",
+            }
+        },
     }
 
 
@@ -228,3 +243,30 @@ def get_permission_broker_config() -> dict[str, Any]:
 def get_orchestration_config() -> dict[str, Any]:
     """Return agent_runtime.orchestration section."""
     return get_config()["agent_runtime"]["orchestration"]
+
+
+def get_services_config() -> dict[str, Any]:
+    """Return services section (search providers, etc.)."""
+    return get_config().get("services", {})
+
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+
+DEFAULT_SUPPORTED_PROVIDERS = ["duckduckgo", "brave", "serpapi"]
+
+
+def validate_services_config(services: dict[str, Any]) -> None:
+    """Validate services.web_search configuration."""
+    web_search = services.get("web_search", {})
+    if web_search:
+        provider = web_search.get("provider", "duckduckgo")
+        if provider not in DEFAULT_SUPPORTED_PROVIDERS:
+            raise ValueError(
+                f"Unsupported web_search provider: {provider}. "
+                f"Supported: {DEFAULT_SUPPORTED_PROVIDERS}"
+            )
+        max_results_limit = web_search.get("max_results_limit", 10)
+        if max_results_limit < 1 or max_results_limit > 50:
+            raise ValueError(
+                f"web_search.max_results_limit must be between 1 and 50, got {max_results_limit}"
+            )

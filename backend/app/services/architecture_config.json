@@ -19,7 +19,7 @@
     },
     "streaming": {
       "phase": 1,
-      "event_types": ["token", "done", "error"],
+      "event_types": ["token", "done", "error", "tool_call", "tool_result", "tool_progress"],
       "envelope_format": "json",
       "event_channel": "agent_event",
       "fields": ["chat_id", "message_id", "type", "payload"]
@@ -32,6 +32,9 @@
     }
   },
   "mcp_tools": {
+    "tool_timeout_seconds": 15,
+    "max_tool_rounds": 5,
+    "transport": "loopback_tcp",
     "allowed": [
       {
         "name": "get_time",
@@ -91,5 +94,16 @@
     "orchestrator_error": "emit_typed_error_persist_clean_message",
     "permission_denied": "structured_tool_result_no_throw",
     "frontend_disconnect": "reload_from_persisted_history"
+  },
+  "services": {
+    "web_search": {
+      "provider": "duckduckgo",
+      "max_results_default": 5,
+      "max_results_limit": 10,
+      "timeout_seconds": 10,
+      "cache_ttl_seconds": 300,
+      "brave_api_key_env": "BRAVE_SEARCH_API_KEY",
+      "serpapi_key_env": "SERPAPI_API_KEY"
+    }
   }
 }
