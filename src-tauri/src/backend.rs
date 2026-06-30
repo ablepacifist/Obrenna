@@ -1,7 +1,7 @@
-use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -9,7 +9,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use tauri::Emitter;
 
-use reqwest;
 use tokio::time::sleep;
 
 static BACKEND_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
@@ -55,7 +54,12 @@ fn resolve_python_executable(root: &PathBuf) -> String {
 }
 
 async fn wait_for_backend(url: &str, timeout_secs: u64) -> bool {
-    let client = reqwest::Client::new();
+    // Extract host and port from url (e.g., "http://127.0.0.1:8000")
+    let port = match url.split(':').last() {
+        Some(p) => p.parse::<u16>().unwrap_or(8000),
+        None => 8000,
+    };
+
     let start = std::time::Instant::now();
     let mut attempts = 0u32;
 
@@ -68,9 +72,15 @@ async fn wait_for_backend(url: &str, timeout_secs: u64) -> bool {
             return false;
         }
 
-        match client.get(format!("{}/health", url)).send().await {
-            Ok(resp) if resp.status().is_success() => return true,
-            Ok(_) => {}
+        // Simple TCP connection test to check if port is listening
+        match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+            Ok(mut stream) => {
+                // Send HTTP HEAD request
+                let req = b"HEAD /health HTTP/1.0\r\nHost: localhost\r\n\r\n";
+                if stream.write_all(req).is_ok() {
+                    return true;
+                }
+            }
             Err(_) => {}
         }
         sleep(Duration::from_millis(500)).await;
@@ -147,25 +157,31 @@ pub fn start_backend(app: &AppHandle, port: u16, data_dir: &PathBuf) -> Result<(
     };
 
     if !mcp_server_path.as_os_str().is_empty() && mcp_server_path.exists() {
-        let mcp_cmd = Command::new(&mcp_server_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
+        use crate::mcp::McpProxy;
 
-        match mcp_cmd {
-            Ok(mcp_child) => {
-                *MCP_PROCESS.lock().unwrap() = Some(mcp_child);
-                // Start MCP proxy TCP listener for Python sidecar
-                if let Ok(listener) = TcpListener::bind("127.0.0.1:0") {
-                    let proxy_port = listener.local_addr().unwrap().port();
-                    // Pass proxy URL to Python backend via env var
-                    std::env::set_var("OBRENNA_MCP_PROXY_URL", format!("tcp://127.0.0.1:{}", proxy_port));
-                    drop(listener);
+        // Create MCP proxy with TCP listener
+        match McpProxy::new() {
+            Ok(mcp_proxy) => {
+                let proxy_url = mcp_proxy.proxy_url();
+
+                // Spawn MCP server process via proxy
+                match mcp_proxy.spawn_server(&mcp_server_path) {
+                    Ok(_) => {
+                        // Start TCP relay
+                        if let Err(e) = mcp_proxy.start_proxy() {
+                            eprintln!("Warning: MCP proxy relay failed: {}", e);
+                        } else {
+                            // Pass proxy URL to Python backend via env var
+                            std::env::set_var("OBRENNA_MCP_PROXY_URL", &proxy_url);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to spawn MCP server: {}", e);
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Failed to spawn MCP server: {}", e);
+                eprintln!("Warning: Failed to create MCP proxy: {}", e);
             }
         }
     }

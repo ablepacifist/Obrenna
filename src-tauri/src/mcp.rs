@@ -5,8 +5,8 @@
 // server stdio and relays responses back.
 
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
-use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,24 +37,25 @@ pub struct McpError {
 
 /// State for the MCP server process and its proxy.
 pub struct McpProxy {
-    server_process: Mutex<Option<Child>>,
+    server_process: Arc<Mutex<Option<Child>>>,
+    tcp_listener: Arc<Mutex<Option<std::net::TcpListener>>>,
     tcp_port: u16,
-    shutdown_tx: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl McpProxy {
-    /// Start the MCP server process and begin proxying.
-    pub fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .expect("Failed to bind MCP proxy TCP port");
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+    /// Create a new MCP proxy and bind to a free TCP port.
+    pub fn new() -> Result<Self, String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("Failed to bind MCP proxy TCP port: {}", e))?;
+        let port = listener.local_addr()
+            .map_err(|e| format!("Failed to get TCP port: {}", e))?
+            .port();
 
-        McpProxy {
-            server_process: Mutex::new(None),
+        Ok(McpProxy {
+            server_process: Arc::new(Mutex::new(None)),
+            tcp_listener: Arc::new(Mutex::new(Some(listener))),
             tcp_port: port,
-            shutdown_tx: Mutex::new(None),
-        }
+        })
     }
 
     /// Get the loopback URL for Python to connect to.
@@ -68,8 +69,7 @@ impl McpProxy {
         let mut cmd = Command::new(server_path);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("OBRENNA_MCP_PROXY_PORT", self.tcp_port.to_string());
+            .stderr(Stdio::piped());
 
         let child = cmd.spawn().map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
 
@@ -81,17 +81,58 @@ impl McpProxy {
         Ok(self.proxy_url())
     }
 
-    /// Start the TCP listener and relay loop. Runs asynchronously.
-    /// Phase 1: Returns Ok but the relay is a stub. Full relay implementation
-    /// will be added in a follow-up pass when the MCP server binary exists.
+    /// Start the async TCP relay between Python client and MCP server stdio.
     pub fn start_proxy(&self) -> Result<(), String> {
-        let _listener = TcpListener::bind(format!("127.0.0.1:{}", self.tcp_port))
-            .map_err(|e| format!("Failed to bind MCP proxy listener: {}", e))?;
+        let listener = self.tcp_listener.lock().unwrap().take()
+            .ok_or_else(|| "TCP listener already taken".to_string())?;
 
-        // Phase 1 stub: TCP port is bound and available.
-        // The full async relay between TCP and MCP server stdio will be implemented
-        // when the MCP server binary is ready.
-        let _ = _listener;
+        let server_process = Arc::clone(&self.server_process);
+
+        std::thread::spawn(move || {
+            if let Ok((tcp_stream, _)) = listener.accept() {
+                tcp_stream.set_nonblocking(false).ok();
+
+                let mut proc_opt = server_process.lock().unwrap();
+                if let Some(ref mut child) = *proc_opt {
+                    if let (Some(mut child_stdin), Some(mut child_stdout)) = (
+                        child.stdin.take(),
+                        child.stdout.take(),
+                    ) {
+                        drop(proc_opt);
+
+                        let mut tcp_w = tcp_stream.try_clone().ok();
+                        let mut tcp_r = tcp_stream;
+
+                        let mut buf = [0; 4096];
+                        loop {
+                            match tcp_r.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    if child_stdin.write_all(&buf[..n]).is_err() {
+                                        break;
+                                    }
+                                    let _ = child_stdin.flush();
+                                }
+                                Err(_) => break,
+                            }
+
+                            match child_stdout.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    if let Some(ref mut w) = tcp_w {
+                                        if w.write_all(&buf[..n]).is_err() {
+                                            break;
+                                        }
+                                        let _ = w.flush();
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
         Ok(())
     }

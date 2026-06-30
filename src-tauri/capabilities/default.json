@@ -4,10 +4,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    "fs:default",
-    "dialog:default",
-    "updater:default",
-    "process:default"
+    "shell:allow-open"
   ]
 }
