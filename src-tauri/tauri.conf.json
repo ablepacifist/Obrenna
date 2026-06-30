@@ -36,17 +36,17 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/backend/*"
+      "resources/backend/*",
+      "resources/mcp/*"
     ],
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "headerImage": "icons/header.bmp",
         "sidebarImage": "icons/sidebar.bmp",
-        "licenseUrl": "https://github.com/Obrenna/obrenna/blob/main/LICENSE",
         "languages": [
           "English",
-          "SimplifiedChinese",
+          "SimpChinese",
           "Japanese",
           "Korean",
           "French",

@@ -1,5 +1,5 @@
 {
-  "id": "default",
+  "identifier": "default",
   "description": "Default capability for Obrenna desktop app.",
   "windows": ["main"],
   "permissions": [
