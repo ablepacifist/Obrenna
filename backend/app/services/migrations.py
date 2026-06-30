@@ -83,6 +83,60 @@ def run_migrations(db: Session) -> None:
                 )
             """))
 
+        # --- provision_jobs table ---
+        if not _table_exists(db, "provision_jobs"):
+            db.execute(text("""
+                CREATE TABLE provision_jobs (
+                    id TEXT PRIMARY KEY,
+                    fingerprint_hash TEXT NOT NULL,
+                    runtime_kind TEXT NOT NULL DEFAULT 'openai_compatible_unknown',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    error_message TEXT,
+                    started_at TIMESTAMP NOT NULL,
+                    completed_at TIMESTAMP
+                )
+            """))
+            db.execute(text(
+                "CREATE INDEX idx_provision_jobs_fingerprint_hash ON provision_jobs(fingerprint_hash)"
+            ))
+
+        # --- provision_job_items table ---
+        if not _table_exists(db, "provision_job_items"):
+            db.execute(text("""
+                CREATE TABLE provision_job_items (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES provision_jobs(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    model_slug TEXT NOT NULL,
+                    quant TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress_pct INTEGER NOT NULL DEFAULT 0,
+                    bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+                    bytes_total INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+            """))
+            db.execute(text(
+                "CREATE INDEX idx_provision_job_items_job_id ON provision_job_items(job_id)"
+            ))
+
+        # --- provision_event_logs table ---
+        if not _table_exists(db, "provision_event_logs"):
+            db.execute(text("""
+                CREATE TABLE provision_event_logs (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL REFERENCES provision_jobs(id) ON DELETE CASCADE,
+                    event_type TEXT NOT NULL,
+                    payload JSON NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMP NOT NULL
+                )
+            """))
+            db.execute(text(
+                "CREATE INDEX idx_provision_event_logs_job_id ON provision_event_logs(job_id)"
+            ))
+
         # --- chat_turn_vectors (sqlite-vec) ---
         if not _table_exists(db, "chat_turn_vectors"):
             db.execute(text(f"""

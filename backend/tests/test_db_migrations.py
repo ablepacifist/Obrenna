@@ -46,3 +46,11 @@ def test_managed_plan_migration(tmp_path):
         res = conn.execute(text("PRAGMA table_info(settings_app)")).fetchall()
         columns = [r[1] for r in res]
         assert "managed_plan" in columns
+
+        table_rows = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('provision_jobs', 'provision_job_items', 'provision_event_logs')")
+        ).fetchall()
+        table_names = {r[0] for r in table_rows}
+        assert "provision_jobs" in table_names
+        assert "provision_job_items" in table_names
+        assert "provision_event_logs" in table_names
