@@ -18,6 +18,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     const msg = await res.text().catch(() => res.statusText)
     throw new Error(`${method} ${path} → ${res.status}: ${msg}`)
   }
+  if (res.status === 204 || res.headers.get('content-length') === '0') {
+    return undefined as unknown as T
+  }
   return res.json() as Promise<T>
 }
 
@@ -29,7 +32,7 @@ export type ModelEndpointConfig = {
   provider: string
   base_url: string
   api_key: string
-  models: { main_reasoner?: string; summarizer?: string; utility?: string }
+  models: { orchestrator?: string; summarizer?: string; utility?: string }
 }
 export type TestConnectionResult = { ok: boolean; models: string[]; latency_ms?: number; error?: string }
 export type AppSettings = {
@@ -70,6 +73,23 @@ export type CatalogModel = {
 }
 export const getModelCatalog = () => req<CatalogModel[]>('GET', '/api/models/catalog')
 
+export type ModelRoleState = 'loaded' | 'installed' | 'missing'
+export type ModelRoleStatus = {
+  role: string
+  label: string
+  display_name: string
+  available: boolean
+  state: ModelRoleState
+}
+export type ModelStatus = {
+  connected: boolean
+  all_ready: boolean
+  chat_ready: boolean
+  roles: ModelRoleStatus[]
+  error: string | null
+}
+export const getModelStatus = () => req<ModelStatus>('GET', '/api/models/status')
+
 // ── managed setup plan -------------------------------------------------------
 export type ModelRef = {
   model: string
@@ -100,10 +120,49 @@ export type ManagedPlan = {
   validation_stubbed: boolean
 }
 
-export type ConfirmPlanResponse = { confirmed: boolean; plan: ManagedPlan }
+export type ConfirmPlanResponse = {
+  confirmed: boolean
+  plan: ManagedPlan
+  job_id: string
+  status: string
+  runtime_kind: string
+  supports_pull: boolean
+  supports_streaming_progress: boolean
+  reused: boolean
+}
+
+export type ProvisioningItem = {
+  id: string
+  role: string
+  model_slug: string
+  quant: string
+  status: string
+  progress_pct: number
+  bytes_downloaded: number
+  bytes_total: number
+  error_message?: string | null
+  updated_at: string
+}
+
+export type ProvisioningJobSnapshot = {
+  id: string
+  fingerprint_hash: string
+  runtime_kind: string
+  status: string
+  error_message?: string | null
+  started_at: string
+  completed_at?: string | null
+  items: ProvisioningItem[]
+}
 
 export const getManagedPlan = () => req<ManagedPlan>('GET', '/api/setup/managed-plan')
 export const confirmManagedPlan = () => req<ConfirmPlanResponse>('POST', '/api/setup/managed-plan/confirm')
+export const getProvisioningJob = (jobId: string) => req<ProvisioningJobSnapshot>('GET', `/api/setup/provisioning/${jobId}`)
+export const retryProvisioningJob = (jobId: string) => req<{ ok: boolean; job_id: string; status: string; retried: number }>('POST', `/api/setup/provisioning/${jobId}/retry`)
+export async function getProvisioningEventsUrl(jobId: string, cursor = 0): Promise<string> {
+  const base = await getBase()
+  return `${base}/api/setup/provisioning/${jobId}/events?cursor=${cursor}`
+}
 
 // ── files ─────────────────────────────────────────────────────────────────────
 export type FileDTO = {

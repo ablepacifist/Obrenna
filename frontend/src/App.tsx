@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { ToastProvider } from './components/ui/Toast'
+import { AnimationPreferenceProvider } from './context/AnimationPreferenceContext'
 import { getAppSettings } from './lib/api'
 import { getConfig } from './lib/config'
 import { SetupFlow } from './setup/SetupFlow'
@@ -17,6 +18,7 @@ export default function App() {
   const [panelWidth, setPanelWidth] = useState(480)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [newChatTick, setNewChatTick] = useState(0)
+  const [sidebarTick, setSidebarTick] = useState(0)
 
   useEffect(() => {
     getConfig().then(async () => {
@@ -50,42 +52,50 @@ export default function App() {
   }
 
  if (loading || setupDone === null) {
-     return (
-       <ThemeProvider>
-         <ToastProvider>
-           <div className="min-h-screen bg-(--bg) flex items-center justify-center">
-             <div className="text-[13px] text-(--ink-muted)">Loading…</div>
-           </div>
-         </ToastProvider>
-       </ThemeProvider>
-     )
+   return (
+        <ThemeProvider>
+          <AnimationPreferenceProvider>
+          <ToastProvider>
+            <div className="min-h-screen bg-(--bg) flex items-center justify-center">
+              <div className="text-[13px] text-(--ink-muted)">Loading…</div>
+            </div>
+          </ToastProvider>
+          </AnimationPreferenceProvider>
+        </ThemeProvider>
+      )
    }
 
    if (!setupDone) {
      return (
-       <ThemeProvider>
-         <ToastProvider>
-           <SetupFlow onFinish={() => setSetupDone(true)} />
-         </ToastProvider>
-       </ThemeProvider>
-     )
+        <ThemeProvider>
+          <AnimationPreferenceProvider>
+          <ToastProvider>
+            <SetupFlow onFinish={() => setSetupDone(true)} />
+          </ToastProvider>
+          </AnimationPreferenceProvider>
+        </ThemeProvider>
+      )
    }
 
-  return (
-     <ThemeProvider>
-       <ToastProvider>
-       <div className="h-screen w-screen flex bg-(--bg) text-(--ink) antialiased">
+ return (
+      <ThemeProvider>
+        <AnimationPreferenceProvider>
+        <ToastProvider>
+        <div className="h-screen w-screen flex bg-(--bg) text-(--ink) antialiased">
         <Sidebar
           activeChatId={activeChatId}
           onSelectChat={id => { setActiveChatId(id); setOpenArtifactId(null) }}
           onNewChat={() => { setActiveChatId(null); setOpenArtifactId(null); setNewChatTick(t => t + 1) }}
           onOpenSettings={() => setSettingsOpen(true)}
+          onDeleteActiveChat={() => { setActiveChatId(null); setOpenArtifactId(null) }}
+          sidebarTick={sidebarTick}
         />
 
         <div className="flex-1 flex min-w-0">
           <ChatThread
             key={activeChatId ?? `new-${newChatTick}`}
             chatId={activeChatId}
+            onChatCreated={id => { setActiveChatId(id); setSidebarTick(t => t + 1) }}
             onOpenArtifact={id => setOpenArtifactId(id)}
           />
           {openArtifactId && (
@@ -109,7 +119,8 @@ export default function App() {
           />
         )}
        </div>
-       </ToastProvider>
-     </ThemeProvider>
-   )
+        </ToastProvider>
+        </AnimationPreferenceProvider>
+      </ThemeProvider>
+    )
 }
