@@ -277,11 +277,12 @@ def choose_and_validate(
         floor = _get_constants(catalog).get("interactive_tok_s_floor_gpu", 8)
     elif path == "cpu_only":
         # CPU path: fit() variant on RAM not yet implemented in this milestone
+        # Apple path: unified-memory fit() also not yet implemented — ctx = ctx_max is a milestone stub
         fitted = {"ctx": plan["orchestrator"]["ctx_max"]}
         helpers = plan.get("helpers", {}).get("count_max", 1)
         floor = _get_constants(catalog).get("interactive_tok_s_floor_cpu_only", 5)
     else:
-        # Apple
+        # Apple Silicon path — unified memory fit() is a milestone stub; ctx = ctx_max
         fitted = {"ctx": plan["orchestrator"]["ctx_max"]}
         helpers = 2
         floor = _get_constants(catalog).get("interactive_tok_s_floor_gpu", 8)
@@ -289,6 +290,12 @@ def choose_and_validate(
     result = smoke_test_stub(plan, fitted["ctx"], helpers)
 
     if result["loaded_successfully"] and result["tok_s"] >= floor:
+        detection_warnings = []
+        if path == "cpu_only":
+            detection_warnings.append("CPU RAM-fit not yet implemented — ctx is set to ctx_max (may exceed available RAM)")
+        if path == "apple":
+            detection_warnings.append("Apple unified-memory fit() not yet implemented — ctx is set to ctx_max")
+
         response = {
             "path": path,
             "plan_id": plan["id"],
@@ -302,7 +309,7 @@ def choose_and_validate(
             "recommended_setup_mode": "managed",
             "action": "proceed_managed",
             "reason": None,
-            "detection_warnings": [],
+            "detection_warnings": detection_warnings,
             "orchestrator": {
                 "model": plan["orchestrator"]["model"],
                 "quant": plan["orchestrator"]["quant"],
@@ -326,10 +333,6 @@ def choose_and_validate(
             resp_util = dict(plan["utility"])
             resp_util["device"] = plan["utility"].get("device", "cpu")
             response["utility"] = resp_util
-
-        # Add optional orchestrator if present
-        if "optional_orchestrator" in plan:
-            response["optional_orchestrator"] = dict(plan["optional_orchestrator"])
 
         return response
 

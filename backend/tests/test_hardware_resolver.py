@@ -44,7 +44,7 @@ def test_rx580_i5_7500_16gb_t1_floor_fp32(catalog):
 
     assert result["path"] == "gpu"
     assert result["plan_id"] == "T1-floor-fp32"
-    assert result["orchestrator"]["model"] == "qwen3.5-4b"
+    assert result["orchestrator"]["model"] == "qwen3.5-4b-claude-opus-reasoning-distilled-v2"
     assert result["orchestrator"]["quant"] == "Q5_K_M"
     assert result["helper_count"] == 1  # C0: peak=1, R-16gb: ceiling=3 → min(1,3)=1
 
@@ -95,7 +95,7 @@ def test_rtx3060_32gb_t3_plus(catalog):
 
     assert result["path"] == "gpu"
     assert result["plan_id"] == "T3-plus"
-    assert result["orchestrator"]["model"] == "qwen3.5-9b"
+    assert result["orchestrator"]["model"] == "qwen3.5-9b-claude-opus-reasoning-distilled"
     assert result["orchestrator"]["quant"] == "Q6_K"
 
 
@@ -121,7 +121,7 @@ def test_gpu_less_32gb_ddr5_cl1_minimum(catalog):
 
     assert result["path"] == "cpu_only"
     assert result["plan_id"] == "CL1-minimum"
-    assert result["orchestrator"]["model"] == "qwen3.5-4b"
+    assert result["orchestrator"]["model"] == "qwen3.5-4b-claude-opus-reasoning-distilled-v2"
     assert result["orchestrator"]["quant"] == "Q5_K_M"
 
 
@@ -173,7 +173,7 @@ def test_16gb_fp16_gpu_gets_t4_high(catalog):
 
     assert result["path"] == "gpu"
     assert result["plan_id"] == "T4-high"
-    assert result["orchestrator"]["model"] == "qwen3.5-9b"
+    assert result["orchestrator"]["model"] == "qwen3.5-9b-claude-opus-reasoning-distilled"
     assert result["orchestrator"]["quant"] == "Q8_0"
 
 
@@ -197,7 +197,7 @@ def test_8gb_fp16_gpu_gets_t2_not_t1(catalog):
 
     assert result["path"] == "gpu"
     assert result["plan_id"] == "T2-standard-fp16"
-    assert result["orchestrator"]["model"] == "qwen3.5-9b"
+    assert result["orchestrator"]["model"] == "qwen3.5-9b-claude-opus-reasoning-distilled"
 
 
 def test_24gb_fp16_gpu_gets_t5_workstation(catalog):
@@ -491,14 +491,14 @@ def test_fit_gpu_context_shrinks(catalog):
     """When free VRAM is tight, fit() shrinks context from ctx_max toward ctx_min."""
     plan = {
         "orchestrator": {
-            "model": "qwen3.5-9b",
+            "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
             "quant": "Q4_K_M",
             "device": "gpu",
             "ctx_min": 8192,
             "ctx_max": 16384,
         }
     }
-    # Plenty of VRAM: full ctx_max (~9GB total needed, 12GB free → 10.2 usable)
+    # Plenty of VRAM: full ctx_max (~4GB weight + KV cache + overhead, 12GB free → 10.2 usable)
     live_fertile = LiveFreeResources(gpu_vram_free_gb=12.0, ram_free_gb=12.0)
     result_fertile = fit(plan, catalog, live_fertile)
     assert result_fertile["ctx"] == 16384
@@ -514,7 +514,7 @@ def test_fit_never_drops_below_ctx_min(catalog):
     """Fit must never produce ctx below ctx_min."""
     plan = {
         "orchestrator": {
-            "model": "qwen3.5-9b",
+            "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
             "quant": "Q4_K_M",
             "device": "gpu",
             "ctx_min": 8192,
@@ -568,3 +568,114 @@ def test_top_level_reject(catalog):
     path, plan = resolve_top_level(fp, catalog)
     assert path == "reject"
     assert plan is None
+
+
+# ===========================================================================
+# Conservative fallback tests — missing detection fields block higher tiers
+# ===========================================================================
+
+def test_missing_ram_type_blocks_cl1(catalog):
+    """Missing ram_type (unknown) → cannot qualify for CL1-minimum, falls to CL0-lite."""
+    fp = HardwareFingerprint(
+        gpu_vendor="none",
+        gpu_vram_total_gb=0,
+        gpu_fp16_support=False,
+        cpu_physical_cores=6,
+        cpu_threads=12,
+        cpu_isa_flags=["avx2"],
+        ram_total_gb=32,
+        ram_type="unknown",  # not ddr5
+        ram_channels=2,
+        os="windows",
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=0, ram_free_gb=22.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    assert result["path"] == "cpu_only"
+    assert result["plan_id"] == "CL0-lite"
+
+
+def test_missing_gpu_fp16_blocks_t2(catalog):
+    """8GB GPU without fp16 → T1-floor-fp32, NOT T2-standard-fp16."""
+    fp = HardwareFingerprint(
+        gpu_vendor="nvidia",
+        gpu_vram_total_gb=8,
+        gpu_fp16_support=False,  # explicitly False
+        gpu_backends_available=["cuda"],  # no Vulkan, so T1 blocked
+        cpu_physical_cores=6,
+        cpu_threads=12,
+        cpu_isa_flags=["avx2"],
+        ram_total_gb=16,
+        ram_type="ddr4",
+        ram_channels=2,
+        os="windows",
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=6.0, ram_free_gb=11.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    # T1 requires vulkan backend, T0 requires gpu_vram>=6 + gpu_fp16=false
+    assert result["path"] == "gpu"
+    assert result["plan_id"] == "T0-subfloor"
+
+
+def test_missing_avx2_blocks_all_cpu_tiers_with_isa_requirement(catalog):
+    """No AVX2 → blocks CL1+ (which requires avx2), CL0-lite has no isa requirement."""
+    fp = HardwareFingerprint(
+        gpu_vendor="none",
+        gpu_vram_total_gb=0,
+        gpu_fp16_support=False,
+        cpu_physical_cores=12,
+        cpu_threads=24,
+        cpu_isa_flags=[],  # no AVX2
+        ram_total_gb=64,
+        ram_type="ddr5",
+        ram_channels=2,
+        os="linux",
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=0, ram_free_gb=50.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    # CL0-lite requires only ram_gb >= 16, no isa requirement
+    assert result["path"] == "cpu_only"
+    assert result["plan_id"] == "CL0-lite"
+
+
+def test_cpu_only_path_includes_detection_warnings(catalog):
+    """CPU-only path should include a warning that RAM-fit is stubbed."""
+    fp = HardwareFingerprint(
+        gpu_vendor="none",
+        gpu_vram_total_gb=0,
+        gpu_fp16_support=False,
+        cpu_physical_cores=6,
+        cpu_threads=12,
+        cpu_isa_flags=["avx2"],
+        ram_total_gb=32,
+        ram_type="ddr5",
+        ram_channels=2,
+        os="windows",
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=0, ram_free_gb=22.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    assert result["path"] == "cpu_only"
+    assert "plan_id" in result
+    assert len(result.get("detection_warnings", [])) >= 1
+
+
+def test_apple_path_includes_detection_warnings(catalog):
+    """Apple Silicon path should include a warning that unified-memory fit is stubbed."""
+    fp = HardwareFingerprint(
+        gpu_vendor="apple",
+        unified_mem_gb=16,
+        os="macos",
+        cpu_physical_cores=8,
+        cpu_threads=8,
+        cpu_isa_flags=[],
+        ram_total_gb=16,
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=12.0, ram_free_gb=10.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    assert result["path"] == "apple"
+    assert result["plan_id"] == "A1"
+    assert len(result.get("detection_warnings", [])) >= 1

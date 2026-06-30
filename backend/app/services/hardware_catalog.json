@@ -2,50 +2,52 @@
   "$schema_version": "1.0",
   "$description": "Deterministic hardware-to-model-plan catalog for a local-first AI workspace app. The resolver walks gpu_tiers.plans (or cpu_only_tiers.plans if no qualifying GPU) in descending rank order and returns the FIRST plan whose requires block is fully satisfied by the probed hardware fingerprint. This file is the single source of truth for model selection.",
   "model_definitions": {
-    "$description": "Canonical model metadata, referenced by id from plans below.",
+    "$description": "Canonical model metadata, referenced by id from plans below. DELIBERATELY MIXED FAMILY, split by ROLE — this is an intentional design decision: (1) ORCHESTRATOR = Claude-Opus-distilled Qwen3.5/3.6 at every tier. Distilled variants provide reasoning depth superior to stock; IBM Granite 4.x is 'not a reasoning model' built for fast predictable inference, not deep deliberation. (2) SUMMARIZER = IBM Granite 4.0-H (hybrid Mamba-2/Transformer). Mamba architecture keeps KV/memory ~constant as context grows (>70% RAM reduction for long context). (3) UTILITY = Qwen3.5-0.8b. Highest-COUNT role doing extraction/JSON-shaping; template-compatibility with orchestrator output matters more here than at the single-summarizer level.",
     "qwen3.5-0.8b": {
       "family": "qwen3.5",
       "params_b": 0.8,
-      "role_class": ["utility"]
+      "ollama_ref": "DanyaVoredom/DanyAI-qwen3.5-0.8b",
+      "role_class": ["utility"],
+      "notes": "Stock-class Qwen3.5-0.8B utility worker. Bare 'qwen3.5-0.8b' is NOT published in the Ollama library namespace; the nearest real pullable build is DanyaVoredom/DanyAI-qwen3.5-0.8b (256K ctx)."
     },
-    "qwen3.5-4b": {
+    "qwen3.5-4b-claude-opus-reasoning-distilled-v2": {
       "family": "qwen3.5",
       "params_b": 4,
-      "role_class": ["orchestrator"]
+      "ollama_ref": "kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2",
+      "role_class": ["orchestrator"],
+      "notes": "Claude-Opus reasoning distilled from Qwen3.5-4B base. Replaces stock qwen3.5-4b as the T0/T1 orchestrator. Produces <think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2."
     },
-    "qwen3.5-9b": {
+    "qwen3.5-9b-claude-opus-reasoning-distilled": {
       "family": "qwen3.5",
       "params_b": 9,
-      "role_class": ["orchestrator"]
+      "ollama_ref": "kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+      "role_class": ["orchestrator"],
+      "notes": "Claude-Opus reasoning distilled from Qwen3.5-9B base. Replaces stock qwen3.5-9b as the T2-T4 orchestrator. Produces <think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF."
     },
     "qwen3.5-27b": {
       "family": "qwen3.5",
       "params_b": 27,
-      "role_class": ["orchestrator"]
+      "ollama_ref": "qwen3.5:27b",
+      "role_class": ["orchestrator"],
+      "notes": "STOCK Qwen3.5-27B from Ollama's official library namespace (qwen3.5:27b, Q4_K_M ~17GB). Deliberately NOT a community 'Claude-distilled' fork — that 27B space is populated with templated mass-uploaded cards and safety-stripped/abliterated variants (e.g. juilpark/...-heretic) with no traceable primary author, unlike the verified 4B/9B distills. Vendor-distributed stock is the trustworthy choice here."
     },
     "qwen3.6-35b-a3b": {
       "family": "qwen3.6",
       "params_b": 35,
       "active_params_b": 3,
       "moe": true,
+      "ollama_ref": "qwen3.6:35b-a3b",
       "role_class": ["orchestrator"],
-      "notes": "MoE — only ~3B active params per token."
-    },
-    "gpt-oss-20b": {
-      "family": "gpt-oss",
-      "params_b": 21,
-      "active_params_b": 3.6,
-      "moe": true,
-      "role_class": ["orchestrator-optional"],
-      "notes": "OpenAI open-weight MoE. Evaluated and rejected as default due to hallucination on document-grounded tasks."
+      "notes": "MoE — only ~3B active params per token. Streams far less weight per token than a dense model of equal total size, preferred orchestrator for bandwidth-bound CPU-only tiers once it fits in RAM budget with headroom. STOCK ref from Ollama's official library namespace (qwen3.6:35b-a3b, Apache 2.0, vendor-distributed) — chosen over community mirrors/APEX repackagings."
     },
     "granite4.0-h-micro-3b": {
       "family": "granite4-h",
       "params_b": 3,
       "moe": false,
       "hybrid_mamba": true,
+      "ollama_ref": "granite4:micro-h",
       "role_class": ["summarizer"],
-      "notes": "Hybrid Mamba-2/Transformer. Constant memory as context grows."
+      "notes": "Dense hybrid (9:1 Mamba-2/Transformer). Standard summarizer for GPU tiers and higher CPU-only tiers. Mamba layers give ~constant memory as context grows — ideal for long-document ingestion. Official Ollama library ref: granite4:micro-h (3b-h)."
     },
     "granite4.0-h-tiny-7b-a1b": {
       "family": "granite4-h",
@@ -53,25 +55,53 @@
       "active_params_b": 1,
       "moe": true,
       "hybrid_mamba": true,
+      "ollama_ref": "granite4:tiny-h",
       "role_class": ["summarizer"],
-      "notes": "Hybrid MoE, 7B total / ~1B active."
+      "notes": "Hybrid MoE, 7B total / ~1B active. Optional upgraded summarizer for tiers with VRAM/RAM headroom (T4+). ~1B active means summarizes at roughly 1B-dense speed with 7B-class quality. Official Ollama library ref: granite4:tiny-h (7b-a1b-h)."
+    },
+    "qwen3.5-0.8b-claude-opus-reasoning-distilled": {
+      "family": "qwen3.5",
+      "params_b": 0.8,
+      "ollama_ref": "radenadri/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+      "role_class": ["orchestrator"],
+      "license": "apache-2.0",
+      "source": "community GGUF, radenadri/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled-GGUF, HF",
+      "notes": "LoRA SFT fine-tune of base qwen3.5-0.8b, response-only training masked on CoT sequences, distilled from Claude trajectories. Native context window: 16384. Replaces 4B variant at T0 for faster inference on subfloor hardware."
+    },
+    "granite-4.0-h-350m": {
+      "family": "granite4-h",
+      "params_b": 0.35,
+      "moe": false,
+      "hybrid_mamba": true,
+      "ollama_ref": "granite4:350m-h",
+      "role_class": ["summarizer", "utility"],
+      "license": "apache-2.0",
+      "source": "ibm-granite/granite-4.0-h-350m (official Ollama library: granite4:350m-h)",
+      "notes": "Hybrid Mamba2/attention 350M. Chosen for high efficiency at ultra-low tiers. Standard summarizer/utility for T0. Official Ollama library ref: granite4:350m-h."
     },
     "_quant_weight_table_gb": {
-      "$description": "MEASURED GGUF/MLX file sizes in GB, not theoretical estimates. Use this for all VRAM/RAM budgeting.",
+      "$description": "MEASURED GGUF/MLX file sizes in GB, not theoretical params*bytes-per-param estimates. Real files include embeddings/metadata overhead that formulas miss. Use this table for all VRAM/RAM budgeting in fit() and validation. Re-measure and update when a model is re-quantized upstream.",
       "qwen3.5-0.8b": {
+        "Q4_K_M": 0.53,
+        "Q5_K_M": 0.59,
         "Q6_K": 0.7,
         "Q8_0": 0.85
       },
-      "qwen3.5-4b": {
-        "Q4_K_M": 2.4,
-        "Q5_K_M": 3.0,
-        "Q6_K": 3.4
+      "qwen3.5-0.8b-claude-opus-reasoning-distilled": {
+        "Q4_K_M": 0.527,
+        "Q5_K_M": 0.585,
+        "Q6_K": 0.63
       },
-      "qwen3.5-9b": {
-        "Q4_K_M": 5.5,
-        "Q5_K_M": 6.5,
-        "Q6_K": 7.4,
-        "Q8_0": 9.6
+      "qwen3.5-4b-claude-opus-reasoning-distilled-v2": {
+        "Q4_K_M": 1.75,
+        "Q5_K_M": 2.2,
+        "Q6_K": 2.5
+      },
+      "qwen3.5-9b-claude-opus-reasoning-distilled": {
+        "Q4_K_M": 3.9,
+        "Q5_K_M": 4.6,
+        "Q6_K": 5.2,
+        "Q8_0": 6.5
       },
       "qwen3.5-27b": {
         "Q4_K_M": 16.5
@@ -80,9 +110,10 @@
         "Q4_K_M": 21.4,
         "Q5_K_M": 24.8
       },
-      "gpt-oss-20b": {
-        "Q4_K_M": 12.0,
-        "Q6_K": 18.5
+      "granite-4.0-h-350m": {
+        "Q4_K_M": 0.25,
+        "Q6_K": 0.3,
+        "IQ3_XXS": 0.15
       },
       "granite4.0-h-micro-3b": {
         "Q5_K_M": 2.0,
@@ -94,16 +125,16 @@
       }
     },
     "_kv_cache_gb_per_1k_tokens": {
-      "$description": "Marginal memory cost of 1000 tokens of KV cache at q8_0 KV quantization.",
-      "qwen3.5-4b": 0.075,
-      "qwen3.5-9b": 0.09,
+      "$description": "Marginal memory cost of 1000 tokens of KV cache at q8_0 KV quantization, for the orchestrator role only (helpers use short context — budgeting helper KV cache separately is unnecessary). Qwen3.5's hybrid Gated-DeltaNet + Attention architecture costs LESS per token than standard full-attention transformers. These figures are calibrated to real-world measurements at 8K context fitting in ~1GB on an 8GB card.",
+      "qwen3.5-4b-claude-opus-reasoning-distilled-v2": 0.06,
+      "qwen3.5-9b-claude-opus-reasoning-distilled": 0.08,
       "qwen3.5-27b": 0.18,
-      "qwen3.6-35b-a3b": 0.12,
-      "gpt-oss-20b": 0.16
-    }
+      "qwen3.6-35b-a3b": 0.12
+    },
+    "_summarizer_kv_note": "Granite 4.0-H summarizers use Mamba-2 state-space layers (9:1 Mamba:Transformer), whose memory is ~CONSTANT in sequence length rather than growing linearly like attention KV cache. Budget the summarizer's context cost as a small fixed amount (~0.3GB regardless of context length up to 128K), NOT via a per-1k-token figure. This near-flat long-context memory profile is the entire reason Granite was chosen for this role over a transformer Qwen model."
   },
   "global_constants": {
-    "$description": "Fixed overheads consumed by the fit() step.",
+    "$description": "Fixed overheads consumed by the fit() step (Stage 3 of the resolver). These are conservative starting defaults — safe to tune later against real telemetry, but do not delete the concept of a reserve/margin even if a tuned number is smaller.",
     "gpu_display_overhead_gb": 1.3,
     "gpu_framework_overhead_gb": 0.7,
     "gpu_usable_fraction_of_free_vram": 0.85,
@@ -116,7 +147,8 @@
     "ram_pdf_render_spike_gb": 2.5,
     "ram_safety_margin_gb": 1.5,
     "interactive_tok_s_floor_gpu": 8,
-    "interactive_tok_s_floor_cpu_only": 5
+    "interactive_tok_s_floor_cpu_only": 5,
+    "vram_reserve_note": "Plans must be authored so that ctx_min fits using only ~70% of TOTAL vram_gb (i.e. assume the machine is already busy with other apps). This guarantees the dynamic fit() step can only ever shrink context from ctx_max toward ctx_min — it must never be able to fail to place the model. Enforce this rule when AUTHORING new catalog rows, not at runtime."
   },
   "gpu_tiers": {
     "$description": "GPU-resident-orchestrator tiers. Plans sorted by rank DESC.",
@@ -189,7 +221,7 @@
           "gpu_fp16": true
         },
         "orchestrator": {
-          "model": "qwen3.5-9b",
+          "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q8_0",
           "device": "gpu",
           "ctx_min": 16384,
@@ -209,14 +241,7 @@
           "count_max": 4,
           "resident": "lazy"
         },
-        "runtime_priority": ["cuda", "rocm", "vulkan"],
-        "optional_orchestrator": {
-          "model": "gpt-oss-20b",
-          "quant": "Q4_K_M",
-          "ctx_min": 16384,
-          "ctx_max": 32768,
-          "offer_as": "power_user_opt_in_only"
-        }
+        "runtime_priority": ["cuda", "rocm", "vulkan"]
       },
       {
         "id": "T3-plus",
@@ -226,7 +251,7 @@
           "gpu_fp16": true
         },
         "orchestrator": {
-          "model": "qwen3.5-9b",
+          "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q6_K",
           "device": "gpu",
           "ctx_min": 8192,
@@ -256,7 +281,7 @@
           "gpu_fp16": true
         },
         "orchestrator": {
-          "model": "qwen3.5-9b",
+          "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q4_K_M",
           "device": "gpu",
           "ctx_min": 8192,
@@ -287,7 +312,7 @@
           "gpu_backend_any": ["vulkan"]
         },
         "orchestrator": {
-          "model": "qwen3.5-4b",
+          "model": "qwen3.5-4b-claude-opus-reasoning-distilled-v2",
           "quant": "Q5_K_M",
           "device": "gpu",
           "ctx_min": 8192,
@@ -327,21 +352,21 @@
           "gpu_fp16": false
         },
         "orchestrator": {
-          "model": "qwen3.5-4b",
+          "model": "qwen3.5-0.8b-claude-opus-reasoning-distilled",
           "quant": "Q4_K_M",
           "device": "gpu",
-          "ctx_min": 4096,
-          "ctx_max": 8192
+          "ctx_min": 8192,
+          "ctx_max": 16384
         },
         "summarizer": {
-          "model": "granite4.0-h-micro-3b",
-          "quant": "Q5_K_M",
+          "model": "granite-4.0-h-350m",
+          "quant": "Q4_K_M",
           "device": "cpu",
           "resident": "lazy"
         },
         "utility": {
-          "model": "qwen3.5-0.8b",
-          "quant": "Q6_K",
+          "model": "granite-4.0-h-350m",
+          "quant": "IQ3_XXS",
           "device": "cpu",
           "count_min": 1,
           "count_max": 1,
@@ -352,7 +377,8 @@
     ],
     "reject_below": {
       "gpu_vram_gb": 6,
-      "action": "route_to_cpu_only_tiers_or_byom_or_cpu_lite"
+      "action": "route_to_cpu_only_tiers_or_byom_or_cpu_lite",
+      "notes": "GPUs below 6GB (e.g. 4GB Polaris/Pascal cards) must NOT be offered the managed GPU stack under any circumstance. Route to cpu_only_tiers if RAM/CPU qualify, otherwise to BYOM/cloud-key setup or the CPU-lite fallback. Do not let these silently fall through to CPU-only inference on the orchestrator's intended GPU device — that produces a near-zero tok/s experience that reads as 'broken', not 'slow'."
     }
   },
   "cpu_helper_concurrency_tiers": {
@@ -480,17 +506,19 @@
           "ram_gb": 16
         },
         "orchestrator": {
-          "model": "qwen3.5-4b",
+          "model": "qwen3.5-0.8b-claude-opus-reasoning-distilled",
           "quant": "Q4_K_M",
           "device": "cpu",
-          "ctx_min": 4096,
-          "ctx_max": 8192
+          "ctx_min": 8192,
+          "ctx_max": 16384
         },
         "helpers": {
+          "model": "granite-4.0-h-350m",
+          "quant": "IQ3_XXS",
           "count_max": 1,
           "execution_mode": "strict_serial"
         },
-        "expected_tok_s": "3-6"
+        "expected_tok_s": "15-25"
       },
       {
         "id": "CL1-minimum",
@@ -503,7 +531,7 @@
           "isa": ["avx2"]
         },
         "orchestrator": {
-          "model": "qwen3.5-4b",
+          "model": "qwen3.5-4b-claude-opus-reasoning-distilled-v2",
           "quant": "Q5_K_M",
           "device": "cpu",
           "ctx_min": 8192,
@@ -528,7 +556,7 @@
           "isa": ["avx2"]
         },
         "orchestrator": {
-          "model": "qwen3.5-4b",
+          "model": "qwen3.5-4b-claude-opus-reasoning-distilled-v2",
           "quant": "Q6_K",
           "device": "cpu",
           "ctx_min": 12288,
@@ -595,11 +623,16 @@
     ],
     "reject_below": {
       "ram_gb": 16,
-      "action": "route_to_byom_or_cloud_key_setup"
+      "action": "route_to_byom_or_cloud_key_setup",
+      "notes": "Below 16GB total RAM, do not attempt any local managed inference, GPU or CPU. Route directly to BYOM/BYOE endpoint configuration or cloud BYOK setup. EXCEPTION: experimental_opt_in_tiers.EXP0 may still be manually selected by the user even below this line."
+    },
+    "detection_caveats": {
+      "single_channel_ram": "A 32GB+ machine reported by the OS as single-channel must be treated as failing the ram_channels:2 requirement on every CL tier above CL0, REGARDLESS of total capacity. Detect via SMBIOS/WMI (Windows) or dmidecode (Linux). Surface a specific UI message recommending a second stick.",
+      "thermal_throttling": "Thin/fanless laptops sustaining all-core CPU inference will downclock within 1-2 minutes. The smoke-test validation step MUST run long enough to measure SUSTAINED tok/s on CPU-only tiers (45-60 seconds of continuous output), not just a short burst — a burst measurement will overstate real-world speed."
     }
   },
   "apple_silicon_tiers": {
-    "$description": "Apple Silicon (M1-M4+) uses unified memory.",
+    "$description": "Apple Silicon (M1-M4+) uses unified memory. A0-A2 use distilled models; A3-A5 use stock models (no distilled weights available for 27B/35B-A3B).",
     "plans": [
       {
         "id": "A0",
@@ -608,7 +641,7 @@
           "unified_mem_gb": 8
         },
         "orchestrator": {
-          "model": "qwen3.5-4b",
+          "model": "qwen3.5-4b-claude-opus-reasoning-distilled-v2",
           "quant": "Q5_K_M",
           "ctx_max": 16384
         }
@@ -620,7 +653,7 @@
           "unified_mem_gb": 16
         },
         "orchestrator": {
-          "model": "qwen3.5-9b",
+          "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q4_K_M",
           "ctx_max": 16384
         }
@@ -632,7 +665,7 @@
           "unified_mem_gb": 24
         },
         "orchestrator": {
-          "model": "qwen3.5-9b",
+          "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q8_0",
           "ctx_max": 32768
         }
@@ -675,5 +708,182 @@
       }
     ],
     "runtime_priority": ["mlx", "gguf-metal"]
+  },
+  "runtime_adapter_requirements": {
+    "$description": "Because the swarm spans two model families by ROLE (Qwen orchestrator, Granite-4.0-H summarizer, Qwen utility), the runtime layer must normalize across multiple chat templates / tokenizers / tool-call formats. Keep ALL family-specific handling inside this adapter; the orchestrator/LangGraph layer must see a single uniform message+tool interface regardless of which model backs a given role.",
+    "families_in_use": {
+      "qwen3.5 / qwen3.6": {
+        "roles": ["orchestrator", "utility"],
+        "chat_template": "Qwen ChatML-style with  / </think> tokens",
+        "tool_calling": "Qwen native tool-call format",
+        "thinking_mode": "supported; distilled variants produce </think> CoT blocks — the adapter layer must filter these before display. Run orchestrator thinking-OFF for routing, ON only for hard reasoning steps."
+      },
+      "granite4-h": {
+        "roles": ["summarizer"],
+        "chat_template": "Granite chat template — DISTINCT from Qwen, do NOT reuse the Qwen template",
+        "tool_calling": "Granite tool-use template (strong on BFCL but format differs from Qwen — normalize in adapter)",
+        "reasoning": "NOT a reasoning model — never route planning/reasoning here; summarization/extraction/compression only",
+        "architecture_note": "hybrid Mamba-2; some runtime builds need recent llama.cpp/Ollama for Mamba-2 support. Verify the shipped runtime supports it; otherwise use the non-hybrid dense granite4.0-micro-3b as a drop-in summarizer fallback where Mamba-2 is unsupported."
+      }
+    },
+    "adapter_contract": "Implement one converter pair per family: (system,messages,tools)->wire format, and raw output->normalized {text, tool_calls}. The resolver's selected plan names the model per role; the adapter looks up model_definitions[model].family to pick the converter. Adding/removing a family = add/remove one converter pair; no change to orchestration logic."
+  },
+  "experimental_opt_in_tiers": {
+    "$description": "Manual-selection-only tiers. The deterministic resolver MUST NEVER auto-select anything in this block — reached only via explicit user action in a 'Minimal / Experimental' setup path. Rationale: both models carry explicit research/demo disclaimers. Applies to GPU-less machines that fail cpu_only_tiers, down to a much lower true minimum than the normal 16GB reject_below line.",
+    "plans": [
+      {
+        "id": "EXP0-minimal",
+        "rank": -100,
+        "selection_mode": "manual_opt_in_only",
+        "requires": {
+          "ram_gb": 4,
+          "physical_cores": 2,
+          "isa": [],
+          "gpu_required": false
+        },
+        "requires_note": "Deliberately permissive floor — 4GB RAM / 2 cores / no ISA requirement. No AVX2 requirement because both models are small enough to run scalar if needed.",
+        "orchestrator": {
+          "model": "qwen3.5-0.8b-claude-opus-reasoning-distilled",
+          "source": "community GGUF, Jackrong/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled-GGUF, Apache-2.0",
+          "quant": "Q4_K_M",
+          "size_gb": 0.527,
+          "ctx_min": 4096,
+          "ctx_max": 16384,
+          "device": "cpu",
+          "notes": "16384 is this model's own fine-tuning context window per its model card — do not exceed it in ctx_max. CoT-style reasoning in <think> tags; author explicitly warns of hallucination risk on external facts."
+        },
+        "helper": {
+          "model": "granite-4.0-h-350m",
+          "source": "ibm-granite/granite-4.0-h-350m-GGUF, Apache-2.0, vendor release",
+          "quant": "Q4_K_M",
+          "size_gb": 0.25,
+          "device": "cpu",
+          "notes": "Hybrid Mamba2/attention 350M, IBM vendor release with published benchmarks — fits the utility-worker extraction/JSON-validation job directly."
+        },
+        "swarm_shape": "2 models only: orchestrator + ONE helper. No summarizer, no embedding model, no memory/retrieval subsystem at this tier.",
+        "total_model_footprint_gb": 0.78,
+        "expected_tok_s": "highly hardware-dependent; treat as 'works, slowly' rather than targeting a specific floor.",
+        "memory_subsystem_override": {
+          "embedding_model": "NOT LOADED at this tier — skip retrieval gate entirely",
+          "rolling_summary": "disabled — no CPU budget for a third resident model",
+          "recency_buffer_only": true,
+          "recency_window_turns": 2
+        },
+        "ui_requirements": {
+          "label": "Minimal / Experimental (not recommended)",
+          "must_disclose": [
+            "Both models are research/demo-oriented per their own publishers, not production-grade defaults.",
+            "Multilingual quality is weak — disclose if the user's locale is non-English.",
+            "No persistent memory/retrieval subsystem at this tier."
+          ],
+          "placement": "Only reachable via an explicit 'Advanced / experimental setup' path — never presented as a normal recommended option."
+        }
+      }
+    ]
+  },
+  "detection_instructions": {
+    "$description": "Implementation guidance for the hardware probe step. Split every probed value into STABLE (cache it, re-probe only on driver/hardware change) vs LIVE (re-probe every launch, used only to clamp context/helper count within the already-chosen plan).",
+    "stable_facts_to_probe": {
+      "gpu_vendor": "nvidia | amd | intel | apple | none",
+      "gpu_name": "raw device string, for logging only — NEVER branch logic on this string",
+      "gpu_vram_total_gb": "total VRAM, NOT free",
+      "gpu_fp16_support": "CRITICAL flag. NVIDIA: Turing (CC 7.5) and newer have real fp16; Pascal (CC 6.x) is fp32-only. AMD: check via Vulkan device properties. Easiest cross-vendor method: parse llama.cpp's own device enumeration which prints 'fp16: 0/1' per device.",
+      "gpu_backends_available": "list of: vulkan, cuda, rocm, metal — probe driver presence",
+      "gpu_is_integrated": "True/False — used to EXCLUDE iGPUs when a discrete GPU is also present",
+      "cpu_physical_cores": "physical cores, not logical/threads",
+      "cpu_threads": "logical thread count",
+      "cpu_isa_flags": "detect avx2, avx512f at RUNTIME via CPUID — NEVER infer from CPU model name",
+      "cpu_core_types": "if heterogeneous (Intel 12th gen+), report P-core and E-core counts separately",
+      "ram_total_gb": "total physical RAM",
+      "ram_type": "ddr4 | ddr5",
+      "ram_channels": "1 (single) | 2 (dual) | 4+ (quad/8-channel) — query via SMBIOS/WMI on Windows, dmidecode on Linux. CRITICAL for cpu_only_tiers.",
+      "storage_is_ssd": "True/False for the drive hosting the model directory",
+      "os": "windows | macos | linux",
+      "driver_version": "GPU driver version string — include in cache hash",
+      "unified_mem_gb": "Apple Silicon only — total unified memory"
+    },
+    "live_facts_to_probe": {
+      "gpu_vram_free_gb": "free VRAM AT LAUNCH TIME — used only in fit() to clamp context length",
+      "ram_free_gb": "free RAM AT LAUNCH TIME — used only in fit() to clamp helper count"
+    },
+    "implementation_note_for_copilot": "Probe stable_facts once, hash them (include driver_version in the hash), and cache the resolved plan_id keyed on that hash. On every subsequent launch: if the hash matches the cache, SKIP tier resolution and SKIP the smoke test — just re-run fit() against current live_facts. Only re-run full resolution when the stable-facts hash changes (new hardware, driver update) or the user explicitly requests a re-check.",
+    "runtime_caveat": "AVX-512 detection via CPUID is NOT yet implemented (marked TODO in _cpu_isa_flags). This means machines with Intel 12th+ gen fusion CPUs cannot be differentiated by core type — all cores are treated as homogeneous. This is a known gap, not a blocker for current tiers."
+  },
+  "resolver_algorithm": {
+    "$description": "Complete logic the launcher/setup module must implement. Intentionally language-agnostic pseudocode — translate directly into the project's chosen language. DO NOT hardcode any model name, VRAM number, or core count in this code; every threshold must be read from the catalog.",
+    "stage_0_top_level_routing": {
+      "pseudocode": [
+        "fingerprint = probe_stable_facts()",
+        "IF fingerprint.gpu_vendor == 'apple': plan = resolve_apple(fingerprint, catalog.apple_silicon_tiers)",
+        "ELSE:",
+        "    plan = resolve_gpu_tiers(fingerprint, catalog.gpu_tiers)",
+        "    IF plan is None: plan = resolve_cpu_only_tiers(fingerprint, catalog.cpu_only_tiers)",
+        "    IF plan is None: ROUTE_TO byom_or_cloud_key_setup",
+        "PROCEED to stage_1 with the selected plan"
+      ]
+    },
+    "stage_1_resolve_tier_deterministic": {
+      "pseudocode": [
+        "FUNCTION resolve_gpu_tiers(fp, catalog_block):",
+        "  candidates = catalog_block.plans SORTED BY rank DESCENDING",
+        "  FOR plan IN candidates:",
+        "    IF satisfies(fp, plan.requires): RETURN plan",
+        "  RETURN None",
+        "",
+        "FUNCTION satisfies(fp, requires):",
+        "  IF requires.gpu_vram_gb AND fp.gpu_vram_total_gb < requires.gpu_vram_gb: RETURN False",
+        "  IF 'gpu_fp16' IN requires AND fp.gpu_fp16_support != requires.gpu_fp16: RETURN False",
+        "  IF requires.gpu_backend_any AND NOT ANY(b IN fp.gpu_backends_available FOR b IN requires.gpu_backend_any): RETURN False",
+        "  IF requires.ram_gb AND fp.ram_total_gb < requires.ram_gb: RETURN False",
+        "  IF requires.ram_type AND fp.ram_type != requires.ram_type: RETURN False",
+        "  IF requires.ram_channels AND fp.ram_channels < requires.ram_channels: RETURN False",
+        "  IF requires.physical_cores AND fp.cpu_physical_cores < requires.physical_cores: RETURN False",
+        "  IF requires.isa AND NOT ALL(flag IN fp.cpu_isa_flags FOR flag IN requires.isa): RETURN False",
+        "  RETURN True"
+      ],
+      "critical_notes": [
+        "This stage uses ONLY stable_facts. It must be a pure function: same fingerprint in, same plan out, always.",
+        "Walk order matters: rank DESCENDING means best-fitting/most-capable plan is tried first.",
+        "gpu_fp16 check uses '!=' not a threshold comparison — it is a boolean capability match."
+      ]
+    },
+    "stage_2_resolve_helper_swarm_size": {
+      "pseudocode": [
+        "FUNCTION resolve_helper_count(fp):",
+        "  cpu_tier = LAST plan IN cpu_helper_concurrency_tiers.plans (sorted by rank ASC) WHERE fp satisfies plan.requires",
+        "  ram_tier = LAST plan IN ram_residency_tiers_gpu_present.plans (sorted by rank ASC) WHERE fp satisfies plan.requires",
+        "  RETURN min(cpu_tier.peak_concurrent_helpers, ram_tier.residency_ceiling)"
+      ],
+      "notes": "Unlike stage_1 (first-match on descending rank), this stage wants the HIGHEST tier the hardware qualifies for on EACH axis independently, then combines with min()."
+    },
+    "stage_3_fit_dynamic_knobs": {
+      "pseudocode": [
+        "FUNCTION fit(plan, live_free):",
+        "  ctx = plan.orchestrator.ctx_max",
+        "  WHILE ctx > plan.orchestrator.ctx_min:",
+        "    required_vram = weight_size(plan.orchestrator) + kv_cache_size(plan.orchestrator.model, ctx) + global_constants.gpu_display_overhead_gb + global_constants.gpu_framework_overhead_gb",
+        "    IF required_vram <= live_free.gpu_vram_free_gb * global_constants.gpu_usable_fraction_of_free_vram: BREAK",
+        "    ctx -= 2048",
+        "  helper_count = resolve_helper_count(fp)",
+        "  RETURN (ctx, helper_count)"
+      ],
+      "critical_invariant": "Plans MUST be authored so that ctx_min fits using only ~70% of TOTAL vram. If this invariant holds, fit() can only ever shrink ctx — it can never fail to produce a placeable result."
+    },
+    "stage_4_validate_and_downgrade": {
+      "pseudocode": [
+        "FUNCTION choose_and_validate(fp, live_free):",
+        "  plan = resolve_tier(fp)",
+        "  WHILE plan is not None:",
+        "    (ctx, helpers) = fit(plan, live_free)",
+        "    result = smoke_test(plan, ctx, helpers)",
+        "    IF result.loaded_successfully AND result.tok_s >= floor: RETURN (plan, ctx, helpers)",
+        "    plan = next_lower_rank_plan(plan)",
+        "  ROUTE_TO byom_or_cloud_key_setup"
+      ],
+      "notes": [
+        "On cpu_only_tiers, the smoke test MUST measure SUSTAINED tok/s over 45-60+ seconds.",
+        "Cache invalidation: re-run this entire stage only when hash(stable_facts + driver_version) changes."
+      ]
+    }
   }
 }

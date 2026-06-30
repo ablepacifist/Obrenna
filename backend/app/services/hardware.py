@@ -32,30 +32,46 @@ def probe_all() -> dict[str, Any]:
     return _probe_all()
 
 
-def resolve_managed_plan(detected: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Resolve a managed plan from detected hardware.
+def resolve_managed_plan(
+        detected: dict[str, Any] | None = None,
+        runtime_base_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a managed plan from detected hardware.
 
-    Args:
-        detected: Probe dict. If None, calls _probe_all() first.
+        Args:
+            detected: Probe dict. If None, calls _probe_all() first.
+            runtime_base_url: Optional runtime base URL for conflict detection.
+                Used to check if the active runtime conflicts with plan restrictions.
 
-    Returns:
-        ManagedPlanResponse dict (see hardware_resolver.choose_and_validate).
-    """
-    if detected is None:
-        detected = _probe_all()
+        Returns:
+            ManagedPlanResponse dict (see hardware_resolver.choose_and_validate).
+        """
+        if detected is None:
+            detected = _probe_all()
 
-    fp = build_fingerprint(detected)
-    live = LiveFreeResources(
-        gpu_vram_free_gb=detected.get("gpu_vram_free_gb") or 0.0,
-        ram_free_gb=detected.get("ram_free_gb") or 0.0,
-    )
+        fp = build_fingerprint(detected)
+        live = LiveFreeResources(
+            gpu_vram_free_gb=detected.get("gpu_vram_free_gb") or 0.0,
+            ram_free_gb=detected.get("ram_free_gb") or 0.0,
+        )
 
-    catalog = load_catalog()
-    plan = choose_and_validate(fp, catalog, live)
+        catalog = load_catalog()
+        plan = choose_and_validate(fp, catalog, live)
 
-    # Add detection warnings based on incomplete probing
-    plan["detection_warnings"] = _compute_warnings(detected)
-    return plan
+        # Add detection warnings based on incomplete probing
+        plan["detection_warnings"] = _compute_warnings(detected)
+
+        # Check for runtime conflicts (e.g. T1 forbids Ollama)
+        forbidden = plan.get("runtime_forbidden", [])
+        if forbidden and runtime_base_url:
+            is_ollama = ":11434" in runtime_base_url or "ollama" in runtime_base_url
+            if "ollama" in forbidden and is_ollama:
+                plan["detection_warnings"].append(
+                    "T1-floor requires Vulkan direct-to-GPU; Ollama is not compatible. "
+                    "Switch the runtime or use a different tier."
+                )
+
+        return plan
 
 
 def _probe_all() -> dict[str, Any]:
