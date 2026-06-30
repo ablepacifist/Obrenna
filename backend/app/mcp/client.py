@@ -96,6 +96,7 @@ class InMemoryTransport(MCPTransport):
     """In-memory transport for testing without a real MCP server.
 
     Routes calls to registered handler functions.
+    Supports both sync and async handlers.
     """
 
     def __init__(self):
@@ -112,7 +113,9 @@ class InMemoryTransport(MCPTransport):
         if handler:
             params = request.get("params", {})
             result = handler(params)
-            if asyncio.iscoroutinefunction(handler):
+            if asyncio.iscoroutine(result):
+                result = await result
+            elif asyncio.iscoroutinefunction(handler):
                 result = await result
             return {"jsonrpc": "2.0", "id": request.get("id"), "result": result}
         return {"jsonrpc": "2.0", "id": request.get("id"), "result": {}}

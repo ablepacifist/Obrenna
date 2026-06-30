@@ -124,8 +124,13 @@ class MemoryContext:
             )
             parts.append(f"**Relevant past conversation:**\n{turn_lines}")
 
-        if parts:
-            messages.append({"role": "system", "content": "\n\n".join(parts)})
+        parts.append(
+            "You may use Markdown formatting in your responses (headers, bold, lists, "
+            "code blocks, tables) when it improves readability. Plain prose is fine when "
+            "markdown would add no value."
+        )
+
+        messages.append({"role": "system", "content": "\n\n".join(parts)})
 
         return messages
 

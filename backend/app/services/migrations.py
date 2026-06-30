@@ -12,8 +12,6 @@ from ..models import Chat, ChatMessage, ChatTurn
 
 logger = logging.getLogger(__name__)
 
-VECTOR_EMBEDDING_DIM = 384
-
 
 def _column_exists(tx, table: str, column: str) -> bool:
     # PRAGMA doesn't support bind parameters in many sqlite versions
@@ -31,7 +29,7 @@ def _table_exists(tx, table: str) -> bool:
 
 
 def run_migrations(db: Session) -> None:
-    """Add missing columns/tables, create sqlite-vec virtual tables, backfill turns.
+    """Add missing columns/tables and backfill turns.
 
     All operations are idempotent — safe to run multiple times.
     """
@@ -39,6 +37,10 @@ def run_migrations(db: Session) -> None:
         # --- settings_app.managed_plan ---
         if not _column_exists(db, "settings_app", "managed_plan"):
             db.execute(text("ALTER TABLE settings_app ADD COLUMN managed_plan JSON NOT NULL DEFAULT '{}'"))
+
+        # --- settings_app.workers_enabled ---
+        if not _column_exists(db, "settings_app", "workers_enabled"):
+            db.execute(text("ALTER TABLE settings_app ADD COLUMN workers_enabled INTEGER NOT NULL DEFAULT 1"))
 
         # --- chats.rolling_summary ---
         if not _column_exists(db, "chats", "rolling_summary"):
@@ -137,28 +139,13 @@ def run_migrations(db: Session) -> None:
                 "CREATE INDEX idx_provision_event_logs_job_id ON provision_event_logs(job_id)"
             ))
 
-        # --- chat_turn_vectors (sqlite-vec) ---
-        if not _table_exists(db, "chat_turn_vectors"):
-            db.execute(text(f"""
-                CREATE VIRTUAL TABLE chat_turn_vectors USING vec0(
-                    embedding float[{VECTOR_EMBEDDING_DIM}]
-                )
-            """))
-
-        # --- memory_fact_vectors (sqlite-vec) ---
-        if not _table_exists(db, "memory_fact_vectors"):
-            db.execute(text(f"""
-                CREATE VIRTUAL TABLE memory_fact_vectors USING vec0(
-                    embedding float[{VECTOR_EMBEDDING_DIM}]
-                )
-            """))
-
     try:
         _migrate()
         db.commit()
     except Exception as exc:
         db.rollback()
         logger.error("Migration failed: %s", exc)
+        raise
 
     # Backfill turns (idempotent — skips already-archived)
     backfill_turns(db)

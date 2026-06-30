@@ -2,14 +2,15 @@
 
 Five tools: get_time, calculator, file_read, web_search, get_location.
 Each tool is a standalone function that can be called by the MCP server process.
+Supports both sync and async handlers.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
 import re
-import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -299,26 +300,72 @@ def _get_path_allowlist() -> list[str]:
     return []
 
 
-def tool_web_search(args: dict[str, Any]) -> dict[str, Any]:
-    """Web search — returns snippets and URLs only."""
+# ── Cached search provider singleton ─────────────────────────────────────────
+
+
+_search_provider: Any = None
+
+
+def _get_search_provider() -> Any:
+    """Get (or create) the cached search provider singleton."""
+    global _search_provider
+    if _search_provider is None:
+        try:
+            from ..services.search import create_search_provider
+            from ..services.architecture_config import get_services_config
+            services_config = get_services_config()
+            web_search_config = services_config.get("web_search", {})
+            if not web_search_config:
+                web_search_config = {
+                    "provider": "duckduckgo",
+                    "timeout_seconds": 10,
+                    "cache_ttl_seconds": 300,
+                }
+            _search_provider = create_search_provider(web_search_config)
+        except Exception as exc:
+            logger.warning("Failed to initialize search provider: %s", exc)
+            _search_provider = None
+    return _search_provider
+
+
+async def tool_web_search(args: dict[str, Any]) -> dict[str, Any]:
+    """Web search — returns snippets and URLs only.
+
+    Uses the configured search provider (DuckDuckGo by default).
+    Supports Brave and SerpAPI via API keys.
+    """
     query = args.get("query", "")
-    max_results = args.get("max_results", 5)
+    max_results = min(args.get("max_results", 5), 10)  # capped
 
     if not query:
         return {"error": True, "message": "Query is required."}
 
-    # Phase 1: Return placeholder results
-    # Full web search integration comes later
+    provider = _get_search_provider()
+    if provider is None:
+        return {
+            "error": True,
+            "message": "Search provider not initialized.",
+            "results": [],
+            "query": query,
+            "count": 0,
+        }
+
+    try:
+        result = await provider.search(query, max_results)
+    except Exception as exc:
+        logger.error("Web search failed: %s", exc)
+        return {"error": True, "message": f"Search failed: {exc}", "results": [], "query": query, "count": 0}
+
+    if result.error:
+        return {"error": True, "message": result.error, "results": [], "query": query, "count": 0}
+
     return {
         "results": [
-            {
-                "title": f"Search results for: {query}",
-                "snippet": f"Web search for '{query}' will be available in a future update.",
-                "url": f"https://www.google.com/search?q={query.replace(' ', '+')}",
-            }
+            {"title": r.title, "snippet": r.snippet, "url": r.url}
+            for r in result.results
         ],
         "query": query,
-        "count": 1,
+        "count": len(result.results),
     }
 
 
@@ -355,13 +402,42 @@ def list_tools() -> list[dict[str, Any]]:
 
 
 def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Call a tool by name with the given arguments."""
+    """Call a tool by name with the given arguments (sync only).
+
+    For async tools, this runs the event loop to completion.
+    Prefer ``acall_tool`` for use inside async contexts.
+    """
     handler = TOOLS.get(name)
     if not handler:
         return {"error": True, "message": f"Unknown tool: {name}"}
 
     try:
         result = handler(args)
+        if asyncio.iscoroutine(result):
+            import asyncio as _asyncio
+            return _asyncio.get_event_loop().run_until_complete(result)
+        return result
+    except Exception as exc:
+        logger.error("Tool '%s' failed: %s", name, exc)
+        return {"error": True, "message": f"Tool execution error: {exc}"}
+
+
+async def acall_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Call a tool by name with the given arguments (async).
+
+    Handles both sync and async tool handlers.
+    """
+    handler = TOOLS.get(name)
+    if not handler:
+        return {"error": True, "message": f"Unknown tool: {name}"}
+
+    try:
+        result = handler(args)
+        if asyncio.iscoroutine(result):
+            return await result
+        # Sync handler — wrap in asyncio.to_thread for non-blocking
+        if asyncio.iscoroutinefunction(handler):
+            return await result
         return result
     except Exception as exc:
         logger.error("Tool '%s' failed: %s", name, exc)
