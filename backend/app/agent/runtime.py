@@ -10,12 +10,15 @@ This module orchestrates a single chat turn:
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, AsyncIterator
 
 from sqlalchemy.orm import Session
 
+from ..mcp.client import MCPClient, InMemoryTransport
+from ..mcp.tools import list_tools, call_tool
 from ..model_runtime.config import RuntimeConfig
 from ..model_runtime.streaming import chat_completion_stream
 from ..services.architecture_config import (
@@ -31,6 +34,9 @@ from .events import (
     error_event,
     new_message_id,
     token_event,
+    tool_call_event,
+    tool_progress_event,
+    tool_result_event,
     StreamEvent,
 )
 from .workers import (
@@ -89,11 +95,20 @@ async def orchestrate_turn(
     file_ids: list[str] | None = None,
     previous_messages: list[dict] | None = None,
     assistant_message_id: str | None = None,
+    web_search: bool = False,
+    workers_enabled: bool = True,
 ) -> AsyncIterator[StreamEvent]:
     """Orchestrate a single chat turn through the agent runtime.
 
-    Yields typed StreamEvents (token, done, error) as the turn progresses.
-    The caller should render these events to the UI and persist the final message.
+    Yields typed StreamEvents (token, done, error, tool_call, tool_result, tool_progress)
+    as the turn progresses. The caller should render these events to the UI
+    and persist the final message.
+
+    Tool invocation flow:
+    1. Model called with tools → may return tool_calls
+    2. Tool calls detected → execute each tool, yield progress/result events
+    3. Tool results fed back as messages → call model again (no tools)
+    4. Model streams final answer → yield token events
 
     Args:
         user_message: The user's input text.
@@ -104,16 +119,19 @@ async def orchestrate_turn(
         file_ids: Optional file IDs attached to the message.
         previous_messages: Optional prior conversation messages (for stateful turns).
         assistant_message_id: Optional pre-assigned message ID.
+        web_search: Whether to include web_search tool in the allowed set.
+        workers_enabled: Whether to enable worker models for this turn.
 
     Yields:
-        StreamEvent instances for token/done/error events.
+        StreamEvent instances for token/done/error/tool_call/tool_result/tool_progress.
     """
     msg_id = assistant_message_id or new_message_id()
-    use_workers = resolved_plan.helper_count > 0 and bool(resolved_plan.utility_model)
+    use_workers = workers_enabled and resolved_plan.helper_count > 0 and bool(resolved_plan.utility_model)
     use_summarizer = bool(resolved_plan.summarizer_model)
     orchestration_cfg = get_orchestration_config()
     worker_timeout = orchestration_cfg.get("worker_timeout_seconds", 12)
-    logger.info("=== ORCHESTRATE TURN === chat_id=%s user_message=%r orchestrator_model=%s summarizer_model=%s utility_model=%s", chat_id, user_message, resolved_plan.orchestrator_model, resolved_plan.summarizer_model, resolved_plan.utility_model)
+    max_tool_rounds = orchestration_cfg.get("max_tool_rounds", 5)
+    logger.info("=== ORCHESTRATE TURN === chat_id=%s user_message=%r orchestrator_model=%s summarizer_model=%s utility_model=%s workers_enabled=%s", chat_id, user_message, resolved_plan.orchestrator_model, resolved_plan.summarizer_model, resolved_plan.utility_model, workers_enabled)
 
     # Step 1: Assemble memory context
     try:
@@ -134,6 +152,7 @@ async def orchestrate_turn(
                 worker_tasks, config, resolved_plan.utility_model, system_prompt,
                 helper_count=resolved_plan.helper_count,
                 timeout_seconds=worker_timeout,
+                workers_enabled=workers_enabled,
             )
             evidence_pack = EvidencePack(
                 entries=[r.to_evidence_entry() for r in worker_results],
@@ -161,30 +180,165 @@ async def orchestrate_turn(
     )
     logger.info("ORCHESTRATOR MESSAGES: %d messages, first_user=%r last_user=%r", len(orchestrator_messages), orchestrator_messages[0]["content"] if orchestrator_messages and len(orchestrator_messages) > 0 else "", orchestrator_messages[-1]["content"] if orchestrator_messages else "")
 
-    # Step 4: Stream orchestrator response
-    try:
-        logger.info("CALLING MODEL: model=%s temperature=%.1f", resolved_plan.orchestrator_model, 0.2)
-        all_tokens = []
-        async for token in chat_completion_stream(
-            config,
-            orchestrator_messages,
-            model=resolved_plan.orchestrator_model,
-            role="orchestrator",
-            temperature=0.2,
-            timeout=orchestration_cfg.get("worker_timeout_seconds", 12) * 10,
-        ):
-            all_tokens.append(token)
-            yield token_event(chat_id, text=token, message_id=msg_id)
-        logger.info("MODEL RESPONSE COMPLETE: total_tokens=%d text=%r", len(all_tokens), "".join(all_tokens))
-    except Exception as exc:
-        logger.error("Orchestrator streaming failed: %s", exc)
-        yield error_event(
-            chat_id,
-            error_code="orchestrator_error",
-            message=f"Orchestrator generation failed: {exc}",
-            recoverable=True,
-        )
+    # Step 4: Prepare MCP client and tool definitions
+    import os
+    from ..mcp.client import create_mcp_client
+    from ..mcp.tools import acall_tool as _acall_tool
 
+    # Check for MCP proxy URL (set by Rust Tauri when MCP server is available)
+    proxy_url = os.getenv("OBRENNA_MCP_PROXY_URL")
+
+    if proxy_url:
+        # Use TCP transport to connect to Rust MCP proxy
+        mcp_client = create_mcp_client(proxy_url)
+    else:
+        # Fallback: use in-process transport for dev/testing
+        transport = InMemoryTransport()
+        transport.register_handler("tools/list", lambda p: {"tools": list_tools()})
+        transport.register_handler("tools/call", lambda p: _acall_tool(p["name"], p.get("arguments", {})))
+        mcp_client = MCPClient(transport)
+
+    await mcp_client.initialize()
+
+    allowed_tools = _get_allowed_tools_for_request(allowed_mcp_tools_config(), web_search)
+    model_tools = _format_tools_for_model(allowed_tools) if allowed_tools else None
+
+    # Step 5: Stream orchestrator response with tool support
+    stream_timeout = orchestration_cfg.get("worker_timeout_seconds", 12) * 10
+    tool_round = 0
+    all_tokens = []
+
+    while tool_round < max_tool_rounds:
+        tool_round += 1
+        detected_tool_calls = []
+
+        try:
+            logger.info("CALLING MODEL: model=%s temperature=%.1f round=%d tools=%s",
+                        resolved_plan.orchestrator_model, 0.2, tool_round,
+                        "yes" if model_tools else "no")
+            async for event in chat_completion_stream(
+                config,
+                orchestrator_messages,
+                model=resolved_plan.orchestrator_model,
+                role="orchestrator",
+                temperature=0.2,
+                timeout=stream_timeout,
+                tools=model_tools,
+            ):
+                if event.get("type") == "token":
+                    text = event.get("content", "")
+                    if text:
+                        all_tokens.append(text)
+                        yield token_event(chat_id, text=text, message_id=msg_id)
+                elif event.get("type") == "tool_calls_done":
+                    calls = event.get("calls", [])
+                    if calls:
+                        detected_tool_calls = calls
+                        # Yield individual tool_call events for each tool
+                        for tc in calls:
+                            fn = tc.get("function", {})
+                            yield tool_call_event(
+                                chat_id=chat_id,
+                                tool_name=fn.get("name", ""),
+                                call_id=tc.get("id", ""),
+                                arguments=fn.get("arguments", {}) if isinstance(fn.get("arguments"), dict) else {},
+                                message_id=msg_id,
+                            )
+                        # Yield progress event
+                        yield tool_progress_event(
+                            chat_id=chat_id,
+                            tool_name=f"({len(calls)} tool(s))",
+                            status="running",
+                            summary="Executing tool calls...",
+                            message_id=msg_id,
+                        )
+
+                        # Execute tool calls
+                        tool_results = await handle_tool_calls(
+                            calls, mcp_client, tool_name_key="function.name",
+                            tool_args_key="function.arguments",
+                        )
+                        tool_round_results = 0
+                        for tc, result_text in zip(calls, tool_results):
+                            fn = tc.get("function", {})
+                            tool_progress_event_sent = False
+                            for key, val in result_text.items():
+                                if isinstance(val, dict) and "tool_call_id" in val:
+                                    tr = val
+                                    tool_name = fn.get("name", "unknown")
+                                    call_id = tr.get("tool_call_id", "")
+                                    content = tr.get("content", "")
+                                    # Yield progress for this tool
+                                    yield tool_progress_event(
+                                        chat_id=chat_id,
+                                        tool_name=tool_name,
+                                        status="done",
+                                        summary=content[:100] if content else "",
+                                        message_id=msg_id,
+                                    )
+                                    tool_progress_event_sent = True
+                                    # Yield result event
+                                    yield tool_result_event(
+                                        chat_id=chat_id,
+                                        tool_name=tool_name,
+                                        call_id=call_id,
+                                        result=content,
+                                        message_id=msg_id,
+                                    )
+                                    # Append tool result to messages
+                                    orchestrator_messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": call_id,
+                                        "content": content,
+                                    })
+                                    tool_round_results += 1
+                            break
+
+                        # Append assistant message with tool calls
+                        orchestrator_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": tc.get("id", ""),
+                                    "type": tc.get("type", "function"),
+                                    "function": {
+                                        "name": tc.get("function", {}).get("name", ""),
+                                        "arguments": json.dumps(tc.get("function", {}).get("arguments", {})),
+                                    },
+                                }
+                                for tc in calls
+                            ],
+                        })
+
+                        # If tools were executed, break inner loop to re-call model
+                        if tool_round_results > 0:
+                            break
+                    break
+
+        except Exception as exc:
+            logger.error("Orchestrator streaming failed: %s", exc)
+            yield error_event(
+                chat_id,
+                error_code="orchestrator_error",
+                message=f"Orchestrator generation failed: {exc}",
+                recoverable=True,
+            )
+            break
+
+        # If we detected tool calls, continue loop to feed results back to model
+        if detected_tool_calls:
+            if tool_round >= max_tool_rounds:
+                logger.warning("Max tool rounds (%d) reached — sending answer without tool results", max_tool_rounds)
+            # model_tools is set to None on next iteration (no tools on follow-up calls)
+            model_tools = None
+            all_tokens = []  # Reset for final answer tokens
+            continue
+
+        # No tool calls — this is the final answer stream
+        break
+
+    logger.info("MODEL RESPONSE COMPLETE: total_tokens=%d", len(all_tokens))
     yield done_event(chat_id, message_id=msg_id)
 
 
@@ -246,47 +400,115 @@ def _build_orchestrator_messages(
     return messages
 
 
-# ── MCP tool call handling stub ──────────────────────────────────────────────
+# ── MCP tool call handling ────────────────────────────────────────────────────
 
 
 async def handle_tool_calls(
     tool_calls: list[dict],
     mcp_client: Any,
+    *,
+    tool_name_key: str = "name",
+    tool_args_key: str = "arguments",
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
     Args:
         tool_calls: List of tool_call dicts from the model response.
         mcp_client: MCP client instance (transport-agnostic).
+        tool_name_key: Key path for tool name (e.g. "name" or "function.name").
+        tool_args_key: Key path for tool arguments
+            (e.g. "arguments" or "function.arguments").
 
     Returns:
-        List of tool result dicts keyed by tool_call ID.
+        List of tool result dicts with keys: tool_call_id, content.
     """
     results = []
     for tc in tool_calls:
-        tool_name = tc.get("function", {}).get("name", tc.get("name", ""))
-        tool_args = tc.get("function", {}).get("arguments", tc.get("arguments", "{}"))
+        fn = tc.get("function", {})
+        tool_name = fn.get(tool_name_key, tc.get(tool_name_key, ""))
+        tool_args = fn.get(tool_args_key, tc.get(tool_args_key, {}))
         if isinstance(tool_args, str):
-            import json
             try:
                 tool_args = json.loads(tool_args)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 tool_args = {}
+
+        call_id = tc.get("id", tc.get("call_id", ""))
 
         try:
             result = await mcp_client.call_tool(tool_name, tool_args)
             results.append({
-                "tool_call_id": tc.get("id", tc.get("call_id", "")),
+                "tool_call_id": call_id,
                 "content": result,
             })
         except Exception as exc:
             logger.warning("MCP tool call '%s' failed: %s", tool_name, exc)
             results.append({
-                "tool_call_id": tc.get("id", tc.get("call_id", "")),
+                "tool_call_id": call_id,
                 "content": f"Tool error: {exc}",
             })
 
     return results
+
+
+# ── Tool formatting helpers ──────────────────────────────────────────────────
+
+# Schema mapping: inputSchema (JSON Schema) → OpenAI parameters (JSON Schema)
+# The formats are nearly identical — just rename "inputSchema" → "parameters"
+# and "required" stays the same.
+
+
+def _input_schema_to_openai_params(input_schema: dict) -> dict:
+    """Convert inputSchema from TOOL_DEFS to OpenAI parameters format."""
+    if not input_schema:
+        return {"type": "object", "properties": {}}
+    return {
+        "type": input_schema.get("type", "object"),
+        "properties": input_schema.get("properties", {}),
+        "required": input_schema.get("required", []),
+    }
+
+
+def _format_tools_for_model(allowed_tools: list[dict]) -> list[dict]:
+    """Convert architecture_config tool defs to OpenAI tools format."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": _input_schema_to_openai_params(t.get("inputSchema", {})),
+            }
+        }
+        for t in allowed_tools
+    ]
+
+
+# ── Tool filtering helpers ───────────────────────────────────────────────────
+
+
+def _get_allowed_tools_for_request(
+    allowed: list[dict],
+    web_search_enabled: bool = False,
+) -> list[dict]:
+    """Filter allowed tools based on request settings.
+
+    Web search tool is only included when web_search_enabled=True.
+    All other allowed tools are always included.
+    """
+    tools = []
+    for t in allowed:
+        name = t.get("name", "")
+        if name == "web_search" and not web_search_enabled:
+            continue
+        tools.append(t)
+    return tools
+
+
+def allowed_mcp_tools_config() -> list[dict]:
+    """Return the list of allowed tool definitions from config."""
+    config = get_mcp_tools_config()
+    return config.get("allowed", [])
 
 
 # ── Config loader helpers ────────────────────────────────────────────────────

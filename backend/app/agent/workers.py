@@ -85,6 +85,7 @@ async def dispatch_workers(
     *,
     helper_count: int,
     timeout_seconds: int = 12,
+    workers_enabled: bool = True,
 ) -> list[WorkerResult]:
     """Dispatch utility worker tasks with concurrency control.
 
@@ -95,11 +96,16 @@ async def dispatch_workers(
         system_prompt: System prompt for all workers.
         helper_count: Max concurrent workers (from hardware resolver).
         timeout_seconds: Per-worker timeout.
+        workers_enabled: If False, return empty results immediately.
 
     Returns:
         List of WorkerResult, one per task.
         Failed workers get status=timeout/error/invalid_output — never raise.
     """
+    if not workers_enabled:
+        logger.info("Workers disabled — skipping worker dispatch")
+        return []
+    
     semaphore = asyncio.Semaphore(helper_count)
     results: list[WorkerResult] = []
 
@@ -172,11 +178,14 @@ async def _execute_worker(
 
     collected = []
     try:
-        async for token in chat_completion_stream(
+        async for event in chat_completion_stream(
             config, messages, model=model, role="utility",
             temperature=0.1, timeout=15.0,
         ):
-            collected.append(token)
+            if isinstance(event, dict) and event.get("type") == "token":
+                collected.append(event["content"])
+            elif isinstance(event, str):
+                collected.append(event)
     except Exception as exc:
         logger.warning("Worker execution failed: %s", exc)
         return None
@@ -244,11 +253,14 @@ async def _collect_from_stream(
     """Collect all tokens from a streaming call into one string."""
     collected = []
     try:
-        async for token in chat_completion_stream(
+        async for event in chat_completion_stream(
             config, messages, model=model, role=role,
             temperature=temperature, timeout=timeout,
         ):
-            collected.append(token)
+            if isinstance(event, dict) and event.get("type") == "token":
+                collected.append(event["content"])
+            elif isinstance(event, str):
+                collected.append(event)
     except Exception as exc:
         raise RuntimeError(f"Stream collection failed: {exc}") from exc
     return "".join(collected)
