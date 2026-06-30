@@ -24,6 +24,9 @@ psutil>=5.9
 # Local embedding runtime (ONNX-backed, CPU-friendly)
 fastembed>=0.3,<1.0
 
+# MCP SDK (for future direct stdio/SSE transport)
+# mcp>=1.0  # Uncomment when MCP SDK ecosystem is finalized
+
 # Dev / test
 pytest>=8.0
 jsonschema>=4.21

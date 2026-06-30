@@ -35,7 +35,7 @@ if __name__ == "__main__":
     port = int(os.getenv("OBRENNA_PORT", "8000"))
 
     uvicorn.run(
-        "app.main:app",
+        "main:app",
         host=host,
         port=port,
         log_level="info",
