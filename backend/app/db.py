@@ -58,9 +58,9 @@ def init_db() -> None:
                     base_url=DEFAULT_BASE_URL,
                     api_key="",
                     models={
-                        "main_reasoner": "qwen2.5:14b",
-                        "summarizer": "phi3.5",
-                        "utility": "llama3.2:3b",
+                        "orchestrator": "qwen3.5-9b-claude-opus-reasoning-distilled",
+                        "summarizer": "granite4.0-h-micro-3b",
+                        "utility": "qwen3.5-0.8b",
                     },
                 )
             )

@@ -6,11 +6,14 @@ at a local server.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import httpx
 
 from .config import RuntimeConfig
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -18,13 +21,19 @@ DEFAULT_TIMEOUT = 30.0
 def _run(coro):
     """Run an async coroutine in a fresh event loop (safe for sync callers)."""
     try:
-        return asyncio.run(coro)
+        asyncio.get_running_loop()
+        running = True
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+        running = False
+
+    if not running:
+        return asyncio.run(coro)
+
+    # Already inside a running loop — run in a worker thread to avoid nesting.
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
+        return future.result()
 
 
 async def list_models(config: RuntimeConfig, timeout: float = 10.0) -> list[str]:
@@ -67,13 +76,16 @@ async def chat_completion(
     if not chosen:
         raise ValueError("No model configured for this request.")
     payload = {"model": chosen, "messages": messages, "temperature": temperature}
+    logger.info("SYNC REQUEST: model=%s url=%s messages_count=%d temperature=%.1f", chosen, config.url("chat/completions"), len(messages), temperature)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             config.url("chat/completions"), headers=config.headers, json=payload
         )
         resp.raise_for_status()
         data = resp.json()
-    return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        logger.info("SYNC RESPONSE: status=%d content=%r", resp.status_code, content)
+    return content
 
 
 # ── sync wrappers for use from sync FastAPI routes ─────────────────────────────

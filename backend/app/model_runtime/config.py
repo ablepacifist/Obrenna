@@ -23,3 +23,21 @@ class RuntimeConfig:
 
     def model_for(self, role: str, default: str = "") -> str:
         return self.models.get(role) or default
+
+    @property
+    def runtime_kind(self) -> str:
+        base = (self.base_url or "").lower()
+        provider = (self.provider or "").lower()
+        if "11434" in base or "ollama" in base:
+            return "ollama"
+        if provider == "openai_compatible":
+            return "openai_compatible_unknown"
+        return provider or "openai_compatible_unknown"
+
+    @property
+    def supports_pull(self) -> bool:
+        return self.runtime_kind == "ollama"
+
+    @property
+    def supports_streaming_progress(self) -> bool:
+        return self.runtime_kind == "ollama"
