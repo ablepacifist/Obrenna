@@ -1,7 +1,9 @@
 """Tests for MCP tools implementation."""
+import asyncio
 import pytest
 
 from app.mcp.tools import (
+    acall_tool,
     call_tool,
     list_tools,
     tool_calculator,
@@ -130,18 +132,48 @@ class TestWebSearch:
     """Test web_search tool."""
 
     def test_requires_query(self):
-        result = tool_web_search({})
+        result = asyncio.run(tool_web_search({}))
         assert result["error"] is True
 
     def test_returns_snippets(self):
-        result = tool_web_search({"query": "test query"})
+        result = asyncio.run(tool_web_search({"query": "test query"}))
         assert "results" in result
         assert isinstance(result["results"], list)
 
     def test_result_has_url(self):
-        result = tool_web_search({"query": "test"})
+        result = asyncio.run(tool_web_search({"query": "test"}))
         if result["results"]:
             assert "url" in result["results"][0]
+
+    @pytest.mark.asyncio
+    async def test_async_web_search(self):
+        result = await acall_tool("web_search", {"query": "test async query"})
+        assert "results" in result
+        assert "query" in result
+        assert isinstance(result["results"], list)
+
+    @pytest.mark.asyncio
+    async def test_async_web_search_requires_query(self):
+        result = await acall_tool("web_search", {})
+        assert result["error"] is True
+
+
+class TestCallToolAsync:
+    """Test async call_tool variants."""
+
+    @pytest.mark.asyncio
+    async def test_acall_tool_sync_handler(self):
+        result = await acall_tool("get_time", {})
+        assert "time" in result
+
+    @pytest.mark.asyncio
+    async def test_acall_tool_async_handler(self):
+        result = await acall_tool("web_search", {"query": "test"})
+        assert isinstance(result, dict)
+
+    def test_call_tool_sync_handler(self):
+        result = call_tool("calculator", {"expression": "2+2"})
+        assert result["result"] == 4
 
 
 class TestGetLocation:
@@ -162,3 +194,63 @@ class TestFileRead:
     def test_rejects_arbitrary_path(self):
         result = tool_file_read({"path": "/etc/passwd"})
         assert result["error"] is True
+
+
+class TestToolDefinitions:
+    """Test tool definitions."""
+
+    def test_all_tools_defined(self):
+        tools = list_tools()
+        names = [t["name"] for t in tools]
+        assert len(names) == 5
+
+    def test_tool_schemas_present(self):
+        tools = list_tools()
+        for t in tools:
+            assert "inputSchema" in t
+            assert "properties" in t["inputSchema"]
+
+    def test_tool_descriptions_present(self):
+        tools = list_tools()
+        for t in tools:
+            assert t["description"].strip() and len(t["description"]) > 10
+
+
+class TestToolEvents:
+    """Test tool event types and factories."""
+
+    def test_event_types_defined(self):
+        from app.agent.events import (
+            EVENT_TYPE_TOOL_CALL,
+            EVENT_TYPE_TOOL_RESULT,
+            EVENT_TYPE_TOOL_PROGRESS,
+        )
+        assert EVENT_TYPE_TOOL_CALL == "tool_call"
+        assert EVENT_TYPE_TOOL_RESULT == "tool_result"
+        assert EVENT_TYPE_TOOL_PROGRESS == "tool_progress"
+
+    def test_tool_call_event(self):
+        from app.agent.events import tool_call_event
+        event = tool_call_event("chat1", "web_search", "call_001", {"query": "test"})
+        assert event.type == "tool_call"
+        assert event.payload["tool_name"] == "web_search"
+        assert event.payload["call_id"] == "call_001"
+        assert event.payload["arguments"]["query"] == "test"
+
+    def test_tool_result_event(self):
+        from app.agent.events import tool_result_event
+        event = tool_result_event("chat1", "web_search", "call_001", '{"results": []}')
+        assert event.type == "tool_result"
+        assert "results" in event.payload["result"]
+
+    def test_tool_progress_event(self):
+        from app.agent.events import tool_progress_event
+        event = tool_progress_event("chat1", "web_search", "running", "Searching...")
+        assert event.type == "tool_progress"
+        assert event.payload["status"] == "running"
+
+    def test_valid_event_types_includes_tool_types(self):
+        from app.agent.events import VALID_EVENT_TYPES
+        assert "tool_call" in VALID_EVENT_TYPES
+        assert "tool_result" in VALID_EVENT_TYPES
+        assert "tool_progress" in VALID_EVENT_TYPES

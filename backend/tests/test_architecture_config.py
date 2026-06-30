@@ -105,7 +105,12 @@ def test_load_config_from_file():
 def test_get_streaming_config():
     """Test streaming config helper."""
     sc = get_streaming_config()
-    assert sc["event_types"] == ["token", "done", "error"]
+    assert "token" in sc["event_types"]
+    assert "done" in sc["event_types"]
+    assert "error" in sc["event_types"]
+    assert "tool_call" in sc["event_types"]
+    assert "tool_result" in sc["event_types"]
+    assert "tool_progress" in sc["event_types"]
     assert sc["envelope_format"] == "json"
 
 
