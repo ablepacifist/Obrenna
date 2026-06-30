@@ -1,0 +1,95 @@
+{
+  "$schema_version": "1.0",
+  "$description": "Architecture decision record for Obrenna agent orchestration. Every runtime component reads this file to determine models, tools, permissions, and streaming configuration without hardcoding values.",
+  "agent_runtime": {
+    "roles": {
+      "orchestrator": {
+        "description": "Primary reasoning and planning role. Produces <think> CoT blocks that must be filtered before UI display.",
+        "thinking_mode": "on",
+        "thinking_filter": "xml_think_tags"
+      },
+      "summarizer": {
+        "description": "Evidence-pack folding and rolling-summary updates. Never routes reasoning.",
+        "thinking_mode": "off"
+      },
+      "utility": {
+        "description": "Worker tasks: fact extraction, JSON shaping, validation. Fast and deterministic.",
+        "thinking_mode": "off"
+      }
+    },
+    "streaming": {
+      "phase": 1,
+      "event_types": ["token", "done", "error"],
+      "envelope_format": "json",
+      "event_channel": "agent_event",
+      "fields": ["chat_id", "message_id", "type", "payload"]
+    },
+    "orchestration": {
+      "worker_timeout_seconds": 12,
+      "max_worker_failures": null,
+      "summarizer_failure_policy": "hard_abort",
+      "evidence_pack_compact": true
+    }
+  },
+  "mcp_tools": {
+    "allowed": [
+      {
+        "name": "get_time",
+        "description": "Return local system time and timezone offset.",
+        "category": "utility"
+      },
+      {
+        "name": "calculator",
+        "description": "Evaluate a sandboxed arithmetic expression. Never eval, AST execution, or JS Function.",
+        "category": "utility",
+        "sandbox": "expression_only"
+      },
+      {
+        "name": "file_read",
+        "description": "Read file contents by resolved file ID or allowlisted path. Reject arbitrary absolute paths.",
+        "category": "file_access",
+        "allowlist_mode": "file_id_or_allowlist_only"
+      },
+      {
+        "name": "web_search",
+        "description": "Return search snippets with source URLs only. No full-page fetch.",
+        "category": "web"
+      },
+      {
+        "name": "get_location",
+        "description": "Return current geographic location. Routes through Rust permission broker.",
+        "category": "sensitive",
+        "requires_permission": true
+      }
+    ],
+    "restricted_worker_tools": ["spawn_worker"],
+    "spawn_worker_blocked_in_prompts": true
+  },
+  "permission_broker": {
+    "capabilities": {
+      "get_location": {
+        "grant_persistence": "session",
+        "prompt_on_first_use": true,
+        "default_decision": "denied"
+      }
+    }
+  },
+  "ipc": {
+    "mcp_proxy_transport": "loopback_tcp",
+    "mcp_proxy_env_var": "OBRENNA_MCP_PROXY_URL",
+    "default_proxy_bind": "127.0.0.1",
+    "sidecar_stdout_channel": "events",
+    "event_line_separator": "newline"
+  },
+  "failure_modes": {
+    "sidecar_startup_failure": "report_error_no_fake_ui",
+    "mcp_server_startup_failure": "emit_typed_error_event",
+    "mcp_proxy_timeout": "return_tool_error_with_correlation_id",
+    "worker_timeout": "failure_marker_in_evidence_pack",
+    "worker_error": "failure_marker_in_evidence_pack",
+    "summarizer_failure": "hard_abort_turn",
+    "orchestrator_error": "emit_typed_error_persist_clean_message",
+    "permission_denied": "structured_tool_result_no_throw",
+    "frontend_disconnect": "reload_from_persisted_history"
+  }
+}
