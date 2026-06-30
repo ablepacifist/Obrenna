@@ -9,6 +9,8 @@ import { useToast } from '../ui/Toast'
 import { useTheme } from '../../theme/ThemeProvider'
 import ObrennaMono from '../../assets/logos/ObrennaMono.png'
 import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
+import { Globe } from 'lucide-react'
+import { MarkdownContent } from './MarkdownContent'
 
 interface ChatThreadProps {
   chatId: string | null
@@ -21,15 +23,25 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   const { resolvedTheme } = useTheme()
   const [chat, setChat] = useState<ChatDetailDTO | null>(null)
   const [sending, setSending] = useState(false)
+  const [pendingUserText, setPendingUserText] = useState<string | null>(null)
+  const [chatLoading, setChatLoading] = useState(!!chatId)
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false)
+  const [workersEnabled, setWorkersEnabled] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Pending assistant message for streaming (desktop mode)
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
   const [pendingText, setPendingText] = useState<string>('')
+  // Tool execution state for pending messages
+  const [toolStatuses, setToolStatuses] = useState<Map<string, { name: string; status: string; summary: string }>>(new Map())
+  const [sources, setSources] = useState<Map<string, Array<{ title: string; url: string; snippet: string }>>>(new Map())
 
   useEffect(() => {
-    if (!chatId) { setChat(null); return }
-    getChat(chatId).then(setChat).catch(() => setChat(null))
+    if (!chatId) { setChat(null); setChatLoading(false); return }
+    setChatLoading(true)
+    getChat(chatId)
+      .then(data => { setChat(data); setChatLoading(false) })
+      .catch(() => { setChat(null); setChatLoading(false) })
   }, [chatId])
 
   useEffect(() => {
@@ -51,9 +63,20 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         setPendingText(prev => prev + text)
       }
     } else if (event.type === 'done') {
+      // Collect sources before resetting
+      if (pendingMessageId && sources.has(pendingMessageId)) {
+        setChat(prev => prev ? {
+          ...prev,
+          messages: prev.messages.map(m =>
+            m.id === pendingMessageId
+              ? { ...m, sources: sources.get(pendingMessageId) }
+              : m,
+          ),
+        } : prev)
+      }
       setPendingMessageId(null)
       setPendingText('')
-      // Reload chat to get the finalized message
+      setToolStatuses(new Map())
       if (chatId) {
         getChat(chatId).then(setChat).catch(() => {})
       }
@@ -61,15 +84,50 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       const msg = (event.payload.message as string) || 'An error occurred'
       setPendingMessageId(null)
       setPendingText('')
+      setToolStatuses(new Map())
       addToast(msg, 'error', 4000)
+    } else if (event.type === 'tool_progress') {
+      const payload = event.payload as Record<string, unknown>
+      const toolName = payload.tool_name as string
+      const status = payload.status as string
+      const summary = payload.summary as string
+      const messageId = event.message_id || pendingMessageId
+      if (messageId) {
+        setToolStatuses(prev => {
+          const next = new Map(prev)
+          next.set(toolName, { name: toolName, status, summary })
+          return next
+        })
+      }
+    } else if (event.type === 'tool_result') {
+      const payload = event.payload as Record<string, unknown>
+      const resultStr = payload.result as string
+      const messageId = event.message_id || pendingMessageId
+      if (messageId && resultStr) {
+        try {
+          const result = JSON.parse(resultStr)
+          if (result.results && Array.isArray(result.results)) {
+            setSources(prev => {
+              const next = new Map(prev)
+              const existing = next.get(messageId) || []
+              const newSources = result.results.filter((r: any) => r.url && r.title)
+              next.set(messageId, [...existing, ...newSources])
+              return next
+            })
+          }
+        } catch {
+          // Not JSON — ignore
+        }
+      }
     }
-  }, [chatId, addToast])
+  }, [chatId, addToast, pendingMessageId, sources])
 
   useAgentEvent(handleAgentEvent)
 
   const handleSend = async (text: string, files: File[]) => {
     if (!text.trim() && files.length === 0) return
     setSending(true)
+    if (!chatId) setPendingUserText(text)
     setPendingMessageId(null)
     setPendingText('')
 
@@ -96,10 +154,12 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         const dto = await uploadFile(f)
         uploadedIds.push(dto.id)
       }
-      const resp: ChatResponse = await sendMessage({
+       const resp: ChatResponse = await sendMessage({
         chat_id: chatId ?? undefined,
         message: text,
         file_ids: uploadedIds,
+        web_search: webSearchEnabled,
+        workers_enabled: workersEnabled,
       })
 
       // Show memory toast for relevant events
@@ -131,16 +191,67 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       addToast(message, 'error', 5000)
     } finally {
       setSending(false)
+      setPendingUserText(null)
     }
   }
 
+  const ThinkingDots = (
+    <div className="flex gap-3">
+      <img
+        src={resolvedTheme === 'dark' ? ObrennaMonoWhite : ObrennaMono}
+        alt="Obrenna"
+        className="w-5 h-5 object-contain shrink-0 mt-0.5"
+      />
+      <div className="flex items-center gap-1 px-3 py-2 rounded-xl bg-(--surface) border border-(--border) text-(--ink-muted)">
+        <span className="w-1.5 h-1.5 rounded-full bg-(--ink-muted) animate-bounce [animation-delay:0ms]" />
+        <span className="w-1.5 h-1.5 rounded-full bg-(--ink-muted) animate-bounce [animation-delay:150ms]" />
+        <span className="w-1.5 h-1.5 rounded-full bg-(--ink-muted) animate-bounce [animation-delay:300ms]" />
+      </div>
+    </div>
+  )
+
   if (!chatId || !chat) {
+    // Remounting with a chatId but data not yet loaded — skeleton prevents EmptyState flash
+    if (chatId && chatLoading) {
+      return (
+        <main className="flex-1 flex flex-col min-w-0">
+          <header className="h-12 border-b border-(--border) px-6 flex items-center">
+            <div className="h-4 w-48 bg-(--border) rounded animate-pulse" />
+          </header>
+          <div className="flex-1" />
+        </main>
+      )
+    }
+
+    // First message in flight — show user bubble + thinking dots instead of blank EmptyState
+    if (!chatId && sending && pendingUserText !== null) {
+      return (
+        <main className="flex-1 flex flex-col min-w-0">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-8">
+            <div className="max-w-[760px] mx-auto space-y-8">
+              <div className="flex justify-end">
+                <div className="max-w-[640px] text-[14px] text-(--ink) leading-relaxed whitespace-pre-wrap">
+                  {pendingUserText}
+                </div>
+              </div>
+              {ThinkingDots}
+            </div>
+          </div>
+          <div className="border-t border-(--border) px-6 py-4">
+            <div className="max-w-[760px] mx-auto">
+              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} />
+            </div>
+          </div>
+        </main>
+      )
+    }
+
     return (
       <main className="flex-1 flex flex-col min-w-0">
         <EmptyState
-          onChip={p => handleSend(p, [])}
-          composer={<Composer onSend={handleSend} disabled={sending} />}
-        />
+            onChip={p => handleSend(p, [])}
+            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} />}
+          />
       </main>
     )
   }
@@ -167,39 +278,37 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
           ))}
           {/* Pending streaming message (desktop mode) */}
           {pendingMessageId && (
-            <MessageBubble
-              msg={{
-                id: pendingMessageId,
-                role: 'assistant',
-                text: pendingText || '...',
-                artifacts: [],
-                files: [],
-                created_at: new Date().toISOString(),
-              }}
-              onOpenArtifact={onOpenArtifact}
-              isLatestAssistant={true}
-            />
-          )}
-          {/* Thinking indicator while waiting for non-streaming LLM response */}
-          {sending && !pendingMessageId && (
             <div className="flex gap-3">
               <img
                 src={resolvedTheme === 'dark' ? ObrennaMonoWhite : ObrennaMono}
                 alt="Obrenna"
                 className="w-5 h-5 object-contain shrink-0 mt-0.5"
               />
-              <div className="flex items-center gap-1 px-3 py-2 rounded-xl bg-(--surface) border border-(--border) text-(--ink-muted)">
-                <span className="w-1.5 h-1.5 rounded-full bg-(--ink-muted) animate-bounce [animation-delay:0ms]" />
-                <span className="w-1.5 h-1.5 rounded-full bg-(--ink-muted) animate-bounce [animation-delay:150ms]" />
-                <span className="w-1.5 h-1.5 rounded-full bg-(--ink-muted) animate-bounce [animation-delay:300ms]" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[14px] text-(--ink)">
+                  {pendingText
+                    ? <MarkdownContent>{pendingText}</MarkdownContent>
+                    : <span className="text-(--ink-muted)">...</span>}
+                </div>
+                {/* Tool progress indicators */}
+                {Array.from(toolStatuses.entries())
+                  .filter(([, ts]) => ts.status === 'running' || ts.status === 'pending')
+                  .map(([name, ts]) => (
+                    <div key={name} className="mt-1 flex items-center gap-1.5 text-[12px] text-(--ink-muted)">
+                      <Globe className="w-3 h-3" />
+                      <span>{ts.status === 'running' ? 'Searching...' : 'Preparing search...'}</span>
+                    </div>
+                  ))}
               </div>
             </div>
           )}
+          {/* Thinking indicator while waiting for non-streaming LLM response */}
+          {sending && !pendingMessageId && ThinkingDots}
         </div>
       </div>
       <div className="border-t border-(--border) px-6 py-4">
         <div className="max-w-[760px] mx-auto">
-          <Composer onSend={handleSend} disabled={sending} />
+          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} />
         </div>
       </div>
     </main>

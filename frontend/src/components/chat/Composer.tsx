@@ -29,6 +29,10 @@ interface ComposerProps {
   onSend: (text: string, files: File[]) => void
   disabled?: boolean
   initialText?: string
+  webSearchEnabled?: boolean
+  onWebSearchChange?: (enabled: boolean) => void
+  workersEnabled?: boolean
+  onWorkersChange?: (enabled: boolean) => void
 }
 
 function formatBytes(n: number): string {
@@ -37,7 +41,7 @@ function formatBytes(n: number): string {
   return (n / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-export function Composer({ onSend, disabled, initialText = '' }: ComposerProps) {
+export function Composer({ onSend, disabled, initialText = '', webSearchEnabled = false, onWebSearchChange, workersEnabled = true, onWorkersChange }: ComposerProps) {
   const [text, setText] = useState(initialText)
   const [files, setFiles] = useState<AttachedFile[]>([])
   const [drag, setDrag] = useState(false)
@@ -130,11 +134,28 @@ export function Composer({ onSend, disabled, initialText = '' }: ComposerProps) 
             onChange={e => { addFiles(e.target.files); e.target.value = '' }}
           />
           <button
-            disabled
-            title="Web search (not available — local-only mode)"
-            className="h-8 px-2.5 rounded-md text-[12px] inline-flex items-center gap-1.5 border border-(--border) bg-(--surface) text-(--ink-faint) opacity-50 cursor-not-allowed"
+            onClick={() => onWebSearchChange?.(!webSearchEnabled)}
+            title="Toggle web search"
+            className={cn(
+              'h-8 px-2.5 rounded-md text-[12px] inline-flex items-center gap-1.5 border transition-colors',
+              webSearchEnabled
+                ? 'border-(--accent) bg-(--accent)/10 text-(--accent)'
+                : 'border-(--border) bg-(--surface) text-(--ink-faint) hover:border-(--border)/80 hover:text-(--ink-muted)',
+            )}
           >
-            <Globe className="w-3.5 h-3.5" /> Web search
+            <Globe className={cn('w-3.5 h-3.5', webSearchEnabled && 'text-(--accent)')} /> Web search
+          </button>
+          <button
+            onClick={() => onWorkersChange?.(!workersEnabled)}
+            title="Toggle worker models"
+            className={cn(
+              'h-8 px-2.5 rounded-md text-[12px] inline-flex items-center gap-1.5 border transition-colors',
+              workersEnabled
+                ? 'border-(--accent) bg-(--accent)/10 text-(--accent)'
+                : 'border-(--border) bg-(--surface) text-(--ink-faint) hover:border-(--border)/80 hover:text-(--ink-muted)',
+            )}
+          >
+            <FileText className={cn('w-3.5 h-3.5', workersEnabled && 'text-(--accent)')} /> Workers
           </button>
         </div>
         <Button onClick={send} disabled={disabled || (!text.trim() && files.length === 0)}>
