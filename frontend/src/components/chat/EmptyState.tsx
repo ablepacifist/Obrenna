@@ -1,4 +1,7 @@
 import type { ReactNode } from 'react'
+import { useTheme } from '../../theme/ThemeProvider'
+import DarkHorizontalLogo from '../../assets/logos/ObrennaDarkHorizontal.png'
+import LightHorizontalLogo from '../../assets/logos/ObrennaLightHorizontal.png'
 
 const CHIPS = [
   { label: 'Summarize these files', prompt: 'Summarize these files' },
@@ -12,10 +15,19 @@ interface EmptyStateProps {
 }
 
 export function EmptyState({ onChip, composer }: EmptyStateProps) {
+  const { resolvedTheme } = useTheme()
+  const logoSrc = resolvedTheme === 'dark' ? DarkHorizontalLogo : LightHorizontalLogo
+
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-6">
       <div className="w-full max-w-[640px]">
-        <h1 className="text-[22px] font-semibold tracking-tight text-(--ink)">What are we working on?</h1>
+        <div className="mb-6 flex flex-col items-center gap-5">
+          <img
+            src={logoSrc}
+            alt="Obrenna logo"
+            className="h-auto w-auto max-w-[480px] object-contain"
+          />
+        </div>
         <p className="mt-1.5 text-[14px] text-(--ink-muted) leading-relaxed">
           Drop a file or describe the task. Everything runs on your machine.
         </p>

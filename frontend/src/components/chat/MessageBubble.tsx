@@ -1,10 +1,13 @@
-import { FileText, Sparkles } from 'lucide-react'
+import { FileText } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { Artifact } from '../../lib/types/artifact'
 import type { ChatMessageDTO } from '../../lib/api'
 import { getArtifact } from '../../lib/api'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { StreamedText } from './StreamedText'
+import { useTheme } from '../../theme/ThemeProvider'
+import ObrennaMono from '../../assets/logos/ObrennaMono.png'
+import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
 
 interface MessageBubbleProps {
   msg: ChatMessageDTO
@@ -13,6 +16,7 @@ interface MessageBubbleProps {
 }
 
 export function MessageBubble({ msg, onOpenArtifact, isLatestAssistant }: MessageBubbleProps) {
+  const { resolvedTheme } = useTheme()
   const [artifacts, setArtifacts] = useState<Record<string, Artifact>>({})
 
   useEffect(() => {
@@ -46,9 +50,11 @@ export function MessageBubble({ msg, onOpenArtifact, isLatestAssistant }: Messag
 
   return (
     <div className="flex gap-3">
-      <div className="w-6 h-6 rounded-md bg-(--surface-2) border border-(--border) flex items-center justify-center shrink-0 mt-0.5">
-        <Sparkles className="w-3 h-3 text-(--accent)" />
-      </div>
+      <img
+        src={resolvedTheme === 'dark' ? ObrennaMonoWhite : ObrennaMono}
+        alt="Obrenna"
+        className="w-5 h-5 object-contain shrink-0 mt-0.5"
+      />
       <div className="min-w-0 flex-1">
         <div className="text-[14px] text-(--ink) leading-relaxed whitespace-pre-wrap">
           <StreamedText text={msg.text} active={isLatestAssistant} />

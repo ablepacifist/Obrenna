@@ -4,6 +4,21 @@ import { cn } from '../../lib/cn'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
 
+const ALLOWED_EXTENSIONS = new Set([
+  'csv', 'txt', 'pdf', 'xlsx', 'xls', 'json', 'log', 'md', 'xml',
+  'html', 'htm', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'sh', 'bat', 'ps1',
+  'js', 'ts', 'jsx', 'tsx', 'py', 'rb', 'go', 'rs', 'c', 'cpp', 'h', 'hpp',
+])
+
+function getFileExtension(name: string): string {
+  const parts = name.split('.')
+  return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : ''
+}
+
+function isAllowedFile(file: File): boolean {
+  return ALLOWED_EXTENSIONS.has(getFileExtension(file.name))
+}
+
 export interface AttachedFile {
   file: File
   name: string
@@ -42,12 +57,22 @@ export function Composer({ onSend, disabled, initialText = '' }: ComposerProps) 
 
   const addFiles = (list: FileList | null) => {
     if (!list) return
-    const arr: AttachedFile[] = Array.from(list).map(f => ({
-      file: f,
-      name: f.name,
-      size: formatBytes(f.size),
-    }))
-    setFiles(prev => [...prev, ...arr])
+    const arr: AttachedFile[] = []
+    const unsupported: string[] = []
+    for (const f of Array.from(list)) {
+      if (isAllowedFile(f)) {
+        arr.push({ file: f, name: f.name, size: formatBytes(f.size) })
+      } else {
+        unsupported.push(f.name)
+      }
+    }
+    if (unsupported.length > 0) {
+      const exts = Array.from(new Set(unsupported.map(name => getFileExtension(name)))).join(', ')
+      window.alert(`These file types are not supported: ${exts}. Only text-based files (CSV, TXT, PDF, XLSX, JSON, code, etc.) can be attached.`)
+    }
+    if (arr.length > 0) {
+      setFiles(prev => [...prev, ...arr])
+    }
   }
 
   return (
@@ -100,6 +125,7 @@ export function Composer({ onSend, disabled, initialText = '' }: ComposerProps) 
             ref={fileRef}
             type="file"
             multiple
+            accept=".csv,.txt,.pdf,.xlsx,.xls,.json,.log,.md,.xml,.html,.htm,.yaml,.yml,.toml,.ini,.cfg,.conf,.sh,.bat,.ps1,.js,.ts,.jsx,.tsx,.py,.rb,.go,.rs,.c,.cpp,.h,.hpp"
             className="hidden"
             onChange={e => { addFiles(e.target.files); e.target.value = '' }}
           />
