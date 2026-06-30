@@ -1,6 +1,7 @@
 """CRUD for chats and folders (sidebar persistence)."""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -22,6 +23,7 @@ from ..schemas.api import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # --- folders -----------------------------------------------------------------
@@ -133,8 +135,14 @@ def update_chat(chat_id: str, payload: UpdateChatRequest, db: Session = Depends(
 
 @router.delete("/api/chats/{chat_id}", status_code=204)
 def delete_chat(chat_id: str, db: Session = Depends(get_db)):
+    logger.info("DELETE CHAT REQUEST: chat_id=%s", chat_id)
     chat = db.get(Chat, chat_id)
     if not chat:
+        logger.warning("Chat not found for deletion: chat_id=%s", chat_id)
         raise HTTPException(status_code=404, detail="Chat not found.")
+    # Delete all messages for this chat (cascade handles it, but log explicitly)
+    msg_count = db.query(ChatMessage).filter_by(chat_id=chat_id).count()
+    logger.info("Deleting chat %s with %d messages", chat_id, msg_count)
     db.delete(chat)
     db.commit()
+    logger.info("CHAT DELETED: chat_id=%s", chat_id)
