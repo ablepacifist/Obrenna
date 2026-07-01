@@ -28,12 +28,12 @@ def test_default_config_keys():
                 "event_channel": "agent_event",
                 "fields": ["chat_id", "message_id", "type", "payload"],
             },
-            "orchestration": {
-                "worker_timeout_seconds": 12,
-                "max_worker_failures": None,
-                "summarizer_failure_policy": "hard_abort",
-                "evidence_pack_compact": True,
-            },
+"orchestration": {
+                 "worker_timeout_seconds": 12,
+                 "max_worker_failures": None,
+                 "summarizer_failure_policy": "fallback_then_error",
+                 "evidence_pack_compact": True,
+             },
         },
         "mcp_tools": {"allowed": [], "restricted_worker_tools": [], "spawn_worker_blocked_in_prompts": True},
         "permission_broker": {"capabilities": {}},
@@ -47,7 +47,7 @@ def test_default_config_keys():
             "sidecar_startup_failure": "report_error_no_fake_ui",
             "mcp_server_startup_failure": "emit_typed_error_event",
             "worker_timeout": "failure_marker_in_evidence_pack",
-            "summarizer_failure": "hard_abort_turn",
+            "summarizer_failure": "fallback_then_error",
             "orchestrator_error": "emit_typed_error_persist_clean_message",
         },
     }
@@ -82,7 +82,7 @@ def test_validate_missing_mcp_tools_allowed():
             "roles": {"orchestrator": {}, "summarizer": {}, "utility": {}},
             "streaming": {"event_types": [], "envelope_format": "json", "event_channel": "e", "fields": []},
             "orchestration": {"worker_timeout_seconds": 12, "max_worker_failures": None,
-                              "summarizer_failure_policy": "hard_abort", "evidence_pack_compact": True},
+                              "summarizer_failure_policy": "fallback_then_error", "evidence_pack_compact": True},
         },
         "mcp_tools": {},
         "permission_broker": {},
@@ -117,7 +117,7 @@ def test_get_streaming_config():
 def test_get_failure_modes():
     """Test failure modes helper."""
     fm = get_failure_modes()
-    assert fm["summarizer_failure"] == "hard_abort_turn"
+    assert fm["summarizer_failure"] == "fallback_then_error"
     assert fm["worker_timeout"] == "failure_marker_in_evidence_pack"
 
 
@@ -138,4 +138,4 @@ def test_get_orchestration_config():
     """Test orchestration config helper."""
     oc = get_orchestration_config()
     assert oc["worker_timeout_seconds"] == 12
-    assert oc["summarizer_failure_policy"] == "hard_abort"
+    assert oc["summarizer_failure_policy"] == "fallback_then_error"

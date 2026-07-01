@@ -19,6 +19,7 @@ from app.services.memory import (
     update_fact,
     delete_fact,
     create_fact,
+    _add_fact,
 )
 from app.services.migrations import run_migrations, backfill_turns
 
@@ -194,7 +195,7 @@ class TestMemoryFactCRUD:
         fact = create_fact(db, "User lives in Seattle", "chat001")
         assert fact is not None
         assert fact.fact_text == "User lives in Seattle"
-        assert fact.user_locked is False
+        assert fact.user_locked is True
 
     def test_get_active_facts(self, db: Session):
         create_fact(db, "Fact 1")
@@ -213,6 +214,11 @@ class TestMemoryFactCRUD:
         assert stored is not None
         assert stored.deleted_at is not None
 
+    def test_delete_fact_auto_actor_rejected(self, db: Session):
+        fact = create_fact(db, "To delete")
+        ok = delete_fact(db, fact.id, actor="auto")
+        assert ok is False
+
     def test_update_fact(self, db: Session):
         fact = create_fact(db, "Old text")
         updated = update_fact(db, fact.id, "New text")
@@ -226,6 +232,28 @@ class TestMemoryFactCRUD:
 
     def test_update_nonexistent(self, db: Session):
         result = update_fact(db, "nonexistent-id", "text")
+        assert result is None
+
+    def test_create_fact_auto_defaults_unlocked(self, db: Session):
+        fact = _add_fact(db, "Auto extracted fact", "chat001", source="auto")
+        assert fact is not None
+        assert fact.user_locked is False
+
+    def test_user_fact_is_locked(self, db: Session):
+        fact = create_fact(db, "User created fact", "chat001")
+        assert fact is not None
+        assert fact.user_locked is True
+
+    def test_update_fact_preserves_locked(self, db: Session):
+        fact = create_fact(db, "User created fact")
+        assert fact.user_locked is True
+        updated = update_fact(db, fact.id, "Updated text")
+        assert updated is not None
+        assert updated.user_locked is True
+
+    def test_auto_actor_cannot_update_fact(self, db: Session):
+        fact = create_fact(db, "User created fact")
+        result = update_fact(db, fact.id, "Auto updated", actor="auto")
         assert result is None
 
     def test_active_facts_excludes_deleted(self, db: Session):

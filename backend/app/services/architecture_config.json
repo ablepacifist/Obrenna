@@ -24,12 +24,12 @@
       "event_channel": "agent_event",
       "fields": ["chat_id", "message_id", "type", "payload"]
     },
-    "orchestration": {
-      "worker_timeout_seconds": 12,
-      "max_worker_failures": null,
-      "summarizer_failure_policy": "hard_abort",
-      "evidence_pack_compact": true
-    }
+"orchestration": {
+       "worker_timeout_seconds": 12,
+       "max_worker_failures": null,
+       "summarizer_failure_policy": "fallback_then_error",
+       "evidence_pack_compact": true
+     }
   },
   "mcp_tools": {
     "tool_timeout_seconds": 15,
@@ -90,7 +90,7 @@
     "mcp_proxy_timeout": "return_tool_error_with_correlation_id",
     "worker_timeout": "failure_marker_in_evidence_pack",
     "worker_error": "failure_marker_in_evidence_pack",
-    "summarizer_failure": "hard_abort_turn",
+    "summarizer_failure": "fallback_then_error",
     "orchestrator_error": "emit_typed_error_persist_clean_message",
     "permission_denied": "structured_tool_result_no_throw",
     "frontend_disconnect": "reload_from_persisted_history"

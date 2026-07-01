@@ -2,10 +2,13 @@
 
 mod backend;
 mod mcp;
+mod supervisor;
 mod updater;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use supervisor::BackendProcesses;
 use tauri::Manager;
 
 struct AppState {
@@ -26,10 +29,35 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(state.clone())
+        .manage(Mutex::new(BackendProcesses::new()))
         .setup(move |app| {
             let data_dir = get_data_dir();
 
-            backend::start_backend(app.handle(), port, &data_dir)?;
+            // Resolve MCP server path
+            let resource_dir = app.path().resource_dir().expect("failed to get resource dir");
+            let mcp_server_path = resource_dir
+                .join("mcp")
+                .join(backend::executable_name("obrenna-mcp"));
+            let mcp_server_path = if mcp_server_path.exists() {
+                mcp_server_path
+            } else {
+                let mcp_exe = mcp_server_path.with_extension("exe");
+                if mcp_exe.exists() {
+                    mcp_exe
+                } else {
+                    PathBuf::new()
+                }
+            };
+
+            // Start supervisor
+            let mut processes = app.state::<Mutex<BackendProcesses>>();
+            let mut proc_guard = processes.lock().unwrap();
+            let _ = proc_guard.start(
+                app.handle(),
+                port,
+                &data_dir,
+                &mcp_server_path,
+            );
 
             let mut state = setup_state.lock().unwrap();
             state.backend_port = port;
@@ -52,16 +80,13 @@ fn main() {
                 let port = state.backend_port;
                 drop(state);
 
+                // Acquire supervisor and call shutdown
+                let processes = app.state::<Mutex<BackendProcesses>>();
+                let mut proc_guard = processes.lock().unwrap();
+                proc_guard.shutdown(port);
+
                 let app_handle = app.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let url = format!("http://127.0.0.1:{}", port);
-                    if let Ok(client) = reqwest::Client::new()
-                        .post(format!("{}/api/shutdown", url))
-                        .send()
-                        .await
-                    {
-                        let _ = client;
-                    }
                     let _ = app_handle.exit(0);
                 });
             }
@@ -70,7 +95,7 @@ fn main() {
         .expect("error while running Obrenna");
 }
 
-fn get_data_dir() -> std::path::PathBuf {
+fn get_data_dir() -> PathBuf {
     let data_dir = backend::migrate_data_dir();
 
     let data_dir_str = data_dir.to_string_lossy();

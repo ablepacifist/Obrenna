@@ -16,11 +16,13 @@ from ..services.memory_config import (
     CONTEXT_TIERS,
     DEFAULT_CONTEXT_TIER,
     EMBEDDING_DIM,
-    FACT_TOP_K,
     MAX_FACTS_PER_TURN,
-    SIMILARITY_THRESHOLD,
     TIGHT_ARCHIVE_TOP_K,
     TIGHT_FACT_TOP_K,
+    get_default_top_k,
+    get_extraction_limit,
+    get_memory_config,
+    get_similarity_threshold,
 )
 from ..services.vector_store import (
     delete_fact_vector,
@@ -124,13 +126,16 @@ class MemoryContext:
             )
             parts.append(f"**Relevant past conversation:**\n{turn_lines}")
 
-        parts.append(
-            "You may use Markdown formatting in your responses (headers, bold, lists, "
-            "code blocks, tables) when it improves readability. Plain prose is fine when "
-            "markdown would add no value."
-        )
+        # Only include markdown hint when there's actual context content
+        if parts:
+            parts.append(
+                "You may use Markdown formatting in your responses (headers, bold, lists, "
+                "code blocks, tables) when it improves readability. Plain prose is fine when "
+                "markdown would add no value."
+            )
 
-        messages.append({"role": "system", "content": "\n\n".join(parts)})
+        if parts:
+            messages.append({"role": "system", "content": "\n\n".join(parts)})
 
         return messages
 
@@ -165,7 +170,7 @@ def assemble_context(
     rolling_summary = getattr(chat, "rolling_summary", "") or ""
 
     # Memory facts
-    facts = search_facts(db, user_message, top_k=FACT_TOP_K)
+    facts = search_facts(db, user_message, top_k=get_default_top_k())
     facts_out = [{"id": f[0], "text": f[2]} for f in facts]
 
     # Archived turns (determine top-k based on budget)
@@ -367,7 +372,7 @@ def _extract_facts(
     chosen = cfg.model_for("utility") or cfg.model_for("summarizer") or ""
 
     prompt = FACT_EXTRACTION_PROMPT.format(
-        max_facts=MAX_FACTS_PER_TURN,
+        max_facts=get_extraction_limit(),
         user_text=user_text[:800],
         assistant_text=assistant_text[:800],
     )
@@ -495,7 +500,7 @@ def extract_and_reconcile_facts(
                             best_score = sim
                             best_match = fact
 
-            if best_match and best_score >= SIMILARITY_THRESHOLD:
+            if best_match and best_score >= get_similarity_threshold():
                 op, _ = _reconcile_fact(db, candidate, best_match)
                 if op == "UPDATE":
                     best_match.fact_text = candidate
@@ -504,11 +509,11 @@ def extract_and_reconcile_facts(
                     events.append({"type": "UPDATE", "fact_id": best_match.id, "text": candidate})
                 elif op == "ADD":
                     # Treat as new fact
-                    _add_fact(db, candidate, source_chat_id)
+                    _add_fact(db, candidate, source_chat_id, source="auto")
                     events.append({"type": "ADD", "text": candidate})
             else:
                 # No close match — add as new fact
-                _add_fact(db, candidate, source_chat_id)
+                _add_fact(db, candidate, source_chat_id, source="auto")
                 events.append({"type": "ADD", "text": candidate})
 
         if events:
@@ -520,15 +525,32 @@ def extract_and_reconcile_facts(
         return []
 
 
-def _add_fact(db: Session, text: str, source_chat_id: str | None) -> Optional[Any]:
-    """Insert a new memory fact and its vector."""
+def _add_fact(
+    db: Session,
+    text: str,
+    source_chat_id: str | None,
+    *,
+    source: str = "user",
+) -> Optional[Any]:
+    """Insert a new memory fact and its vector.
+
+    Args:
+        db: SQLAlchemy session.
+        text: The fact text.
+        source_chat_id: Optional chat ID that originated this fact.
+        source: "user" for user-created facts, "auto" for auto-extracted facts.
+            Determines initial user_locked state.
+    """
     from ..models import MemoryFact  # noqa: PLC0414
+
+    cfg = get_memory_config()
+    user_locked = cfg.user_facts.created_by_user_default_locked if source == "user" else False
 
     fact = MemoryFact(
         id=uuid.uuid4().hex,
         fact_text=text,
         source_chat_id=source_chat_id,
-        user_locked=False,
+        user_locked=user_locked,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -552,17 +574,34 @@ def get_active_facts(db: Session) -> list[Any]:
     )
 
 
-def update_fact(db: Session, fact_id: str, new_text: str) -> Optional[Any]:
-    """Update a fact's text, set user_locked=true, recompute embedding."""
+def update_fact(
+    db: Session,
+    fact_id: str,
+    new_text: str,
+    *,
+    actor: str = "user",
+) -> Optional[Any]:
+    """Update a fact's text and recompute embedding.
+
+    Args:
+        db: SQLAlchemy session.
+        fact_id: The fact to update.
+        new_text: The new fact text.
+        actor: "user" for user-initiated updates. Auto-memory actors
+            are not permitted to call this directly — they use
+            extract_and_reconcile_facts instead.
+    """
     from ..models import MemoryFact  # noqa: PLC0414
+
+    if actor not in ("user",):
+        logger.warning("update_fact called with forbidden actor: %s", actor)
+        return None
 
     fact = db.query(MemoryFact).filter_by(id=fact_id).first()
     if not fact:
         return None
 
-    old_text = fact.fact_text
     fact.fact_text = new_text
-    fact.user_locked = True
     fact.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(fact)
@@ -574,9 +613,19 @@ def update_fact(db: Session, fact_id: str, new_text: str) -> Optional[Any]:
     return fact
 
 
-def delete_fact(db: Session, fact_id: str) -> bool:
-    """Soft-delete a fact: set deleted_at, set user_locked, keep vector/tombstone."""
+def delete_fact(db: Session, fact_id: str, *, actor: str = "user") -> bool:
+    """Soft-delete a fact: set deleted_at, keep vector/tombstone.
+
+    Args:
+        db: SQLAlchemy session.
+        fact_id: The fact to delete.
+        actor: Must be "user" — auto-memory cannot delete facts.
+    """
     from ..models import MemoryFact  # noqa: PLC0414
+
+    if actor not in ("user",):
+        logger.warning("delete_fact called with forbidden actor: %s", actor)
+        return False
 
     fact = db.query(MemoryFact).filter_by(id=fact_id).first()
     if not fact:
@@ -591,6 +640,12 @@ def delete_fact(db: Session, fact_id: str) -> bool:
     return True
 
 
-def create_fact(db: Session, text: str, source_chat_id: str | None = None) -> Optional[Any]:
-    """Create a user-initiated memory fact (user_locked=true)."""
-    return _add_fact(db, text, source_chat_id)
+def create_fact(
+    db: Session,
+    text: str,
+    source_chat_id: str | None = None,
+    *,
+    source: str = "user",
+) -> Optional[Any]:
+    """Create a user-initiated memory fact (user_locked=true by default)."""
+    return _add_fact(db, text, source_chat_id, source=source)

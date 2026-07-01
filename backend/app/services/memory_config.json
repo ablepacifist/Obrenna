@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "retrieval": {
+    "strategy": "cosine",
+    "default_top_k": 8,
+    "min_similarity": 0.62,
+    "exp0_strategy": "recency_only"
+  },
+  "vector_store": {
+    "backend": "bruteforce_cosine",
+    "sqlite_vec_enabled": false,
+    "allow_fallback": true
+  },
+  "extraction": {
+    "enabled": true,
+    "mode": "async_two_phase",
+    "candidate_limit_per_turn": 6
+  },
+  "reconciliation": {
+    "auto_memory_can_update_unlocked": true,
+    "auto_memory_can_delete_unlocked": true,
+    "auto_memory_can_overwrite_user_locked": false
+  },
+  "user_facts": {
+    "created_by_user_default_locked": true,
+    "delete_mode": "tombstone_locked"
+  }
+}

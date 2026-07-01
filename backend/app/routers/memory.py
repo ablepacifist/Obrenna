@@ -31,9 +31,9 @@ def list_facts(db: Session = Depends(get_db)):
 
 @router.post("/facts", response_model=MemoryFactDTO)
 def create_fact(payload: MemoryFactCreateRequest, db: Session = Depends(get_db)):
-    """Create a user-initiated memory fact (user_locked=true)."""
+    """Create a user-initiated memory fact (user_locked=true by default)."""
     try:
-        fact = memory_svc.create_fact(db, payload.fact_text)
+        fact = memory_svc.create_fact(db, payload.fact_text, source="user")
         if fact is None:
             raise HTTPException(status_code=500, detail="Failed to create fact.")
         return MemoryFactDTO(

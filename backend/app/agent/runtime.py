@@ -33,6 +33,7 @@ from .events import (
     done_event,
     error_event,
     new_message_id,
+    thinking_delta_event,
     token_event,
     tool_call_event,
     tool_progress_event,
@@ -97,6 +98,7 @@ async def orchestrate_turn(
     assistant_message_id: str | None = None,
     web_search: bool = False,
     workers_enabled: bool = True,
+    thinking_enabled: bool = False,
 ) -> AsyncIterator[StreamEvent]:
     """Orchestrate a single chat turn through the agent runtime.
 
@@ -162,15 +164,21 @@ async def orchestrate_turn(
                 summary_text, success = await summarize_into_evidence_pack(
                     config, resolved_plan.summarizer_model, evidence_pack,
                 )
-                if not success:
-                    yield error_event(
-                        chat_id,
-                        error_code="summarizer_failure",
-                        message="Summarizer failed — aborting turn.",
-                        recoverable=False,
-                    )
-                    return
-                evidence_summary = summary_text
+                if success:
+                    evidence_summary = summary_text
+                else:
+                    # Fallback: compact raw evidence
+                    compact = evidence_pack.to_compact_string()
+                    if compact and compact != "No worker results available.":
+                        evidence_summary = compact
+                    else:
+                        yield error_event(
+                            chat_id,
+                            error_code="summarizer_failure",
+                            message="Summarizer failed — aborting turn.",
+                            recoverable=False,
+                        )
+                        return
             else:
                 evidence_summary = evidence_pack.to_compact_string()
 
@@ -224,7 +232,13 @@ async def orchestrate_turn(
                 temperature=0.2,
                 timeout=stream_timeout,
                 tools=model_tools,
+                think=thinking_enabled,
             ):
+                if event.get("type") == "thinking_delta":
+                    text = event.get("content", "") or event.get("text", "")
+                    if text:
+                        yield thinking_delta_event(chat_id, text=text, message_id=msg_id)
+                    continue
                 if event.get("type") == "token":
                     text = event.get("content", "")
                     if text:

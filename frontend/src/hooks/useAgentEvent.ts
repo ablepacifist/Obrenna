@@ -4,8 +4,13 @@ interface AgentEvent {
   channel: string
   chat_id: string
   message_id: string
-  type: 'token' | 'done' | 'error' | 'tool_call' | 'tool_result' | 'tool_progress'
+  type: 'token' | 'thinking_delta' | 'done' | 'error' | 'tool_call' | 'tool_result' | 'tool_progress'
   payload: Record<string, unknown>
+}
+
+interface BackendLogEvent {
+  source: string
+  line: string
 }
 
 type EventCallback = (event: AgentEvent) => void
@@ -28,6 +33,7 @@ export function useAgentEvent(callback: EventCallback): void {
       try {
         const { listen } = await import('@tauri-apps/api/event')
 
+        // Listen for agent events
         const unsubPromise = listen('agent-event', (raw: { payload: AgentEvent | string }) => {
           if (cancelled) return
           let event: AgentEvent
@@ -41,6 +47,23 @@ export function useAgentEvent(callback: EventCallback): void {
             event = raw.payload as AgentEvent
           }
           callbackRef.current(event)
+        })
+
+        // Listen for backend-log events (Python stdout that isn't a valid agent event)
+        // These are routed to console.warn only — not displayed in chat UI.
+        listen('backend-log', (raw: { payload: BackendLogEvent | string }) => {
+          if (cancelled) return
+          let logEvent: BackendLogEvent
+          if (typeof raw.payload === 'string') {
+            try {
+              logEvent = JSON.parse(raw.payload)
+            } catch {
+              return
+            }
+          } else {
+            logEvent = raw.payload as BackendLogEvent
+          }
+          console.warn(`[backend-log:${logEvent.source}] ${logEvent.line}`)
         })
 
         return () => {

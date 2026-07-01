@@ -157,12 +157,12 @@ def _default_config() -> dict[str, Any]:
                 "event_channel": "agent_event",
                 "fields": ["chat_id", "message_id", "type", "payload"],
             },
-            "orchestration": {
-                "worker_timeout_seconds": 12,
-                "max_worker_failures": None,
-                "summarizer_failure_policy": "hard_abort",
-                "evidence_pack_compact": True,
-            },
+"orchestration": {
+                 "worker_timeout_seconds": 12,
+                 "max_worker_failures": None,
+                 "summarizer_failure_policy": "fallback_then_error",
+                 "evidence_pack_compact": True,
+             },
         },
         "mcp_tools": {
             "allowed": [],
@@ -190,7 +190,7 @@ def _default_config() -> dict[str, Any]:
             "mcp_server_startup_failure": "emit_typed_error_event",
             "mcp_proxy_timeout": "return_tool_error_with_correlation_id",
             "worker_timeout": "failure_marker_in_evidence_pack",
-            "summarizer_failure": "hard_abort_turn",
+            "summarizer_failure": "fallback_then_error",
             "orchestrator_error": "emit_typed_error_persist_clean_message",
             "frontend_disconnect": "reload_from_persisted_history",
         },
