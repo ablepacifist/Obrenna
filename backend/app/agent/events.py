@@ -21,9 +21,11 @@ EVENT_TYPE_ERROR = "error"
 EVENT_TYPE_TOOL_CALL = "tool_call"
 EVENT_TYPE_TOOL_RESULT = "tool_result"
 EVENT_TYPE_TOOL_PROGRESS = "tool_progress"
+EVENT_TYPE_THINKING_DELTA = "thinking_delta"
 VALID_EVENT_TYPES = (
     EVENT_TYPE_TOKEN, EVENT_TYPE_DONE, EVENT_TYPE_ERROR,
     EVENT_TYPE_TOOL_CALL, EVENT_TYPE_TOOL_RESULT, EVENT_TYPE_TOOL_PROGRESS,
+    EVENT_TYPE_THINKING_DELTA,
 )
 
 CHANNEL_AGENT_EVENT = "agent_event"
@@ -280,6 +282,20 @@ def tool_progress_event(
             "status": status,
             "summary": summary,
         },
+    )
+
+
+def thinking_delta_event(chat_id: str, text: str, message_id: str = "") -> StreamEvent:
+    """Create a thinking_delta stream event (ephemeral reasoning trace).
+
+    Like ``token_event`` but for reasoning/thinking tokens. Not persisted —
+    only streamed live to the UI.
+    """
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_THINKING_DELTA,
+        payload={"text": text},
     )
 
 

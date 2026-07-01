@@ -5,10 +5,12 @@ from app.agent.events import (
     CHANNEL_AGENT_EVENT,
     EVENT_TYPE_DONE,
     EVENT_TYPE_ERROR,
+    EVENT_TYPE_THINKING_DELTA,
     EVENT_TYPE_TOKEN,
     StreamEvent,
     done_event,
     error_event,
+    thinking_delta_event,
     token_event,
     new_message_id,
 )
@@ -67,3 +69,20 @@ def test_event_type_constants():
     assert EVENT_TYPE_DONE == "done"
     assert EVENT_TYPE_ERROR == "error"
     assert CHANNEL_AGENT_EVENT == "agent_event"
+
+
+def test_thinking_delta_event_shape():
+    """Test thinking_delta event produces the correct envelope."""
+    evt = thinking_delta_event("chat1", text="reasoning chunk", message_id="msg1")
+    env = evt.to_envelope()
+    assert env["channel"] == CHANNEL_AGENT_EVENT
+    assert env["chat_id"] == "chat1"
+    assert env["type"] == EVENT_TYPE_THINKING_DELTA
+    assert env["type"] == "thinking_delta"
+    assert env["payload"]["text"] == "reasoning chunk"
+    assert env["message_id"] == "msg1"
+
+    line = evt.to_json_line()
+    parsed = json.loads(line)
+    assert parsed["type"] == "thinking_delta"
+    assert parsed["payload"]["text"] == "reasoning chunk"

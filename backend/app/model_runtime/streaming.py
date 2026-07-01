@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_STREAM_TIMEOUT = 60.0
 
 
+def _first_non_empty_str(*values: object) -> str:
+    """Return the first non-empty string among ``values`` (else ``""``)."""
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 # ── SSE chunk type detection ─────────────────────────────────────────────────
 
 
@@ -43,15 +51,22 @@ async def chat_completion_stream(
     timeout: float = DEFAULT_STREAM_TIMEOUT,
     stop: list[str] | None = None,
     tools: list[dict] | None = None,
+    think: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream tokens from an OpenAI-compatible endpoint.
 
     Yields dict events:
       {"type": "token", "content": "..."}  — for text tokens
+      {"type": "thinking_delta", "content": "..."}  — for reasoning/thinking tokens
       {"type": "tool_calls_done", "calls": [...]}  — when model requests tool calls
 
     When `tools` is provided, includes tools/tool_choice in the request and
     parses delta.tool_calls from SSE chunks.
+
+    When `think` is True and the runtime is Ollama, sends ``reasoning_effort`` to
+    request a reasoning trace; reasoning chunks (``delta.reasoning_content`` /
+    ``delta.reasoning`` / ``delta.thinking``) are yielded as ``thinking_delta``
+    events. Non-Ollama runtimes send no reasoning controls.
 
     When `tools` is None, yields only token events (backward-compatible behavior).
     """
@@ -70,6 +85,10 @@ async def chat_completion_stream(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    # Ollama OpenAI-compatible reasoning control. Never send native `think`/
+    # `options.think` to /v1/chat/completions — only the OpenAI-style field.
+    if config.runtime_kind == "ollama":
+        payload["reasoning_effort"] = "medium" if think else "none"
 
     logger.info("STREAMING REQUEST: model=%s url=%s messages_count=%d temperature=%.1f tools=%s",
                 chosen, config.url("chat/completions"), len(messages), temperature,
@@ -101,6 +120,21 @@ async def chat_completion_stream(
                     choices = chunk.get("choices", [])
                     for choice in choices:
                         delta = choice.get("delta", {})
+                        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+
+                        # Reasoning / thinking (extracted before content so it
+                        # streams into the ephemeral thinking pane, not the answer).
+                        thinking = _first_non_empty_str(
+                            delta.get("reasoning_content"),
+                            delta.get("reasoning"),
+                            delta.get("thinking"),
+                            message.get("reasoning_content"),
+                            message.get("reasoning"),
+                            message.get("thinking"),
+                        )
+                        if thinking:
+                            yield {"type": "thinking_delta", "content": thinking}
+                            continue
 
                         # Text content
                         content = delta.get("content")

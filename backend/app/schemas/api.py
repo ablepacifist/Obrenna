@@ -136,6 +136,7 @@ class ChatRequest(BaseModel):
     file_ids: list[str] = []
     workers_enabled: Optional[bool] = None  # NEW: Per-chat override
     web_search: bool = False
+    thinking_enabled: bool = False
 
 
 class ChatMessageDTO(BaseModel):

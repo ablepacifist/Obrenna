@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { FileText, Globe, Paperclip, Send, X } from 'lucide-react'
+import { Brain, FileText, Globe, Paperclip, Send, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
@@ -33,6 +33,8 @@ interface ComposerProps {
   onWebSearchChange?: (enabled: boolean) => void
   workersEnabled?: boolean
   onWorkersChange?: (enabled: boolean) => void
+  thinkingEnabled?: boolean
+  onThinkingChange?: (enabled: boolean) => void
 }
 
 function formatBytes(n: number): string {
@@ -41,7 +43,7 @@ function formatBytes(n: number): string {
   return (n / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-export function Composer({ onSend, disabled, initialText = '', webSearchEnabled = false, onWebSearchChange, workersEnabled = true, onWorkersChange }: ComposerProps) {
+export function Composer({ onSend, disabled, initialText = '', webSearchEnabled = false, onWebSearchChange, workersEnabled = true, onWorkersChange, thinkingEnabled = false, onThinkingChange }: ComposerProps) {
   const [text, setText] = useState(initialText)
   const [files, setFiles] = useState<AttachedFile[]>([])
   const [drag, setDrag] = useState(false)
@@ -156,6 +158,19 @@ export function Composer({ onSend, disabled, initialText = '', webSearchEnabled 
             )}
           >
             <FileText className={cn('w-3.5 h-3.5', workersEnabled && 'text-(--accent)')} /> Workers
+          </button>
+          <button
+            onClick={() => onThinkingChange?.(!thinkingEnabled)}
+            title="Show model thinking while generating"
+            aria-pressed={thinkingEnabled}
+            className={cn(
+              'h-8 px-2.5 rounded-md text-[12px] inline-flex items-center gap-1.5 border transition-colors',
+              thinkingEnabled
+                ? 'border-(--accent) bg-(--accent)/10 text-(--accent)'
+                : 'border-(--border) bg-(--surface) text-(--ink-faint) hover:border-(--border)/80 hover:text-(--ink-muted)',
+            )}
+          >
+            <Brain className={cn('w-3.5 h-3.5', thinkingEnabled && 'text-(--accent)')} /> Thinking
           </button>
         </div>
         <Button onClick={send} disabled={disabled || (!text.trim() && files.length === 0)}>

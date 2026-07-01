@@ -11,6 +11,7 @@ import ObrennaMono from '../../assets/logos/ObrennaMono.png'
 import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
 import { Globe } from 'lucide-react'
 import { MarkdownContent } from './MarkdownContent'
+import { ThinkingPane } from './ThinkingPane'
 
 interface ChatThreadProps {
   chatId: string | null
@@ -27,11 +28,16 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   const [chatLoading, setChatLoading] = useState(!!chatId)
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
   const [workersEnabled, setWorkersEnabled] = useState(true)
+  const [thinkingEnabled, setThinkingEnabled] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Pending assistant message for streaming (desktop mode)
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
   const [pendingText, setPendingText] = useState<string>('')
+  // Ephemeral reasoning trace (not persisted)
+  const [pendingThinking, setPendingThinking] = useState<string>('')
+  const [thinkingExpanded, setThinkingExpanded] = useState(true)
+  const hasContentTokenRef = useRef(false)
   // Tool execution state for pending messages
   const [toolStatuses, setToolStatuses] = useState<Map<string, { name: string; status: string; summary: string }>>(new Map())
   const [sources, setSources] = useState<Map<string, Array<{ title: string; url: string; snippet: string }>>>(new Map())
@@ -46,7 +52,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [chat?.messages.length, pendingText])
+  }, [chat?.messages.length, pendingText, pendingThinking])
 
   // Handle agent events for streaming
   const handleAgentEvent = useCallback((event: {
@@ -57,10 +63,22 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   }) => {
     if (event.chat_id !== chatId) return
 
-    if (event.type === 'token') {
+    if (event.type === 'thinking_delta') {
+      const text = typeof event.payload.text === 'string' ? event.payload.text : ''
+      if (text) {
+        setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+        setPendingThinking(prev => prev + text)
+      }
+    } else if (event.type === 'token') {
       const text = event.payload.text as string
       if (text) {
+        setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
         setPendingText(prev => prev + text)
+        // Auto-collapse the thinking pane once when the answer begins streaming.
+        if (!hasContentTokenRef.current) {
+          hasContentTokenRef.current = true
+          setThinkingExpanded(false)
+        }
       }
     } else if (event.type === 'done') {
       // Collect sources before resetting
@@ -76,6 +94,9 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       }
       setPendingMessageId(null)
       setPendingText('')
+      setPendingThinking('')
+      setThinkingExpanded(false)
+      hasContentTokenRef.current = false
       setToolStatuses(new Map())
       if (chatId) {
         getChat(chatId).then(setChat).catch(() => {})
@@ -84,6 +105,9 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       const msg = (event.payload.message as string) || 'An error occurred'
       setPendingMessageId(null)
       setPendingText('')
+      setPendingThinking('')
+      setThinkingExpanded(false)
+      hasContentTokenRef.current = false
       setToolStatuses(new Map())
       addToast(msg, 'error', 4000)
     } else if (event.type === 'tool_progress') {
@@ -130,6 +154,9 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
     if (!chatId) setPendingUserText(text)
     setPendingMessageId(null)
     setPendingText('')
+    setPendingThinking('')
+    setThinkingExpanded(true)
+    hasContentTokenRef.current = false
 
     // Optimistically append the user message to the visible thread immediately
     // (only when we're already in a chat thread, not the empty-state flow).
@@ -160,6 +187,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         file_ids: uploadedIds,
         web_search: webSearchEnabled,
         workers_enabled: workersEnabled,
+        thinking_enabled: thinkingEnabled,
       })
 
       // Show memory toast for relevant events
@@ -239,7 +267,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
           </div>
           <div className="border-t border-(--border) px-6 py-4">
             <div className="max-w-[760px] mx-auto">
-              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} />
+              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} />
             </div>
           </div>
         </main>
@@ -250,7 +278,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       <main className="flex-1 flex flex-col min-w-0">
         <EmptyState
             onChip={p => handleSend(p, [])}
-            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} />}
+            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} />}
           />
       </main>
     )
@@ -285,6 +313,11 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
                 className="w-5 h-5 object-contain shrink-0 mt-0.5"
               />
               <div className="min-w-0 flex-1">
+                <ThinkingPane
+                  text={pendingThinking}
+                  expanded={thinkingExpanded}
+                  onExpandedChange={setThinkingExpanded}
+                />
                 <div className="text-[14px] text-(--ink)">
                   {pendingText
                     ? <MarkdownContent>{pendingText}</MarkdownContent>
@@ -308,7 +341,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       </div>
       <div className="border-t border-(--border) px-6 py-4">
         <div className="max-w-[760px] mx-auto">
-          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} />
+          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} />
         </div>
       </div>
     </main>

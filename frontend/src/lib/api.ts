@@ -216,8 +216,20 @@ export type ChatResponse = { chat_id: string; message: ChatMessageDTO; memory_ev
 export type ChatDTO = { id: string; title: string; folder_id?: string; created_at: string; updated_at: string }
 export type ChatDetailDTO = ChatDTO & { messages: ChatMessageDTO[] }
 
-export const sendMessage = (payload: { chat_id?: string; message: string; file_ids?: string[]; web_search?: boolean; workers_enabled?: boolean }) =>
-   req<ChatResponse>('POST', '/api/chat', payload)
+export type SendMessageRequest = {
+  chat_id?: string
+  message: string
+  file_ids?: string[]
+  web_search?: boolean
+  workers_enabled?: boolean
+  thinking_enabled?: boolean
+}
+
+export const sendMessage = (payload: SendMessageRequest) =>
+   req<ChatResponse>('POST', '/api/chat', {
+     ...payload,
+     thinking_enabled: payload.thinking_enabled ?? false,
+   })
 
 export const listChats = () => req<ChatDTO[]>('GET', '/api/chats')
 export const createChat = (title?: string, folder_id?: string) =>

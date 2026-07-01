@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..agent.events import new_message_id
+from ..agent.emitter import get_emitter
 from ..agent.runtime import (
     build_resolved_plan,
     get_allowed_mcp_tool_names,
@@ -250,7 +251,8 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         # Normal chat — use agent runtime
         reply_text, msg_id = _handle_normal_chat(db, chat, user_msg, payload,
                                                   web_search=payload.web_search,
-                                                  workers_enabled=payload.workers_enabled if payload.workers_enabled is not None else _get_global_workers_setting(db))
+                                                  workers_enabled=payload.workers_enabled if payload.workers_enabled is not None else _get_global_workers_setting(db),
+                                                  thinking_enabled=payload.thinking_enabled)
 
     logger.info("CHAT RESPONSE: reply=%r artifact_ids=%s msg_id=%s", reply_text, artifact_ids, msg_id)
 
@@ -380,6 +382,7 @@ def _handle_normal_chat(
     *,
     web_search: bool = False,
     workers_enabled: bool = True,
+    thinking_enabled: bool = False,
 ) -> tuple[str, str]:
     """Handle normal chat via the agent runtime."""
     msg_id = new_message_id()
@@ -417,6 +420,7 @@ def _handle_normal_chat(
     try:
         async def _collect():
             tokens = []
+            emitter = get_emitter()
             async for event in orchestrate_turn(
                 payload.message,
                 chat.id,
@@ -426,7 +430,12 @@ def _handle_normal_chat(
                 assistant_message_id=msg_id,
                 previous_messages=previous_messages,
                 web_search=web_search,
+                thinking_enabled=thinking_enabled,
             ):
+                # Stream every orchestrator event live to the Rust sidecar via stdout.
+                # token/tool/done/error drive the existing frontend streaming UI;
+                # thinking_delta drives the ephemeral reasoning pane.
+                emitter.emit(event)
                 if event.type == "token":
                     tokens.append(event.payload.get("text", ""))
                 elif event.type == "error":

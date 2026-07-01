@@ -5,6 +5,7 @@ import type { ChatMessageDTO } from '../../lib/api'
 import { getArtifact } from '../../lib/api'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { MarkdownContent } from './MarkdownContent'
+import { ThinkingPane } from './ThinkingPane'
 import { useTheme } from '../../theme/ThemeProvider'
 import ObrennaMono from '../../assets/logos/ObrennaMono.png'
 import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
@@ -17,6 +18,11 @@ interface SourceItem {
 
 interface ExtendedChatMessageDTO extends ChatMessageDTO {
   sources?: SourceItem[]
+  // Ephemeral, UI-only fields for the in-flight assistant message.
+  // Not persisted — never present on messages loaded from the API.
+  thinking?: string
+  thinkingExpanded?: boolean
+  onThinkingExpandedChange?: (expanded: boolean) => void
 }
 
 interface MessageBubbleProps {
@@ -66,6 +72,13 @@ export function MessageBubble({ msg, onOpenArtifact }: MessageBubbleProps) {
         className="w-5 h-5 object-contain shrink-0 mt-0.5"
       />
       <div className="min-w-0 flex-1">
+        {msg.thinking ? (
+          <ThinkingPane
+            text={msg.thinking}
+            expanded={msg.thinkingExpanded ?? false}
+            onExpandedChange={msg.onThinkingExpandedChange ?? (() => {})}
+          />
+        ) : null}
         <div className="text-[14px] text-(--ink)">
           <MarkdownContent>{msg.text ?? ''}</MarkdownContent>
         </div>
