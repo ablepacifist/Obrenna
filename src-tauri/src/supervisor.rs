@@ -9,8 +9,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde_json::json;
-use tauri::Emitter;
+use serde_json::Value;
+use tauri::{Emitter, Manager};
 
 use crate::backend::wait_for_backend;
 use crate::mcp::McpProxy;
@@ -54,7 +54,16 @@ impl BackendProcesses {
 
         // Step 2: Spawn MCP server if available
         if !mcp_server_path.as_os_str().is_empty() && mcp_server_path.exists() {
-            mcp_proxy.spawn_server(mcp_server_path)
+            // file_read is scoped to the app's own data directory (uploads +
+            // artifacts) — never the whole filesystem. See CRIT-003 in the
+            // audit: an unset allowlist previously meant "read anything".
+            let uploads_dir = data_dir.join("uploads");
+            let artifacts_dir = data_dir.join("artifacts");
+            let file_allowlist = std::env::join_paths([&uploads_dir, &artifacts_dir])
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            mcp_proxy.spawn_server(mcp_server_path, &file_allowlist)
                 .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
             mcp_proxy.start_proxy()
                 .map_err(|e| format!("MCP proxy relay failed: {}", e))?;
@@ -139,9 +148,27 @@ impl BackendProcesses {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to start backend: {}", e))?;
+
+        // Drain stderr on a dedicated thread immediately after spawn. If left
+        // unread, uvicorn's access logs and any Python tracebacks fill the OS
+        // pipe buffer (~64KB) and the child blocks on write() — freezing the
+        // whole backend. stdout is drained separately by the caller (it
+        // carries typed agent-event JSON and must be parsed there instead).
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => eprintln!("[obrenna-backend] {}", l),
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
 
         // Wait for backend to be ready
         let api_url = format!("http://127.0.0.1:{}", port);
@@ -195,17 +222,7 @@ fn handle_python_stdout_line(app: &tauri::AppHandle, line: &str) {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(val) => {
             if let Some(event_type) = val.get("type").and_then(|t| t.as_str()) {
-                let valid = matches!(
-                    event_type,
-                    "token"
-                        | "done"
-                        | "error"
-                        | "thinking_delta"
-                        | "tool_call"
-                        | "tool_result"
-                        | "tool_progress"
-                );
-                if valid {
+                if is_valid_agent_event(event_type, &val) {
                     let _ = app.emit("agent-event", &val);
                 } else {
                     let _ = app.emit(
@@ -228,6 +245,61 @@ fn handle_python_stdout_line(app: &tauri::AppHandle, line: &str) {
                 &serde_json::json!({"source":"python","line":line}),
             );
         }
+    }
+}
+
+fn payload_str<'a>(val: &'a Value, key: &str) -> Option<&'a str> {
+    val.get("payload")?.get(key)?.as_str()
+}
+
+fn is_valid_agent_event(event_type: &str, val: &Value) -> bool {
+    if val.get("type").and_then(|t| t.as_str()).is_none() {
+        return false;
+    }
+
+    match event_type {
+        "token" | "thinking_delta" => payload_str(val, "text").is_some(),
+        "done" => val.get("payload").map(|p| p.is_object()).unwrap_or(false),
+        "error" => payload_str(val, "message").is_some() || payload_str(val, "error").is_some(),
+        "tool_call" => payload_str(val, "tool_name").is_some(),
+        "tool_result" => payload_str(val, "tool_name").is_some(),
+        "tool_progress" => payload_str(val, "tool_name").is_some() && payload_str(val, "status").is_some(),
+        "phase" => payload_str(val, "phase").is_some() && payload_str(val, "label").is_some(),
+        "artifact_plan" => payload_str(val, "artifact_type").is_some(),
+        "artifact_skeleton" => payload_str(val, "artifact_type").is_some(),
+        "artifact_update" => payload_str(val, "artifact_type").is_some(),
+        "telemetry" => val.get("payload").map(|p| p.is_object()).unwrap_or(false),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_agent_event;
+    use serde_json::json;
+
+    #[test]
+    fn valid_phase_event_passes() {
+        let event = json!({"type":"phase","payload":{"phase":"memory","label":"Loading memory"}});
+        assert!(is_valid_agent_event("phase", &event));
+    }
+
+    #[test]
+    fn malformed_token_is_rejected() {
+        let event = json!({"type":"token","payload":{}});
+        assert!(!is_valid_agent_event("token", &event));
+    }
+
+    #[test]
+    fn unknown_type_is_rejected() {
+        let event = json!({"type":"unknown","payload":{}});
+        assert!(!is_valid_agent_event("unknown", &event));
+    }
+
+    #[test]
+    fn valid_artifact_skeleton_passes() {
+        let event = json!({"type":"artifact_skeleton","payload":{"artifact_type":"dashboard"}});
+        assert!(is_valid_agent_event("artifact_skeleton", &event));
     }
 }
 

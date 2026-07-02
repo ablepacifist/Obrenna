@@ -1,12 +1,11 @@
 use std::net::TcpListener;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
-use tauri::Emitter;
 
 use tokio::time::sleep;
 
@@ -23,7 +22,7 @@ pub fn find_free_port() -> u16 {
     }
 }
 
-fn executable_name(name: &str) -> String {
+pub fn executable_name(name: &str) -> String {
     if cfg!(windows) {
         format!("{}.exe", name)
     } else {
