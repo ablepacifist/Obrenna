@@ -4,7 +4,7 @@ interface AgentEvent {
   channel: string
   chat_id: string
   message_id: string
-  type: 'token' | 'thinking_delta' | 'done' | 'error' | 'tool_call' | 'tool_result' | 'tool_progress'
+  type: 'token' | 'thinking_delta' | 'done' | 'error' | 'tool_call' | 'tool_result' | 'tool_progress' | 'phase' | 'artifact_plan' | 'artifact_skeleton' | 'artifact_update' | 'telemetry'
   payload: Record<string, unknown>
 }
 

@@ -220,6 +220,7 @@ export type SendMessageRequest = {
   chat_id?: string
   message: string
   file_ids?: string[]
+  assistant_message_id?: string
   web_search?: boolean
   workers_enabled?: boolean
   thinking_enabled?: boolean

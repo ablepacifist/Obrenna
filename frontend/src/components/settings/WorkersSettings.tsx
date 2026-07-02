@@ -13,6 +13,14 @@ interface WorkerStat {
   last_run: string
 }
 
+function planModel(plan: Record<string, unknown>, role: string, fallback: string): string {
+  const ref = plan[role]
+  if (ref && typeof ref === 'object' && 'model' in ref && typeof ref.model === 'string') {
+    return ref.model
+  }
+  return fallback
+}
+
 export function WorkersSettings() {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [loading, setLoading] = useState(true)
@@ -42,7 +50,7 @@ export function WorkersSettings() {
         setWorkerStats([
           {
             role: 'utility',
-            model: settings.managed_plan?.utility?.model || 'default-utility-model',
+            model: planModel(settings.managed_plan, 'utility', 'default-utility-model'),
             status: 'running',
             memory_mb: 512,
             cpu_percent: 25,
@@ -50,7 +58,7 @@ export function WorkersSettings() {
           },
           {
             role: 'summarizer',
-            model: settings.managed_plan?.summarizer?.model || 'default-summarizer-model',
+            model: planModel(settings.managed_plan, 'summarizer', 'default-summarizer-model'),
             status: 'idle',
             memory_mb: 256,
             cpu_percent: 5,

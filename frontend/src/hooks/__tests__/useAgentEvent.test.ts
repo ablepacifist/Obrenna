@@ -25,7 +25,6 @@ beforeEach(() => {
 
 describe('useAgentEvent', () => {
   it('should parse valid JSON event envelopes', async () => {
-    const callback = vi.fn()
     const validEvent = {
       type: 'token',
       chat_id: 'test-chat',
@@ -40,7 +39,7 @@ describe('useAgentEvent', () => {
     })
 
     // Import the hook (will use the mocked Tauri)
-    const { useAgentEvent } = await import('../useAgentEvent')
+    await import('../useAgentEvent')
 
     // The hook itself runs useEffect internally, so we can't directly
     // test the React hook without a React test environment.
@@ -68,15 +67,7 @@ describe('useAgentEvent', () => {
   })
 
   it('should ignore events with unknown type field', async () => {
-    const callback = vi.fn()
-    const unknownEvent = {
-      type: 'unknown_type',
-      chat_id: 'test-chat',
-      message_id: 'test-msg',
-      payload: {},
-    }
-
-    const validTypes = ['token', 'done', 'error', 'thinking_delta', 'tool_call', 'tool_result', 'tool_progress']
+    const validTypes = ['token', 'done', 'error', 'thinking_delta', 'tool_call', 'tool_result', 'tool_progress', 'phase', 'artifact_plan', 'artifact_skeleton', 'artifact_update', 'telemetry']
 
     // Verify that the whitelist check works
     expect(validTypes).not.toContain('unknown_type')
@@ -85,7 +76,7 @@ describe('useAgentEvent', () => {
   })
 
   it('should handle events without type field as non-events', () => {
-    const eventWithoutType = {
+    const eventWithoutType: { chat_id: string; message_id: string; payload: { text: string }; type?: string } = {
       chat_id: 'test-chat',
       message_id: 'test-msg',
       payload: { text: 'no type field' },
@@ -96,7 +87,7 @@ describe('useAgentEvent', () => {
   })
 
   it('should recognize all valid event types', () => {
-    const validTypes = ['token', 'done', 'error', 'thinking_delta', 'tool_call', 'tool_result', 'tool_progress']
+    const validTypes = ['token', 'done', 'error', 'thinking_delta', 'tool_call', 'tool_result', 'tool_progress', 'phase', 'artifact_plan', 'artifact_skeleton', 'artifact_update', 'telemetry']
 
     for (const type of validTypes) {
       expect(validTypes).toContain(type)

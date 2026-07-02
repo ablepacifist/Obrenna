@@ -9,14 +9,27 @@ import { useToast } from '../ui/Toast'
 import { useTheme } from '../../theme/ThemeProvider'
 import ObrennaMono from '../../assets/logos/ObrennaMono.png'
 import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
-import { Globe } from 'lucide-react'
 import { MarkdownContent } from './MarkdownContent'
 import { ThinkingPane } from './ThinkingPane'
+import { ActivityStrip, type ActivityStep } from './ActivityStrip'
 
 interface ChatThreadProps {
   chatId: string | null
   onOpenArtifact: (id: string) => void
   onChatCreated?: (chatId: string) => void
+}
+
+type AssistantMessageStatus = 'pending' | 'working' | 'streaming' | 'complete' | 'error'
+
+type PendingArtifactSkeleton = {
+  artifactType: string
+  title: string
+  sections: Array<{ kind: string; status: string }>
+}
+
+function createClientId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `client-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
 export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThreadProps) {
@@ -27,19 +40,21 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   const [pendingUserText, setPendingUserText] = useState<string | null>(null)
   const [chatLoading, setChatLoading] = useState(!!chatId)
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
-  const [workersEnabled, setWorkersEnabled] = useState(true)
+  const [workersEnabled] = useState(true)
   const [thinkingEnabled, setThinkingEnabled] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Pending assistant message for streaming (desktop mode)
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
+  const [pendingStatus, setPendingStatus] = useState<AssistantMessageStatus>('pending')
+  const [pendingPhaseLabel, setPendingPhaseLabel] = useState('Starting')
   const [pendingText, setPendingText] = useState<string>('')
   // Ephemeral reasoning trace (not persisted)
   const [pendingThinking, setPendingThinking] = useState<string>('')
   const [thinkingExpanded, setThinkingExpanded] = useState(true)
   const hasContentTokenRef = useRef(false)
-  // Tool execution state for pending messages
-  const [toolStatuses, setToolStatuses] = useState<Map<string, { name: string; status: string; summary: string }>>(new Map())
+  const [activitySteps, setActivitySteps] = useState<ActivityStep[]>([])
+  const [pendingArtifacts, setPendingArtifacts] = useState<PendingArtifactSkeleton[]>([])
   const [sources, setSources] = useState<Map<string, Array<{ title: string; url: string; snippet: string }>>>(new Map())
 
   useEffect(() => {
@@ -52,7 +67,29 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [chat?.messages.length, pendingText, pendingThinking])
+  }, [chat?.messages.length, pendingText, pendingThinking, activitySteps.length, pendingArtifacts.length])
+
+  const upsertActivityStep = useCallback((step: ActivityStep) => {
+    setActivitySteps(prev => {
+      const idx = prev.findIndex(s => s.key === step.key)
+      if (idx === -1) return [...prev, step]
+      const next = [...prev]
+      next[idx] = { ...next[idx], ...step }
+      return next
+    })
+  }, [])
+
+  const clearPendingAssistant = useCallback(() => {
+    setPendingMessageId(null)
+    setPendingStatus('complete')
+    setPendingPhaseLabel('')
+    setPendingText('')
+    setPendingThinking('')
+    setThinkingExpanded(false)
+    hasContentTokenRef.current = false
+    setActivitySteps([])
+    setPendingArtifacts([])
+  }, [])
 
   // Handle agent events for streaming
   const handleAgentEvent = useCallback((event: {
@@ -61,27 +98,40 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
     type: string
     payload: Record<string, unknown>
   }) => {
-    if (event.chat_id !== chatId) return
+    if (event.chat_id !== chatId && !(chatId === null && sending)) return
 
-    if (event.type === 'thinking_delta') {
+    if (event.type === 'phase') {
+      const phase = typeof event.payload.phase === 'string' ? event.payload.phase : 'phase'
+      const label = typeof event.payload.label === 'string' ? event.payload.label : phase
+      const detail = typeof event.payload.detail === 'string' ? event.payload.detail : undefined
+      setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+      setPendingStatus('working')
+      setPendingPhaseLabel(label)
+      setActivitySteps(prev => prev.map(step =>
+        step.status === 'running' && step.key.startsWith('phase:')
+          ? { ...step, status: 'done' as const }
+          : step,
+      ))
+      upsertActivityStep({ key: `phase:${phase}`, label, detail, status: 'running' })
+    } else if (event.type === 'thinking_delta') {
       const text = typeof event.payload.text === 'string' ? event.payload.text : ''
       if (text) {
         setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+        setPendingStatus('working')
         setPendingThinking(prev => prev + text)
       }
     } else if (event.type === 'token') {
       const text = event.payload.text as string
       if (text) {
         setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+        setPendingStatus('streaming')
         setPendingText(prev => prev + text)
-        // Auto-collapse the thinking pane once when the answer begins streaming.
         if (!hasContentTokenRef.current) {
           hasContentTokenRef.current = true
           setThinkingExpanded(false)
         }
       }
     } else if (event.type === 'done') {
-      // Collect sources before resetting
       if (pendingMessageId && sources.has(pendingMessageId)) {
         setChat(prev => prev ? {
           ...prev,
@@ -92,37 +142,75 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
           ),
         } : prev)
       }
-      setPendingMessageId(null)
-      setPendingText('')
-      setPendingThinking('')
-      setThinkingExpanded(false)
-      hasContentTokenRef.current = false
-      setToolStatuses(new Map())
+      clearPendingAssistant()
       if (chatId) {
         getChat(chatId).then(setChat).catch(() => {})
       }
     } else if (event.type === 'error') {
       const msg = (event.payload.message as string) || 'An error occurred'
-      setPendingMessageId(null)
-      setPendingText('')
-      setPendingThinking('')
-      setThinkingExpanded(false)
-      hasContentTokenRef.current = false
-      setToolStatuses(new Map())
+      setPendingStatus('error')
+      upsertActivityStep({ key: 'error', label: msg, status: 'error' })
+      clearPendingAssistant()
       addToast(msg, 'error', 4000)
     } else if (event.type === 'tool_progress') {
       const payload = event.payload as Record<string, unknown>
-      const toolName = payload.tool_name as string
-      const status = payload.status as string
-      const summary = payload.summary as string
+      const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'tool'
+      const status = typeof payload.status === 'string' ? payload.status : 'running'
+      const summary = typeof payload.summary === 'string' ? payload.summary : toolName
+      const stage = typeof payload.stage === 'string' ? payload.stage : undefined
+      const progress = typeof payload.progress_pct === 'number' ? `${payload.progress_pct}%` : undefined
       const messageId = event.message_id || pendingMessageId
       if (messageId) {
-        setToolStatuses(prev => {
-          const next = new Map(prev)
-          next.set(toolName, { name: toolName, status, summary })
-          return next
+        setPendingMessageId(prev => prev ?? messageId)
+        upsertActivityStep({
+          key: `tool:${toolName}`,
+          label: summary || toolName,
+          detail: progress || stage,
+          status: status === 'done' ? 'done' : status === 'error' ? 'error' : 'running',
         })
       }
+    } else if (event.type === 'artifact_plan') {
+      const artifactType = typeof event.payload.artifact_type === 'string' ? event.payload.artifact_type : 'artifact'
+      const title = typeof event.payload.title === 'string' ? event.payload.title : 'Preparing artifact'
+      setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+      setPendingStatus('working')
+      upsertActivityStep({ key: `artifact:${artifactType}:plan`, label: title, status: 'running' })
+    } else if (event.type === 'artifact_skeleton') {
+      const artifactType = typeof event.payload.artifact_type === 'string' ? event.payload.artifact_type : 'artifact'
+      const title = typeof event.payload.title === 'string' ? event.payload.title : 'Preparing artifact'
+      const sections = Array.isArray(event.payload.sections)
+        ? event.payload.sections.filter((s): s is { kind: string; status: string } => {
+            return typeof (s as any)?.kind === 'string' && typeof (s as any)?.status === 'string'
+          })
+        : []
+      setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+      setPendingArtifacts(prev => {
+        const idx = prev.findIndex(a => a.artifactType === artifactType)
+        const nextArtifact = { artifactType, title, sections }
+        if (idx === -1) return [...prev, nextArtifact]
+        const next = [...prev]
+        next[idx] = nextArtifact
+        return next
+      })
+      upsertActivityStep({ key: `artifact:${artifactType}:skeleton`, label: title, status: 'running' })
+    } else if (event.type === 'artifact_update') {
+      const artifactType = typeof event.payload.artifact_type === 'string' ? event.payload.artifact_type : 'artifact'
+      const section = typeof event.payload.section === 'string' ? event.payload.section : 'artifact'
+      const status = typeof event.payload.status === 'string' ? event.payload.status : 'running'
+      setPendingArtifacts(prev => prev.map(artifact => {
+        if (artifact.artifactType !== artifactType) return artifact
+        return {
+          ...artifact,
+          sections: artifact.sections.map(s =>
+            s.kind === section ? { ...s, status } : s,
+          ),
+        }
+      }))
+      upsertActivityStep({
+        key: `artifact:${artifactType}:${section}`,
+        label: section.replace(/_/g, ' '),
+        status: status === 'done' ? 'done' : status === 'error' ? 'error' : 'running',
+      })
     } else if (event.type === 'tool_result') {
       const payload = event.payload as Record<string, unknown>
       const resultStr = payload.result as string
@@ -144,17 +232,22 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         }
       }
     }
-  }, [chatId, addToast, pendingMessageId, sources])
+  }, [chatId, sending, addToast, pendingMessageId, sources, clearPendingAssistant, upsertActivityStep])
 
   useAgentEvent(handleAgentEvent)
 
   const handleSend = async (text: string, files: File[]) => {
     if (!text.trim() && files.length === 0) return
+    const assistantMessageId = createClientId()
     setSending(true)
     if (!chatId) setPendingUserText(text)
-    setPendingMessageId(null)
+    setPendingMessageId(assistantMessageId)
+    setPendingStatus('pending')
+    setPendingPhaseLabel('Starting')
     setPendingText('')
     setPendingThinking('')
+    setActivitySteps([{ key: 'phase:accepted', label: 'Starting', status: 'running' }])
+    setPendingArtifacts([])
     setThinkingExpanded(true)
     hasContentTokenRef.current = false
 
@@ -185,6 +278,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         chat_id: chatId ?? undefined,
         message: text,
         file_ids: uploadedIds,
+        assistant_message_id: assistantMessageId,
         web_search: webSearchEnabled,
         workers_enabled: workersEnabled,
         thinking_enabled: thinkingEnabled,
@@ -209,6 +303,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         const updated = await getChat(resp.chat_id)
         setChat(updated)
       }
+      clearPendingAssistant()
     } catch (err) {
       // Roll back the optimistic user message on failure.
       setChat(prev => prev ? {
@@ -217,6 +312,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       } : prev)
       const message = err instanceof Error ? err.message : 'Failed to send message'
       addToast(message, 'error', 5000)
+      clearPendingAssistant()
     } finally {
       setSending(false)
       setPendingUserText(null)
@@ -238,6 +334,48 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
     </div>
   )
 
+  const PendingAssistant = pendingMessageId ? (
+    <div className="flex gap-3" data-status={pendingStatus}>
+      <img
+        src={resolvedTheme === 'dark' ? ObrennaMonoWhite : ObrennaMono}
+        alt="Obrenna"
+        className="w-5 h-5 object-contain shrink-0 mt-0.5"
+      />
+      <div className="min-w-0 flex-1">
+        <ThinkingPane
+          text={pendingThinking}
+          expanded={thinkingExpanded}
+          onExpandedChange={setThinkingExpanded}
+        />
+        <div className="text-[14px] text-(--ink)">
+          {pendingText
+            ? <MarkdownContent>{pendingText}</MarkdownContent>
+            : <span className="text-(--ink-muted)">{pendingPhaseLabel || 'Starting'}</span>}
+        </div>
+        <ActivityStrip steps={activitySteps} />
+        {pendingArtifacts.length > 0 && (
+          <div className="mt-4 space-y-2.5">
+            {pendingArtifacts.map(artifact => (
+              <div key={artifact.artifactType} className="rounded-xl border border-(--border) bg-(--surface) p-3">
+                <div className="text-[12px] font-medium text-(--ink)">{artifact.title}</div>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {(artifact.sections.length ? artifact.sections : [{ kind: 'section', status: 'loading' }]).slice(0, 3).map(section => (
+                    <div key={section.kind} className="rounded-md bg-(--surface-2) border border-(--border) p-2">
+                      <div className="h-2 rounded bg-(--border-strong) animate-pulse" />
+                      <div className="mt-2 text-[10px] text-(--ink-faint) truncate">
+                        {section.kind.replace(/_/g, ' ')}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null
+
   if (!chatId || !chat) {
     // Remounting with a chatId but data not yet loaded — skeleton prevents EmptyState flash
     if (chatId && chatLoading) {
@@ -251,7 +389,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       )
     }
 
-    // First message in flight — show user bubble + thinking dots instead of blank EmptyState
+    // First message in flight — show user bubble + assistant shell instead of blank EmptyState
     if (!chatId && sending && pendingUserText !== null) {
       return (
         <main className="flex-1 flex flex-col min-w-0">
@@ -262,7 +400,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
                   {pendingUserText}
                 </div>
               </div>
-              {ThinkingDots}
+              {PendingAssistant || ThinkingDots}
             </div>
           </div>
           <div className="border-t border-(--border) px-6 py-4">
@@ -305,36 +443,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
             />
           ))}
           {/* Pending streaming message (desktop mode) */}
-          {pendingMessageId && (
-            <div className="flex gap-3">
-              <img
-                src={resolvedTheme === 'dark' ? ObrennaMonoWhite : ObrennaMono}
-                alt="Obrenna"
-                className="w-5 h-5 object-contain shrink-0 mt-0.5"
-              />
-              <div className="min-w-0 flex-1">
-                <ThinkingPane
-                  text={pendingThinking}
-                  expanded={thinkingExpanded}
-                  onExpandedChange={setThinkingExpanded}
-                />
-                <div className="text-[14px] text-(--ink)">
-                  {pendingText
-                    ? <MarkdownContent>{pendingText}</MarkdownContent>
-                    : <span className="text-(--ink-muted)">...</span>}
-                </div>
-                {/* Tool progress indicators */}
-                {Array.from(toolStatuses.entries())
-                  .filter(([, ts]) => ts.status === 'running' || ts.status === 'pending')
-                  .map(([name, ts]) => (
-                    <div key={name} className="mt-1 flex items-center gap-1.5 text-[12px] text-(--ink-muted)">
-                      <Globe className="w-3 h-3" />
-                      <span>{ts.status === 'running' ? 'Searching...' : 'Preparing search...'}</span>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          )}
+          {PendingAssistant}
           {/* Thinking indicator while waiting for non-streaming LLM response */}
           {sending && !pendingMessageId && ThinkingDots}
         </div>

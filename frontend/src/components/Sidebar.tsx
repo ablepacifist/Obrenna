@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { FolderPlus, Plus, Search, Settings as SettingsIcon } from 'lucide-react'
 import {
   type ChatDTO, type FolderDTO,
-  listChats, listFolders, createChat, createFolder,
+  listChats, listFolders, createFolder,
   updateChat, deleteChat, renameFolder, deleteFolder,
 } from '../lib/api'
 import { FolderRow } from './sidebar/FolderRow'
@@ -66,11 +66,7 @@ export function Sidebar({ activeChatId, onSelectChat, onNewChat, onOpenSettings,
 
   const groups = ['today', 'yesterday', 'week', 'older']
 
-  const handleNewChat = async () => {
-    const chat = await createChat()
-    setChats(prev => [chat, ...prev])
-    onSelectChat(chat.id)
-  }
+  const handleNewChat = () => onNewChat()
 
   const handleCreateFolder = async () => {
     const folder = await createFolder()
