@@ -571,6 +571,36 @@ def test_top_level_reject(catalog):
 
 
 # ===========================================================================
+# Tool-call mode surfacing — the resolver must expose each orchestrator's
+# tool_call_mode so the runtime can pick native vs prompt-JSON tool calling.
+# ===========================================================================
+
+def test_distilled_orchestrator_surfaces_prompt_json(catalog):
+    """T1-floor-fp32 uses the 4B distilled orchestrator → prompt_json adapter."""
+    fp = HardwareFingerprint(
+        gpu_vendor="amd", gpu_name="Radeon RX 580 8GB", gpu_vram_total_gb=8,
+        gpu_fp16_support=False, gpu_backends_available=["vulkan"],
+        cpu_physical_cores=4, cpu_threads=4, cpu_isa_flags=["avx2"],
+        ram_total_gb=16, ram_type="ddr4", ram_channels=2, os="windows",
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=6.8, ram_free_gb=11.0))
+    assert result["orchestrator"]["model"] == "qwen3.5-4b-claude-opus-reasoning-distilled-v2"
+    assert result["orchestrator"]["tool_call_mode"] == "prompt_json"
+
+
+def test_stock_orchestrator_surfaces_openai_native(catalog):
+    """T5-workstation uses stock qwen3.5-27b → openai_native."""
+    fp = HardwareFingerprint(
+        gpu_vendor="nvidia", gpu_vram_total_gb=24, gpu_fp16_support=True,
+        gpu_backends_available=["cuda", "vulkan"], cpu_physical_cores=16, cpu_threads=24,
+        cpu_isa_flags=["avx2"], ram_total_gb=48, ram_type="ddr5", ram_channels=2, os="windows",
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=22.0, ram_free_gb=40.0))
+    assert result["orchestrator"]["model"] == "qwen3.5-27b"
+    assert result["orchestrator"]["tool_call_mode"] == "openai_native"
+
+
+# ===========================================================================
 # Conservative fallback tests — missing detection fields block higher tiers
 # ===========================================================================
 
@@ -662,6 +692,68 @@ def test_cpu_only_path_includes_detection_warnings(catalog):
     assert len(result.get("detection_warnings", [])) >= 1
 
 
+# ===========================================================================
+# HIGH-008 — CPU-only tiers must surface a utility model from "helpers".
+#
+# The catalog's cpu_only_tiers plans define a single combined "helpers"
+# block (model/quant/count_max), not separate summarizer/utility blocks like
+# the GPU tiers do. Before the fix, choose_and_validate only populated
+# response["utility"] when the plan had a literal "utility" key, so every
+# CPU-only machine got utility=None — the runtime's worker dispatch
+# (resolved_plan.utility_model) then silently never fired, disabling the
+# helper swarm entirely regardless of what the catalog's helpers.count_max
+# specified.
+# ===========================================================================
+
+def test_cpu_only_plan_surfaces_helpers_as_utility(catalog):
+    """CL1-minimum's helpers block must appear as response['utility']."""
+    fp = HardwareFingerprint(
+        gpu_vendor="none",
+        gpu_vram_total_gb=0,
+        gpu_fp16_support=False,
+        cpu_physical_cores=6,
+        cpu_threads=12,
+        cpu_isa_flags=["avx2"],
+        ram_total_gb=32,
+        ram_type="ddr5",
+        ram_channels=2,
+        os="windows",
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=0, ram_free_gb=22.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    assert result["path"] == "cpu_only"
+    assert result["plan_id"] == "CL1-minimum"
+    assert result["utility"] is not None
+    assert result["utility"]["model"] == "qwen3.5-0.8b"
+    assert result["utility"]["count_max"] == 1
+    assert result["utility"]["device"] == "cpu"
+
+
+def test_cl2_good_helpers_surfaced_with_count_max_2(catalog):
+    """CL2-good defines helpers.count_max=2 — must propagate through."""
+    fp = HardwareFingerprint(
+        gpu_vendor="none",
+        gpu_vram_total_gb=0,
+        gpu_fp16_support=False,
+        cpu_physical_cores=8,
+        cpu_threads=16,
+        cpu_isa_flags=["avx2"],
+        ram_total_gb=48,
+        ram_type="ddr5",
+        ram_channels=2,
+        os="windows",
+    )
+    live = LiveFreeResources(gpu_vram_free_gb=0, ram_free_gb=38.0)
+    result = choose_and_validate(fp, catalog, live)
+
+    assert result["path"] == "cpu_only"
+    assert result["plan_id"] == "CL2-good"
+    assert result["utility"] is not None
+    assert result["utility"]["model"] == "granite4.0-h-micro-3b"
+    assert result["utility"]["count_max"] == 2
+
+
 def test_apple_path_includes_detection_warnings(catalog):
     """Apple Silicon path should include a warning that unified-memory fit is stubbed."""
     fp = HardwareFingerprint(
@@ -679,3 +771,8 @@ def test_apple_path_includes_detection_warnings(catalog):
     assert result["path"] == "apple"
     assert result["plan_id"] == "A1"
     assert len(result.get("detection_warnings", [])) >= 1
+    # utility is genuinely absent on Apple tiers (catalog defines none) —
+    # this must be surfaced as an explicit warning, not silently None with
+    # no explanation of why workers/summarizer never fire on this tier.
+    assert result["utility"] is None
+    assert any("summarizer/utility" in w for w in result["detection_warnings"])

@@ -33,6 +33,7 @@ def validate_catalog_for_runtime(catalog: dict, runtime_kind: str = "ollama") ->
 
     For Ollama, each referenced model must resolve to a non-empty pull ref.
     For non-Ollama runtimes we only validate model id presence.
+    Also validates the per-model ``tool_call_mode`` enum when present.
     """
     errors: list[str] = []
     refs: set[str] = set()
@@ -57,8 +58,15 @@ def validate_catalog_for_runtime(catalog: dict, runtime_kind: str = "ollama") ->
         if model_slug not in defs:
             errors.append(f"Model '{model_slug}' is referenced by tiers but missing in model_definitions")
             continue
+        row = defs.get(model_slug, {})
+        if isinstance(row, dict):
+            mode = row.get("tool_call_mode")
+            if mode is not None and mode not in _VALID_TOOL_CALL_MODES:
+                errors.append(
+                    f"Model '{model_slug}' has invalid tool_call_mode '{mode}'. "
+                    f"Must be one of {sorted(_VALID_TOOL_CALL_MODES)} (or omitted for the default)."
+                )
         if runtime_kind == "ollama":
-            row = defs.get(model_slug, {})
             explicit = row.get("ollama_ref") if isinstance(row, dict) else None
             if not isinstance(explicit, str) or not explicit.strip():
                 errors.append(f"Model '{model_slug}' is missing explicit 'ollama_ref'")
@@ -68,6 +76,30 @@ def validate_catalog_for_runtime(catalog: dict, runtime_kind: str = "ollama") ->
                 errors.append(f"Model '{model_slug}' does not resolve to an Ollama pull ref")
 
     return errors
+
+
+# Tool-calling strategies the runtime knows how to drive.
+# - "openai_native": the model emits OpenAI delta.tool_calls; the streaming
+#   parser handles them directly.
+# - "prompt_json": the model lacks a native tool-call template, so the runtime
+#   injects a tool contract into the prompt and the streaming layer scans the
+#   text stream for a {"action":"tool_call",...} envelope.
+_VALID_TOOL_CALL_MODES = {"openai_native", "prompt_json"}
+
+
+def tool_call_mode_for(catalog: dict, model_slug: str) -> str:
+    """Return the tool_call_mode for a model, defaulting to openai_native.
+
+    Centralizes the default so callers (resolver, runtime) agree on the fallback
+    when a model entry omits the field.
+    """
+    defs = catalog.get("model_definitions", {})
+    row = defs.get(model_slug, {}) if isinstance(defs, dict) else {}
+    if isinstance(row, dict):
+        mode = row.get("tool_call_mode")
+        if mode in _VALID_TOOL_CALL_MODES:
+            return mode
+    return "openai_native"
 
 
 def load_catalog(path: str | Path | None = None) -> dict:

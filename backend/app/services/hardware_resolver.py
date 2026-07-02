@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .hardware_catalog import load_catalog
+from .hardware_catalog import load_catalog, tool_call_mode_for
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +295,11 @@ def choose_and_validate(
             detection_warnings.append("CPU RAM-fit not yet implemented — ctx is set to ctx_max (may exceed available RAM)")
         if path == "apple":
             detection_warnings.append("Apple unified-memory fit() not yet implemented — ctx is set to ctx_max")
+            detection_warnings.append(
+                "Apple Silicon tiers define no dedicated summarizer/utility model in the "
+                "catalog — worker fan-out and evidence-pack summarization are unavailable "
+                "on this tier until apple_silicon_tiers.plans gains those blocks."
+            )
 
         response = {
             "path": path,
@@ -316,6 +321,7 @@ def choose_and_validate(
                 "device": plan["orchestrator"].get("device", "gpu"),
                 "ctx_min": plan["orchestrator"].get("ctx_min"),
                 "ctx_max": plan["orchestrator"].get("ctx_max"),
+                "tool_call_mode": tool_call_mode_for(catalog, plan["orchestrator"]["model"]),
             },
             "summarizer": None,
             "utility": None,
@@ -333,6 +339,22 @@ def choose_and_validate(
             resp_util = dict(plan["utility"])
             resp_util["device"] = plan["utility"].get("device", "cpu")
             response["utility"] = resp_util
+        elif "helpers" in plan:
+            # cpu_only_tiers plans define a single combined "helpers" block
+            # (model/quant/count_max/execution_mode) rather than separate
+            # summarizer/utility roles. Surface it as "utility" so the
+            # runtime's worker-dispatch path (which only looks at
+            # resolved_plan.utility_model / helper_count) actually turns on
+            # for CPU-only tiers instead of silently staying empty.
+            helpers_block = plan["helpers"]
+            response["utility"] = {
+                "model": helpers_block.get("model", ""),
+                "quant": helpers_block.get("quant", ""),
+                "device": "cpu",
+                "count_min": 1,
+                "count_max": helpers_block.get("count_max", 1),
+                "resident": "lazy",
+            }
 
         return response
 

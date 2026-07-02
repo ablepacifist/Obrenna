@@ -8,6 +8,7 @@
       "params_b": 0.8,
       "ollama_ref": "DanyaVoredom/DanyAI-qwen3.5-0.8b",
       "role_class": ["utility"],
+      "tool_call_mode": "openai_native",
       "notes": "Stock-class Qwen3.5-0.8B utility worker. Bare 'qwen3.5-0.8b' is NOT published in the Ollama library namespace; the nearest real pullable build is DanyaVoredom/DanyAI-qwen3.5-0.8b (256K ctx)."
     },
     "qwen3.5-4b-claude-opus-reasoning-distilled-v2": {
@@ -15,13 +16,15 @@
       "params_b": 4,
       "ollama_ref": "kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2",
       "role_class": ["orchestrator"],
-      "notes": "Claude-Opus reasoning distilled from Qwen3.5-4B base. Replaces stock qwen3.5-4b as the T0/T1 orchestrator. Produces <think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2."
+      "tool_call_mode": "prompt_json",
+      "notes": "Claude-Opus reasoning distilled from Qwen3.5-4B base. Replaces stock qwen3.5-4b as the T0/T1 orchestrator. Produces<think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2."
     },
     "qwen3.5-9b-claude-opus-reasoning-distilled": {
       "family": "qwen3.5",
       "params_b": 9,
       "ollama_ref": "kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
       "role_class": ["orchestrator"],
+      "tool_call_mode": "prompt_json",
       "notes": "Claude-Opus reasoning distilled from Qwen3.5-9B base. Replaces stock qwen3.5-9b as the T2-T4 orchestrator. Produces <think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF."
     },
     "qwen3.5-27b": {
@@ -29,6 +32,7 @@
       "params_b": 27,
       "ollama_ref": "qwen3.5:27b",
       "role_class": ["orchestrator"],
+      "tool_call_mode": "openai_native",
       "notes": "STOCK Qwen3.5-27B from Ollama's official library namespace (qwen3.5:27b, Q4_K_M ~17GB). Deliberately NOT a community 'Claude-distilled' fork — that 27B space is populated with templated mass-uploaded cards and safety-stripped/abliterated variants (e.g. juilpark/...-heretic) with no traceable primary author, unlike the verified 4B/9B distills. Vendor-distributed stock is the trustworthy choice here."
     },
     "qwen3.6-35b-a3b": {
@@ -38,6 +42,7 @@
       "moe": true,
       "ollama_ref": "qwen3.6:35b-a3b",
       "role_class": ["orchestrator"],
+      "tool_call_mode": "openai_native",
       "notes": "MoE — only ~3B active params per token. Streams far less weight per token than a dense model of equal total size, preferred orchestrator for bandwidth-bound CPU-only tiers once it fits in RAM budget with headroom. STOCK ref from Ollama's official library namespace (qwen3.6:35b-a3b, Apache 2.0, vendor-distributed) — chosen over community mirrors/APEX repackagings."
     },
     "granite4.0-h-micro-3b": {
@@ -47,6 +52,7 @@
       "hybrid_mamba": true,
       "ollama_ref": "granite4:micro-h",
       "role_class": ["summarizer"],
+      "tool_call_mode": "prompt_json",
       "notes": "Dense hybrid (9:1 Mamba-2/Transformer). Standard summarizer for GPU tiers and higher CPU-only tiers. Mamba layers give ~constant memory as context grows — ideal for long-document ingestion. Official Ollama library ref: granite4:micro-h (3b-h)."
     },
     "granite4.0-h-tiny-7b-a1b": {
@@ -57,6 +63,7 @@
       "hybrid_mamba": true,
       "ollama_ref": "granite4:tiny-h",
       "role_class": ["summarizer"],
+      "tool_call_mode": "prompt_json",
       "notes": "Hybrid MoE, 7B total / ~1B active. Optional upgraded summarizer for tiers with VRAM/RAM headroom (T4+). ~1B active means summarizes at roughly 1B-dense speed with 7B-class quality. Official Ollama library ref: granite4:tiny-h (7b-a1b-h)."
     },
     "qwen3.5-0.8b-claude-opus-reasoning-distilled": {
@@ -64,6 +71,7 @@
       "params_b": 0.8,
       "ollama_ref": "radenadri/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
       "role_class": ["orchestrator"],
+      "tool_call_mode": "prompt_json",
       "license": "apache-2.0",
       "source": "community GGUF, radenadri/Qwen3.5-0.8B-Claude-4.6-Opus-Reasoning-Distilled-GGUF, HF",
       "notes": "LoRA SFT fine-tune of base qwen3.5-0.8b, response-only training masked on CoT sequences, distilled from Claude trajectories. Native context window: 16384. Replaces 4B variant at T0 for faster inference on subfloor hardware."
@@ -75,6 +83,7 @@
       "hybrid_mamba": true,
       "ollama_ref": "granite4:350m-h",
       "role_class": ["summarizer", "utility"],
+      "tool_call_mode": "prompt_json",
       "license": "apache-2.0",
       "source": "ibm-granite/granite-4.0-h-350m (official Ollama library: granite4:350m-h)",
       "notes": "Hybrid Mamba2/attention 350M. Chosen for high efficiency at ultra-low tiers. Standard summarizer/utility for T0. Official Ollama library ref: granite4:350m-h."

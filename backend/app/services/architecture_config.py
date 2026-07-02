@@ -123,6 +123,7 @@ def _validate_config(config: dict[str, Any]) -> None:
     mcp = config.get("mcp_tools", {})
     if "allowed" not in mcp:
         raise ValueError("mcp_tools missing 'allowed' list")
+    _validate_allowed_tool_schemas(mcp["allowed"])
 
     # ipc
     ipc = config.get("ipc", {})
@@ -139,6 +140,38 @@ def _validate_config(config: dict[str, Any]) -> None:
     # services (optional section, but validate if present)
     if "services" in config:
         validate_services_config(config["services"])
+
+
+def _validate_allowed_tool_schemas(allowed: list[Any]) -> None:
+    """Ensure every allowed tool has a canonical schema in TOOL_DEFS.
+
+    The allowlist in architecture_config.json carries only name/description/category;
+    the real input schemas live in ``mcp/tools.py::TOOL_DEFS``. An allowed tool with
+    no matching TOOL_DEFS entry would be shipped to the model with empty parameters
+    (the model could never call it correctly), so fail fast at startup naming the
+    offending tool. Imported lazily to avoid any import-order coupling with mcp.tools.
+    """
+    if not isinstance(allowed, list):
+        raise ValueError("mcp_tools.allowed must be a list")
+    from ..mcp.tools import tool_def_by_name  # local import avoids circular coupling
+
+    for entry in allowed:
+        if not isinstance(entry, dict):
+            raise ValueError(f"mcp_tools.allowed entry is not an object: {entry!r}")
+        name = entry.get("name")
+        if not name:
+            raise ValueError("mcp_tools.allowed entry has no 'name'")
+        canonical = tool_def_by_name(name)
+        if canonical is None:
+            raise ValueError(
+                f"Allowed tool '{name}' is not defined in mcp/tools.py::TOOL_DEFS. "
+                f"Add it to TOOL_DEFS or remove it from the allowlist."
+            )
+        if not canonical.get("inputSchema"):
+            raise ValueError(
+                f"TOOL_DEFS entry for '{name}' has no 'inputSchema' — the model "
+                f"would receive empty parameters."
+            )
 
 
 def _default_config() -> dict[str, Any]:
