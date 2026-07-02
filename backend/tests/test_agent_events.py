@@ -5,13 +5,18 @@ from app.agent.events import (
     CHANNEL_AGENT_EVENT,
     EVENT_TYPE_DONE,
     EVENT_TYPE_ERROR,
+    EVENT_TYPE_PHASE,
     EVENT_TYPE_THINKING_DELTA,
     EVENT_TYPE_TOKEN,
+    EVENT_TYPE_TOOL_PROGRESS,
+    artifact_skeleton_event,
     StreamEvent,
     done_event,
     error_event,
+    phase_event,
     thinking_delta_event,
     token_event,
+    tool_progress_event,
     new_message_id,
 )
 
@@ -86,3 +91,44 @@ def test_thinking_delta_event_shape():
     parsed = json.loads(line)
     assert parsed["type"] == "thinking_delta"
     assert parsed["payload"]["text"] == "reasoning chunk"
+
+
+def test_phase_event_shape():
+    evt = phase_event("chat1", "msg1", "memory", "Loading memory", "Recent context")
+    env = evt.to_envelope()
+    assert env["type"] == EVENT_TYPE_PHASE
+    assert env["payload"] == {
+        "phase": "memory",
+        "label": "Loading memory",
+        "detail": "Recent context",
+    }
+
+
+def test_tool_progress_event_extended_fields():
+    evt = tool_progress_event(
+        "chat1",
+        "file_read",
+        status="running",
+        summary="Reading selected file",
+        message_id="msg1",
+        stage="reading_chunks",
+        current=3,
+        total=12,
+    )
+    env = evt.to_envelope()
+    assert env["type"] == EVENT_TYPE_TOOL_PROGRESS
+    assert env["payload"]["progress_pct"] == 25
+    assert env["payload"]["stage"] == "reading_chunks"
+
+
+def test_artifact_skeleton_event_shape():
+    evt = artifact_skeleton_event(
+        "chat1",
+        "msg1",
+        "dashboard",
+        "Preparing dashboard",
+        [{"kind": "chart", "status": "loading"}],
+    )
+    env = evt.to_envelope()
+    assert env["type"] == "artifact_skeleton"
+    assert env["payload"]["artifact_type"] == "dashboard"

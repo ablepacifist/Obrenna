@@ -22,10 +22,16 @@ EVENT_TYPE_TOOL_CALL = "tool_call"
 EVENT_TYPE_TOOL_RESULT = "tool_result"
 EVENT_TYPE_TOOL_PROGRESS = "tool_progress"
 EVENT_TYPE_THINKING_DELTA = "thinking_delta"
+EVENT_TYPE_PHASE = "phase"
+EVENT_TYPE_ARTIFACT_PLAN = "artifact_plan"
+EVENT_TYPE_ARTIFACT_SKELETON = "artifact_skeleton"
+EVENT_TYPE_ARTIFACT_UPDATE = "artifact_update"
+EVENT_TYPE_TELEMETRY = "telemetry"
 VALID_EVENT_TYPES = (
     EVENT_TYPE_TOKEN, EVENT_TYPE_DONE, EVENT_TYPE_ERROR,
     EVENT_TYPE_TOOL_CALL, EVENT_TYPE_TOOL_RESULT, EVENT_TYPE_TOOL_PROGRESS,
-    EVENT_TYPE_THINKING_DELTA,
+    EVENT_TYPE_THINKING_DELTA, EVENT_TYPE_PHASE, EVENT_TYPE_ARTIFACT_PLAN,
+    EVENT_TYPE_ARTIFACT_SKELETON, EVENT_TYPE_ARTIFACT_UPDATE, EVENT_TYPE_TELEMETRY,
 )
 
 CHANNEL_AGENT_EVENT = "agent_event"
@@ -269,19 +275,130 @@ def tool_progress_event(
     chat_id: str,
     tool_name: str,
     status: str = "pending",
-    summary: str = "",
+    summary: str | None = "",
     message_id: str = "",
+    stage: str | None = None,
+    current: int | None = None,
+    total: int | None = None,
 ) -> StreamEvent:
     """Create a tool progress stream event."""
+    payload: dict[str, Any] = {
+        "tool_name": tool_name,
+        "status": status,
+    }
+    if summary is not None:
+        payload["summary"] = summary
+    if stage is not None:
+        payload["stage"] = stage
+    if current is not None:
+        payload["current"] = current
+    if total is not None:
+        payload["total"] = total
+    if current is not None and total:
+        payload["progress_pct"] = round((current / total) * 100)
+
     return StreamEvent(
         chat_id=chat_id,
         message_id=message_id,
         type=EVENT_TYPE_TOOL_PROGRESS,
+        payload=payload,
+    )
+
+
+def phase_event(
+    chat_id: str,
+    message_id: str,
+    phase: str,
+    label: str,
+    detail: str | None = None,
+) -> StreamEvent:
+    """Create a turn phase/status event."""
+    payload = {"phase": phase, "label": label}
+    if detail:
+        payload["detail"] = detail
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_PHASE,
+        payload=payload,
+    )
+
+
+def artifact_plan_event(
+    chat_id: str,
+    message_id: str,
+    artifact_type: str,
+    title: str,
+    steps: list[str] | None = None,
+) -> StreamEvent:
+    """Create an artifact planning event."""
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_ARTIFACT_PLAN,
         payload={
-            "tool_name": tool_name,
-            "status": status,
-            "summary": summary,
+            "artifact_type": artifact_type,
+            "title": title,
+            "steps": steps or [],
         },
+    )
+
+
+def artifact_skeleton_event(
+    chat_id: str,
+    message_id: str,
+    artifact_type: str,
+    title: str,
+    sections: list[dict[str, Any]] | None = None,
+) -> StreamEvent:
+    """Create an artifact skeleton event for immediate UI placeholders."""
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_ARTIFACT_SKELETON,
+        payload={
+            "artifact_type": artifact_type,
+            "title": title,
+            "sections": sections or [],
+        },
+    )
+
+
+def artifact_update_event(
+    chat_id: str,
+    message_id: str,
+    artifact_type: str,
+    section: str,
+    status: str,
+    artifact_id: str | None = None,
+) -> StreamEvent:
+    """Create an artifact section progress event."""
+    payload = {
+        "artifact_type": artifact_type,
+        "section": section,
+        "status": status,
+    }
+    if artifact_id:
+        payload["artifact_id"] = artifact_id
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_ARTIFACT_UPDATE,
+        payload=payload,
+    )
+
+
+def telemetry_event(
+    chat_id: str,
+    message_id: str,
+    payload: dict[str, Any],
+) -> StreamEvent:
+    """Create a debug-only telemetry event."""
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_TELEMETRY,
+        payload=payload,
     )
 
 
