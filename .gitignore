@@ -39,3 +39,16 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# --- Rust / Cargo ---
+target/
+src-tauri/target/
+*.exe
+!src-tauri/icons/*.ico
+
+# --- Build artifacts ---
+src-tauri/resources/mcp/obrenna-mcp.exe
+src-tauri/test_output.log
+
+# --- Kilo agent plans (auto-generated) ---
+.kilo/plans/
