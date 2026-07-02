@@ -6,7 +6,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import CORS_ORIGINS
 from app.db import init_db
-from app.routers import health, settings, files, artifacts, chat, system, models, chats, setup, shutdown, memory, tools
+from app.routers import (
+    health,
+    settings,
+    files,
+    artifacts,
+    chat,
+    system,
+    models,
+    chats,
+    setup,
+    shutdown,
+    memory,
+    tools,
+    knowledge_packs,
+)
 
 
 @asynccontextmanager
@@ -37,3 +51,4 @@ app.include_router(setup.router)
 app.include_router(shutdown.router)
 app.include_router(memory.router)
 app.include_router(tools.router)
+app.include_router(knowledge_packs.router)

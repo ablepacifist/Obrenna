@@ -134,6 +134,7 @@ class ChatRequest(BaseModel):
     chat_id: Optional[str] = None
     message: str = ""
     file_ids: list[str] = []
+    assistant_message_id: Optional[str] = None
     workers_enabled: Optional[bool] = None  # NEW: Per-chat override
     web_search: bool = False
     thinking_enabled: bool = False
