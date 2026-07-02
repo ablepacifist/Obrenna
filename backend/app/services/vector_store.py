@@ -14,7 +14,7 @@ from typing import Sequence
 
 from sqlalchemy.orm import Session
 
-from ..services.embeddings import embed_text
+from ..services.embeddings import EMBEDDING_MODEL_ID, embed_text
 from ..services.memory_config import (
     TIGHT_ARCHIVE_TOP_K,
     get_default_top_k,
@@ -22,9 +22,50 @@ from ..services.memory_config import (
     get_similarity_threshold,
     get_vector_backend,
 )
+from .memory_cache import (
+    get_query_embedding,
+    get_row_embedding,
+    invalidate_row,
+    query_hash,
+    set_query_embedding,
+    set_row_embedding,
+)
 from .vector_store_base import VectorHit, VectorStore
 
 logger = logging.getLogger(__name__)
+
+
+def embed_query(text: str) -> list[float] | None:
+    """Embed a query string, served from the query-embedding cache (Fix #7).
+
+    The same user message is embedded by the fact search, the turn search, and
+    the knowledge-pack retriever within one turn — the cache serves the first
+    computation to the rest.
+    """
+    qh = query_hash(text)
+    vec = get_query_embedding(qh, EMBEDDING_MODEL_ID)
+    if vec is not None:
+        return vec
+    vec = embed_text(text)
+    if vec is not None:
+        set_query_embedding(qh, EMBEDDING_MODEL_ID, vec)
+    return vec
+
+
+def embed_row(row_id: str, text: str, version: int) -> list[float] | None:
+    """Embed a persisted row, served from the per-row embedding cache (Fix #7).
+
+    Rows are immutable except for facts, whose own ``version`` bumps on
+    UPDATE/DELETE — the ``(row_id, embed_model_id, version)`` key invalidates
+    for that row alone when its text changes.
+    """
+    vec = get_row_embedding(row_id, EMBEDDING_MODEL_ID, version)
+    if vec is not None:
+        return vec
+    vec = embed_text(text)
+    if vec is not None:
+        set_row_embedding(row_id, EMBEDDING_MODEL_ID, version, vec)
+    return vec
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -152,8 +193,9 @@ def delete_turn_vector(db: Session, turn_id: str) -> None:
 
 
 def delete_fact_vector(db: Session, fact_id: str) -> None:
-    """Remove fact embedding from store."""
+    """Remove fact embedding from store and drop its cached per-row vector."""
     _get_store().delete(fact_id, "fact")
+    invalidate_row(fact_id)
 
 
 # ── Search wrappers ───────────────────────────────────────────────────────────
@@ -173,7 +215,7 @@ def search_turns(
     if threshold is None:
         threshold = get_similarity_threshold()
 
-    query_vec = embed_text(query_text)
+    query_vec = embed_query(query_text)
     if query_vec is None:
         return []
 
@@ -189,7 +231,8 @@ def search_turns(
         )
         scored: list[tuple[float, str]] = []
         for turn in turns:
-            tv = embed_text(f"{turn.user_text} {turn.assistant_text}")
+            # Turns are immutable once recorded → cache by id alone (version 0).
+            tv = embed_row(turn.id, f"{turn.user_text} {turn.assistant_text}", 0)
             if tv is None:
                 continue
             sim = _cosine(query_vec, tv)
@@ -218,7 +261,7 @@ def search_facts(
     if threshold is None:
         threshold = get_similarity_threshold()
 
-    query_vec = embed_text(query_text)
+    query_vec = embed_query(query_text)
     if query_vec is None:
         return []
 
@@ -235,7 +278,9 @@ def search_facts(
 
         scored: list[tuple[float, str, str]] = []
         for fact in facts:
-            fv = embed_text(fact.fact_text)
+            # Cache per-row embedding by (fact.id, embed_model_id, fact.version);
+            # a fact's own version bumps on UPDATE/DELETE, invalidating its entry.
+            fv = embed_row(fact.id, fact.fact_text, getattr(fact, "version", 1))
             if fv is None:
                 continue
             sim = _cosine(query_vec, fv)

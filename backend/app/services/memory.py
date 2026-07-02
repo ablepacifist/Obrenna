@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -29,13 +32,56 @@ from ..services.memory_config import (
 from ..services.vector_store import (
     delete_fact_vector,
     delete_turn_vector,
+    embed_query,
     insert_fact_vector,
     insert_turn_vector,
     search_facts,
     search_turns,
 )
+from . import memory_cache
+from .memory_versions import (
+    bump_account_version,
+    bump_chat_version,
+    bump_rolling_summary_version,
+)
 
 logger = logging.getLogger(__name__)
+
+# ── Knowledge-pack retriever singleton (Fix #7) ──────────────────────────────
+# Previously a fresh ``KnowledgePackRetriever`` (opening a fresh sqlite3
+# connection per pack) was built every turn. Hold one long-lived retriever that
+# pools a connection per pack; rebuild only when the configured pack set changes.
+
+_knowledge_retriever: KnowledgePackRetriever | None = None
+_knowledge_retriever_paths: tuple[str, ...] | None = None
+_knowledge_retriever_lock = threading.Lock()
+
+
+def get_knowledge_retriever(
+    pack_paths: list[str] | tuple[str, ...],
+) -> KnowledgePackRetriever:
+    """Return the long-lived retriever for the given pack set, rebuilding on change."""
+    global _knowledge_retriever, _knowledge_retriever_paths
+    paths_key = tuple(str(Path(p)) for p in pack_paths)
+    with _knowledge_retriever_lock:
+        if _knowledge_retriever is None or _knowledge_retriever_paths != paths_key:
+            if _knowledge_retriever is not None:
+                _knowledge_retriever.close()
+            # Use the cached query embedder so the query vector is shared with
+            # vector_store's fact/turn search within the same turn.
+            _knowledge_retriever = KnowledgePackRetriever(pack_paths, embedder=embed_query)
+            _knowledge_retriever_paths = paths_key
+        return _knowledge_retriever
+
+
+def reset_knowledge_retriever() -> None:
+    """Drop the singleton (tests only). Closes pooled connections."""
+    global _knowledge_retriever, _knowledge_retriever_paths
+    with _knowledge_retriever_lock:
+        if _knowledge_retriever is not None:
+            _knowledge_retriever.close()
+        _knowledge_retriever = None
+        _knowledge_retriever_paths = None
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
@@ -71,6 +117,34 @@ RECONCILE_PROMPT = (
     '{"op": "ADD"|"UPDATE"|"DELETE"|"NOOP", "target_id": null or "existing_id"}'
 )
 
+# ── Static orchestrator system prompt (Band A, Fix #1) ───────────────────────
+# Invariant within a process. Leads the orchestrator message sequence so it is
+# byte-stable across turns and Ollama's prefix/KV cache reuses it on turns 2+.
+# Kept short and operational to avoid materially changing distilled-orchestrator
+# behavior while still giving the model a stable identity/role preamble.
+ORCHESTRATOR_STATIC_SYSTEM_PROMPT = (
+    "You are Obrenna, a local-first AI assistant running on the user's own hardware. "
+    "Answer helpfully, accurately, and concisely. Use the provided memory, past "
+    "conversation, and knowledge-pack context when relevant. When tools are available, "
+    "call them to ground answers in current factual data rather than guessing. "
+    "Prefer plain prose; use Markdown only when it improves clarity."
+)
+
+
+def canonicalise_system_content(content: str) -> str:
+    """Normalise a static system-message content string to a byte-stable form.
+
+    Ollama's prefix/KV cache keys on the content tokens, so a byte-stable string
+    lets turns 2+ reuse the cached prefix. Per-line trailing whitespace and CRLF
+    endings are the likely sources of drift across turns; normalise them and
+    strip leading/trailing whitespace.
+    """
+    if not content:
+        return content
+    lines = [line.rstrip() for line in content.replace("\r\n", "\n").split("\n")]
+    return "\n".join(lines).strip()
+
+
 # ── Budget ────────────────────────────────────────────────────────────────────
 
 
@@ -91,7 +165,15 @@ def pick_memory_budget(ctx_max: int | None) -> int:
 
 
 class MemoryContext:
-    """Structured context payload returned by assemble_context."""
+    """Structured context payload returned by assemble_context.
+
+    Prompt layout (Fix #1) splits the orchestrator's system content into a
+    static, cross-turn cacheable band (``to_static_messages``) and a dynamic,
+    per-turn memory band (``to_dynamic_messages``). The runtime places the
+    static band first so Ollama's prefix/KV cache reuses it across turns; the
+    dynamic band (and its ``[mem v=… cv=…]`` version stamp) sits after the
+    cacheable prefix so its per-turn variance does not bust the cache.
+    """
 
     def __init__(
         self,
@@ -100,16 +182,24 @@ class MemoryContext:
         facts: list[dict] | None = None,
         archive_turns: list[dict] | None = None,
         knowledge_cards: list[dict] | None = None,
+        *,
+        account_version: int = 0,
+        chat_version: int = 0,
+        summary_version: int = 0,
     ):
         self.recency = recency or []
         self.rolling_summary = rolling_summary
         self.facts = facts or []
         self.archive_turns = archive_turns or []
         self.knowledge_cards = knowledge_cards or []
+        # Version counters this context was assembled against (Fix #7). Stamped
+        # into the dynamic band for diagnostics/telemetry; 0 = unset (EXP0).
+        self.account_version = account_version
+        self.chat_version = chat_version
+        self.summary_version = summary_version
 
-    def to_messages(self) -> list[dict]:
-        """Convert to a list of LLM system/user messages for the orchestrator."""
-        messages: list[dict] = []
+    def _dynamic_parts(self) -> list[str]:
+        """The per-turn memory content blocks, in precedence order."""
         parts: list[str] = []
 
         # 1. Rolling summary always
@@ -156,10 +246,81 @@ class MemoryContext:
                 "markdown would add no value."
             )
 
-        if parts:
-            messages.append({"role": "system", "content": "\n\n".join(parts)})
+        return parts
 
-        return messages
+    def to_static_messages(self) -> list[dict]:
+        """Band A: invariant orchestrator identity/role/rules prompt (Fix #1).
+
+        Constant within a process and byte-stable, so Ollama's prefix cache
+        reuses it across turns. Leads the message sequence.
+        """
+        return [
+            {
+                "role": "system",
+                "content": canonicalise_system_content(ORCHESTRATOR_STATIC_SYSTEM_PROMPT),
+            }
+        ]
+
+    def to_dynamic_messages(self) -> list[dict]:
+        """Band B: per-turn memory block as ONE system message, version-stamped (Fix #1).
+
+        The first line ``[mem v=<account_version> cv=<chat_version>]`` is a
+        diagnostics/telemetry stamp. This band sits AFTER the cacheable static
+        bands, so its per-turn variance does not bust the prefix cache.
+        """
+        parts = self._dynamic_parts()
+        if not parts:
+            return []
+        stamp = f"[mem v={self.account_version} cv={self.chat_version}]"
+        content = canonicalise_system_content(stamp + "\n\n" + "\n\n".join(parts))
+        return [{"role": "system", "content": content}]
+
+    def to_messages(self) -> list[dict]:
+        """Backward-compatible dynamic memory block (unstamped, no static prompt).
+
+        Retained for ``build_model_messages`` and tests. Production orchestration
+        uses ``to_static_messages()`` + ``to_dynamic_messages()`` instead so the
+        static band can lead and be prefix-cached.
+        """
+        parts = self._dynamic_parts()
+        if not parts:
+            return []
+        return [{"role": "system", "content": "\n\n".join(parts)}]
+
+
+def _build_recency(db: Session, chat_id: str, recent_count: int) -> list[dict]:
+    """Last N assistant messages before this turn, oldest-first."""
+    from ..models import ChatMessage  # noqa: PLC0414
+
+    recency: list[dict] = []
+    all_msgs = (
+        db.query(ChatMessage)
+        .filter_by(chat_id=chat_id)
+        .filter(ChatMessage.role == "assistant")
+        .order_by(ChatMessage.created_at.desc())
+        .limit(recent_count)
+        .all()
+    )
+    for m in reversed(all_msgs):
+        recency.append({"role": "assistant", "text": m.text})
+    return recency
+
+
+def _pack_signature(pack_paths: list[str]) -> tuple[tuple[str, int], ...]:
+    """Stable signature of the configured pack set: ((path, mtime), ...).
+
+    A pack file replaced on disk changes its mtime, which changes the
+    assembled-context cache key even though no in-DB version counter bumped
+    (packs are external files outside the versioned write path).
+    """
+    sig: list[tuple[str, int]] = []
+    for p in pack_paths:
+        try:
+            mtime = int(os.path.getmtime(str(p)))
+        except OSError:
+            mtime = -1
+        sig.append((str(p), mtime))
+    return tuple(sig)
 
 
 def assemble_context(
@@ -174,24 +335,52 @@ def assemble_context(
     """Build memory context for a chat turn.
 
     Precedence: recency buffer → rolling summary → facts → archive turns.
+
+    Retrieval is cached by a composite version key (Fix #7). On a cache hit
+    the full retrieval (recency DB scan, vector search over facts/turns,
+    knowledge-pack search, all embedding work) is skipped. The key includes
+    the account-memory version, chat-memory version, rolling-summary version,
+    the query hash, and the pack-file mtime signature — so any write that
+    changes the context atomically invalidates it. We never ship an
+    unversioned cache: a missing version counter falls through to a full
+    rebuild.
+
+    The account-memory-version counter is the correctness guard for
+    user_locked facts: any ADD/UPDATE/DELETE of a locked fact bumps it, so the
+    cached facts block can never serve a stale locked fact — the next turn
+    re-reads locked facts fresh after a locked-fact edit.
     """
-    from ..models import ChatMessage, ChatTurn  # noqa: PLC0414
-
-    # Recency buffer: last N assistant messages before this turn
-    recency: list[dict] = []
-    all_msgs = (
-        db.query(ChatMessage)
-        .filter_by(chat_id=chat.id)
-        .filter(ChatMessage.role == "assistant")
-        .order_by(ChatMessage.created_at.desc())
-        .limit(recent_count)
-        .all()
+    from ..models import ChatTurn, MemoryFact  # noqa: PLC0414
+    from .memory_versions import (  # noqa: PLC0414
+        get_account_version,
+        get_chat_version,
+        get_rolling_summary_version,
     )
-    for m in reversed(all_msgs):
-        recency.append({"role": "assistant", "text": m.text})
 
+    chat_id = chat.id
+
+    # EXP0 lightweight path: recency only, never cached (no version counters).
     if memory_mode == "exp0_recency_only":
+        recency = _build_recency(db, chat_id, recent_count)
         return _cap_recency_context(MemoryContext(recency=recency), max_context_chars or 4000)
+
+    # ── Version-keyed cache lookup ──────────────────────────────────────────
+    account_version = get_account_version(db, MemoryFact.ACCOUNT_ID)
+    chat_version = get_chat_version(db, chat_id)
+    summary_version = get_rolling_summary_version(db, chat_id)
+    qhash = memory_cache.query_hash(user_message)
+    pack_paths = resolve_pack_paths()
+    pack_sig = _pack_signature(pack_paths)
+    cache_key = memory_cache.make_context_key(
+        chat_id, chat_version, summary_version, account_version,
+        qhash, memory_mode, max_context_chars, pack_sig,
+    )
+    cached = memory_cache.get_context(cache_key)
+    if cached is not None:
+        return cached
+
+    # ── Full retrieval (cache miss) ─────────────────────────────────────────
+    recency = _build_recency(db, chat_id, recent_count)
 
     # Rolling summary
     rolling_summary = getattr(chat, "rolling_summary", "") or ""
@@ -228,7 +417,7 @@ def assemble_context(
     facts = search_facts(db, user_message, top_k=facts_top_k, exclude_locked=False)
     facts_out = [{"id": f[0], "text": f[2]} for f in facts]
 
-    archive_scores = search_turns(db, chat.id, user_message, top_k=archive_top_k * 2)
+    archive_scores = search_turns(db, chat_id, user_message, top_k=archive_top_k * 2)
     archive_out: list[dict] = []
     for sim, turn_id in archive_scores:
         turn = db.query(ChatTurn).filter_by(id=turn_id).first()
@@ -242,9 +431,8 @@ def assemble_context(
 
     knowledge_cards: list[dict] = []
     try:
-        pack_paths = resolve_pack_paths()
         if pack_paths:
-            retriever = KnowledgePackRetriever(pack_paths)
+            retriever = get_knowledge_retriever(pack_paths)
             knowledge_context = retriever.search(
                 user_message,
                 max_cards=4,
@@ -254,13 +442,18 @@ def assemble_context(
     except Exception as exc:
         logger.warning("Knowledge pack retrieval failed: %s", exc)
 
-    return MemoryContext(
+    ctx = MemoryContext(
         recency=recency,
         rolling_summary=rolling_summary,
         facts=facts_out,
         archive_turns=archive_out,
         knowledge_cards=knowledge_cards,
+        account_version=account_version,
+        chat_version=chat_version,
+        summary_version=summary_version,
     )
+    memory_cache.set_context(cache_key, ctx)
+    return ctx
 
 
 def _cap_recency_context(context: MemoryContext, max_chars: int) -> MemoryContext:
@@ -325,6 +518,10 @@ def record_turn_after_response(
             created_at=assistant_msg.created_at,
         )
         db.add(turn)
+        # Bump the chat-memory version in the SAME transaction as the turn
+        # write so the assembled-context cache invalidates atomically (Fix #7).
+        # A new turn changes the recency buffer and archived-turn search results.
+        bump_chat_version(db, chat.id)
         db.commit()
         db.refresh(turn)
 
@@ -403,6 +600,9 @@ def _maybe_fold_summary(
         )
         chat.rolling_summary = new_summary.strip()
         chat.summarized_upto_turn_index = turn_to_fold.turn_index
+        # Bump the rolling-summary version in the same transaction so the
+        # assembled-context cache invalidates when the summary text changes (Fix #7).
+        bump_rolling_summary_version(db, chat.id)
         db.commit()
         return True
     except Exception as exc:
@@ -568,6 +768,12 @@ def extract_and_reconcile_facts(
                 if op == "UPDATE":
                     best_match.fact_text = candidate
                     best_match.updated_at = datetime.now(timezone.utc)
+                    # Bump the fact's own version (per-row embedding cache
+                    # invalidation) and the account version (facts block /
+                    # assembled-context cache invalidation) in this same
+                    # transaction, committed below (Fix #7).
+                    best_match.version = int(getattr(best_match, "version", 1) or 1) + 1
+                    bump_account_version(db, best_match.account_id)
                     insert_fact_vector(db, best_match.id, candidate)
                     events.append({"type": "UPDATE", "fact_id": best_match.id, "text": candidate})
                 elif op == "ADD":
@@ -618,6 +824,14 @@ def _add_fact(
         updated_at=datetime.now(timezone.utc),
     )
     db.add(fact)
+    # Bump the account-memory version in the same transaction as the fact
+    # write so the facts block / assembled-context cache invalidates
+    # atomically (Fix #7). This also covers user_locked facts: a user-created
+    # fact is user_locked=True by default, and bumping here means the very next
+    # turn re-reads it fresh rather than serving a stale cached facts block.
+    # ``fact.account_id`` is a Python-side default applied at flush, so it is
+    # still None here — fall back to the account constant.
+    bump_account_version(db, fact.account_id or MemoryFact.ACCOUNT_ID)
     db.commit()
     db.refresh(fact)
     insert_fact_vector(db, fact.id, text)
@@ -666,10 +880,15 @@ def update_fact(
 
     fact.fact_text = new_text
     fact.updated_at = datetime.now(timezone.utc)
+    # Bump the fact's own version (per-row embedding cache invalidation) and
+    # the account version (facts block / assembled-context cache invalidation)
+    # in the same transaction (Fix #7).
+    fact.version = int(getattr(fact, "version", 1) or 1) + 1
+    bump_account_version(db, fact.account_id)
     db.commit()
     db.refresh(fact)
 
-    # Re-embed
+    # Re-embed (delete_fact_vector also drops the cached per-row vector).
     delete_fact_vector(db, fact_id)
     insert_fact_vector(db, fact_id, new_text)
 
@@ -697,9 +916,15 @@ def delete_fact(db: Session, fact_id: str, *, actor: str = "user") -> bool:
     fact.deleted_at = datetime.now(timezone.utc)
     fact.user_locked = True
     fact.updated_at = datetime.now(timezone.utc)
+    # Bump the fact's own version + account version in this transaction so the
+    # next turn does not serve the deleted fact from cache (Fix #7).
+    fact.version = int(getattr(fact, "version", 1) or 1) + 1
+    bump_account_version(db, fact.account_id)
     db.commit()
 
-    # Keep vector for duplicate suppression (tombstone)
+    # Drop the cached per-row embedding (tombstone vector is kept in the store
+    # for duplicate suppression).
+    delete_fact_vector(db, fact_id)
     return True
 
 

@@ -47,6 +47,7 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   const [downloadError, setDownloadError] = useState<string | null>(null)
   const [downloadDone, setDownloadDone] = useState(false)
   const [provisionJobId, setProvisionJobId] = useState<string | null>(null)
+  const [finishError, setFinishError] = useState<string | null>(null)
 
   useEffect(() => {
     getModelCatalog()
@@ -288,13 +289,25 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
     const orchestratorModel = plan?.orchestrator?.model || ''
     const summarizerModel = plan?.summarizer?.model || ''
     const utilityModel = plan?.utility?.model || ''
-    await saveModelEndpoint({
-      provider: 'openai_compatible',
-      base_url: 'http://localhost:11434/v1',
-      api_key: '',
-      models: { orchestrator: orchestratorModel, summarizer: summarizerModel, utility: utilityModel },
-    }).catch(() => {})
-    onFinish()
+    try {
+      await saveModelEndpoint({
+        provider: 'openai_compatible',
+        base_url: 'http://localhost:11434/v1',
+        api_key: '',
+        models: { orchestrator: orchestratorModel, summarizer: summarizerModel, utility: utilityModel },
+      })
+      await saveAppSettings({
+        setup_complete: true,
+        setup_mode: 'managed',
+        theme: 'system',
+        active_models: [],
+        managed_plan: {},
+        workers_enabled: true,
+      })
+      onFinish()
+    } catch (err) {
+      setFinishError(err instanceof Error ? err.message : 'Failed to save setup configuration. Please try again.')
+    }
   }
 
   const handleRetryDownload = async () => {
@@ -305,20 +318,25 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
   }
 
   const handleByoFinish = async () => {
-    await saveModelEndpoint({
-      provider: 'openai_compatible',
-      base_url: baseUrl,
-      api_key: apiKey,
-      models: { orchestrator: roles.reasoner, summarizer: roles.summarizer, utility: roles.utility },
-    }).catch(() => {})
-    await saveAppSettings({
-      setup_complete: true,
-      setup_mode: 'byo',
-      theme: 'system',
-      active_models: [],
-      managed_plan: {},
-    }).catch(() => {})
-    onFinish()
+    try {
+      await saveModelEndpoint({
+        provider: 'openai_compatible',
+        base_url: baseUrl,
+        api_key: apiKey,
+        models: { orchestrator: roles.reasoner, summarizer: roles.summarizer, utility: roles.utility },
+      })
+      await saveAppSettings({
+        setup_complete: true,
+        setup_mode: 'byo',
+        theme: 'system',
+        active_models: [],
+        managed_plan: {},
+        workers_enabled: true,
+      })
+      onFinish()
+    } catch (err) {
+      setFinishError(err instanceof Error ? err.message : 'Failed to save setup configuration. Please try again.')
+    }
   }
 
   return (
@@ -340,6 +358,12 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
         {isDesktop && step === 0 && ollamaFound === true && (
           <div className="mb-4 text-[12px] text-(--ok) bg-(--ok)/5 border border-(--ok)/20 rounded-lg px-3 py-2">
             Local Ollama server detected at localhost:11434
+          </div>
+        )}
+
+        {finishError && (
+          <div className="mb-4 text-[12px] text-(--err) bg-(--err)/5 border border-(--err)/20 rounded-lg px-3 py-2">
+            {finishError}
           </div>
         )}
 

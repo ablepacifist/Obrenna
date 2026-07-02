@@ -87,6 +87,106 @@ class TestToolCallHandling:
         assert "not found" in results[0]["content"].lower()
 
 
+class TestParallelToolDispatch:
+    """Fix #4 — independent read-only tool calls run concurrently via gather;
+    stateful/sensitive/dependent tools run serially; results stay in order."""
+
+    @pytest.mark.asyncio
+    async def test_two_read_only_tools_run_concurrently(self):
+        client = _ConcurrencyTrackingClient(delay=0.02)
+        tool_calls = [
+            {"id": "c1", "type": "function",
+             "function": {"name": "get_time", "arguments": {}}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "calculator", "arguments": {"expression": "1+1"}}},
+        ]
+        results = await handle_tool_calls(tool_calls, client)
+        assert len(results) == 2
+        # Both ran, in original order.
+        assert results[0]["tool_call_id"] == "c1"
+        assert results[1]["tool_call_id"] == "c2"
+        # Concurrency: two read-only tools overlapped (max_active >= 2).
+        assert client.max_active >= 2, (
+            "two gather-eligible tools should run concurrently, "
+            f"max_active was {client.max_active}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_location_stays_serial_with_calculator(self):
+        client = _ConcurrencyTrackingClient(delay=0.02)
+        tool_calls = [
+            {"id": "c1", "type": "function",
+             "function": {"name": "calculator", "arguments": {"expression": "2+2"}}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "get_location", "arguments": {}}},
+        ]
+        results = await handle_tool_calls(tool_calls, client)
+        assert len(results) == 2
+        # Order preserved even though get_location is serial after the parallel batch.
+        assert results[0]["tool_call_id"] == "c1"
+        assert results[1]["tool_call_id"] == "c2"
+        # get_location is never gathered — nothing overlapped.
+        assert client.max_active == 1, (
+            "get_location must run serially; max_active was "
+            f"{client.max_active}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_runs_serially(self):
+        client = _ConcurrencyTrackingClient(delay=0.01)
+        tool_calls = [
+            {"id": "c1", "type": "function",
+             "function": {"name": "get_time", "arguments": {}}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "nonexistent_tool", "arguments": {}}},
+        ]
+        results = await handle_tool_calls(tool_calls, client)
+        assert len(results) == 2
+        assert [r["tool_call_id"] for r in results] == ["c1", "c2"]
+        # Unknown tool fails closed — not gather-eligible → no overlap.
+        assert client.max_active == 1
+
+    @pytest.mark.asyncio
+    async def test_results_preserve_order_regardless_of_completion(self):
+        # The first call sleeps much longer than the second; a gather would
+        # complete the second first. Results must still come back in input order.
+        client = _ConcurrencyTrackingClient(delay_map={"get_time": 0.05,
+                                                       "calculator": 0.001})
+        tool_calls = [
+            {"id": "c1", "type": "function",
+             "function": {"name": "get_time", "arguments": {}}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "calculator", "arguments": {"expression": "3+3"}}},
+        ]
+        results = await handle_tool_calls(tool_calls, client)
+        assert [r["tool_call_id"] for r in results] == ["c1", "c2"]
+        assert results[0]["tool_name"] == "get_time"
+        assert results[1]["tool_name"] == "calculator"
+
+
+class _ConcurrencyTrackingClient:
+    """Fake MCP client that records concurrent call counts and per-name delays.
+
+    Used to assert that gather-eligible tools actually overlap in wall-clock
+    time (max_active >= 2) while serial tools never do.
+    """
+
+    def __init__(self, delay: float = 0.0, delay_map: dict | None = None):
+        self.delay = delay
+        self.delay_map = delay_map or {}
+        self.active = 0
+        self.max_active = 0
+
+    async def call_tool(self, name: str, args: dict) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(self.delay_map.get(name, self.delay))
+            return f"{name}:ok"
+        finally:
+            self.active -= 1
+
+
 class TestToolFormatting:
     """Test tool definition formatting for model API."""
 
@@ -504,7 +604,8 @@ class TestRuntimeContextInjection:
     def test_injects_compact_runtime_context_for_prompt_json(self):
         messages = _build_orchestrator_messages(
             user_message="what year is it",
-            system_parts=[],
+            static_parts=[],
+            dynamic_parts=[],
             evidence_summary="",
             previous_messages=[],
             tool_call_mode="prompt_json",
@@ -521,7 +622,8 @@ class TestRuntimeContextInjection:
     def test_injects_full_runtime_context_for_openai_native(self):
         messages = _build_orchestrator_messages(
             user_message="what year is it",
-            system_parts=[],
+            static_parts=[],
+            dynamic_parts=[],
             evidence_summary="",
             previous_messages=[],
             tool_call_mode="openai_native",
@@ -538,7 +640,8 @@ class TestRuntimeContextInjection:
     def test_injects_relative_date_hint_when_user_uses_relative_phrase(self):
         messages = _build_orchestrator_messages(
             user_message="show sales from last year",
-            system_parts=[],
+            static_parts=[],
+            dynamic_parts=[],
             evidence_summary="",
             previous_messages=[],
             tool_call_mode="openai_native",
@@ -553,10 +656,182 @@ class TestRuntimeContextInjection:
     def test_does_not_inject_relative_date_hint_without_relative_phrase(self):
         messages = _build_orchestrator_messages(
             user_message="summarize the attached CSV",
-            system_parts=[],
+            static_parts=[],
+            dynamic_parts=[],
             evidence_summary="",
             previous_messages=[],
             tool_call_mode="openai_native",
             allowed_tools=None,
         )
         assert not any(m.get("name") == "runtime_relative_dates" for m in messages)
+
+
+class TestRuntimeDbTransactionBoundaries:
+    @pytest.mark.asyncio
+    async def test_context_read_transaction_closes_before_model_stream(self, monkeypatch):
+        from app.agent import runtime as rt
+
+        class TrackingDb:
+            def __init__(self):
+                self.rollback_count = 0
+
+            def rollback(self):
+                self.rollback_count += 1
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        tracking_db = TrackingDb()
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+
+        async def fake_stream(*args, **kwargs):
+            assert tracking_db.rollback_count >= 1
+            yield {"type": "token", "content": "final answer"}
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        config = RuntimeConfig(
+            provider="openai_compatible",
+            base_url="http://localhost:11434/v1",
+            models={"orchestrator": "qwen3.5:4b"},
+        )
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json"},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "hello", "chat-db-boundary", tracking_db, config, plan,
+            workers_enabled=False,
+        )]
+
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        assert tokens == "final answer"
+
+
+class TestToolLoopFinalization:
+    @pytest.mark.asyncio
+    async def test_max_tool_rounds_gets_forced_final_answer_pass(self, monkeypatch):
+        from app.agent import runtime as rt
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"max_tool_rounds": 1, "worker_timeout_seconds": 1})
+
+        calls = {"model": 0}
+
+        async def fake_stream(*args, **kwargs):
+            calls["model"] += 1
+            if calls["model"] == 1:
+                yield {
+                    "type": "tool_calls_done",
+                    "calls": [{
+                        "id": "call_search",
+                        "type": "function",
+                        "function": {"name": "web_search", "arguments": {"query": "Winnipeg this week"}},
+                    }],
+                }
+            else:
+                messages = args[1]
+                assert any("Tool limit reached" in (m.get("content") or "") for m in messages)
+                yield {"type": "token", "content": "Final Winnipeg summary."}
+
+        async def fake_handle_tool_calls(tool_calls, mcp_client):
+            return [{
+                "tool_call_id": "call_search",
+                "tool_name": "web_search",
+                "content": json.dumps({"results": [{"title": "Winnipeg news", "snippet": "A local update."}]}),
+            }]
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+        monkeypatch.setattr(rt, "handle_tool_calls", fake_handle_tool_calls)
+
+        config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json"},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "Summarize what happened in Winnipeg this week",
+            "chat-tool-final",
+            None,
+            config,
+            plan,
+            web_search=True,
+            workers_enabled=False,
+        )]
+
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        assert tokens == "Final Winnipeg summary."
+        assert calls["model"] == 2
+
+    @pytest.mark.asyncio
+    async def test_finalization_tool_call_uses_non_empty_tool_result_fallback(self, monkeypatch):
+        from app.agent import runtime as rt
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"max_tool_rounds": 1, "worker_timeout_seconds": 1})
+
+        async def fake_stream(*args, **kwargs):
+            yield {
+                "type": "tool_calls_done",
+                "calls": [{
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": {"query": "Winnipeg this week"}},
+                }],
+            }
+
+        handle_calls = {"count": 0}
+
+        async def fake_handle_tool_calls(tool_calls, mcp_client):
+            handle_calls["count"] += 1
+            return [{
+                "tool_call_id": "call_search",
+                "tool_name": "web_search",
+                "content": json.dumps({"results": [{
+                    "title": "Winnipeg headline",
+                    "snippet": "A major local story happened.",
+                    "url": "https://example.test/winnipeg",
+                }]}),
+            }]
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+        monkeypatch.setattr(rt, "handle_tool_calls", fake_handle_tool_calls)
+
+        config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json"},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "Summarize what happened in Winnipeg this week",
+            "chat-tool-fallback",
+            None,
+            config,
+            plan,
+            web_search=True,
+            workers_enabled=False,
+        )]
+
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        assert "Winnipeg headline" in tokens
+        assert "A major local story happened" in tokens
+        assert handle_calls["count"] == 1

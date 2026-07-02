@@ -588,6 +588,77 @@ def test_distilled_orchestrator_surfaces_prompt_json(catalog):
     assert result["orchestrator"]["tool_call_mode"] == "prompt_json"
 
 
+# ===========================================================================
+# Per-role keep_alive surfacing (Fix #2). The resolver must expose each
+# role's keep_alive (sourced from hardware_catalog.json's keep_alive_policy
+# blocks) so the runtime can pin the orchestrator (-1 = resident for the
+# whole session) while keeping lazy summarizer/utility workers evictable
+# (duration strings). The runtime must NEVER hardcode these values.
+# ===========================================================================
+
+def test_orchestrator_keep_alive_is_pinned_resident(catalog):
+    """Every GPU tier's orchestrator keep_alive is -1 (pin for the session)."""
+    fp = HardwareFingerprint(
+        gpu_vendor="amd", gpu_name="Radeon RX 580 8GB", gpu_vram_total_gb=8,
+        gpu_fp16_support=False, gpu_backends_available=["vulkan"],
+        cpu_physical_cores=4, cpu_threads=4, cpu_isa_flags=["avx2"],
+        ram_total_gb=16, ram_type="ddr4", ram_channels=2, os="windows",
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=6.8, ram_free_gb=11.0))
+    assert result["orchestrator"]["keep_alive"] == -1
+
+
+def test_utility_keep_alive_is_evictable(catalog):
+    """GPU tier utility workers keep_alive is "5m" (lazy, evictable)."""
+    fp = HardwareFingerprint(
+        gpu_vendor="nvidia", gpu_name="RTX 3060 12GB", gpu_vram_total_gb=12,
+        gpu_fp16_support=True, gpu_backends_available=["cuda", "vulkan"],
+        cpu_physical_cores=8, cpu_threads=16, cpu_isa_flags=["avx2"],
+        ram_total_gb=32, ram_type="ddr4", ram_channels=2, os="windows",
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=10.5, ram_free_gb=26.0))
+    assert result["utility"] is not None
+    assert result["utility"]["keep_alive"] == "5m"
+
+
+def test_summarizer_keep_alive_is_evictable(catalog):
+    """GPU tier summarizer keep_alive is "10m" (lazy, evictable)."""
+    fp = HardwareFingerprint(
+        gpu_vendor="nvidia", gpu_name="RTX 3060 12GB", gpu_vram_total_gb=12,
+        gpu_fp16_support=True, gpu_backends_available=["cuda", "vulkan"],
+        cpu_physical_cores=8, cpu_threads=16, cpu_isa_flags=["avx2"],
+        ram_total_gb=32, ram_type="ddr4", ram_channels=2, os="windows",
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=10.5, ram_free_gb=26.0))
+    assert result["summarizer"] is not None
+    assert result["summarizer"]["keep_alive"] == "10m"
+
+
+def test_cpu_only_helpers_keep_alive_defaults_evictable(catalog):
+    """CPU-only tiers surface helpers-as-utility with a "5m" keep_alive."""
+    fp = HardwareFingerprint(
+        gpu_vendor="none", gpu_vram_total_gb=0, gpu_fp16_support=False,
+        cpu_physical_cores=6, cpu_threads=12, cpu_isa_flags=["avx2"],
+        ram_total_gb=32, ram_type="ddr5", ram_channels=2, os="windows",
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=0, ram_free_gb=22.0))
+    assert result["path"] == "cpu_only"
+    assert result["orchestrator"]["keep_alive"] == -1
+    assert result["utility"] is not None
+    assert result["utility"]["keep_alive"] == "5m"
+
+
+def test_apple_orchestrator_keep_alive_is_pinned(catalog):
+    """Apple Silicon tiers pin the orchestrator (-1); no utility/summarizer."""
+    fp = HardwareFingerprint(
+        gpu_vendor="apple", unified_mem_gb=48, os="macos",
+        cpu_physical_cores=10, cpu_threads=10, cpu_isa_flags=["avx2"],
+        ram_total_gb=48,
+    )
+    result = choose_and_validate(fp, catalog, LiveFreeResources(gpu_vram_free_gb=40.0, ram_free_gb=38.0))
+    assert result["orchestrator"]["keep_alive"] == -1
+
+
 def test_stock_orchestrator_surfaces_openai_native(catalog):
     """T5-workstation uses stock qwen3.5-27b → openai_native."""
     fp = HardwareFingerprint(

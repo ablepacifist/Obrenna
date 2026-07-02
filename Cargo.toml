@@ -1,0 +1,15 @@
+[workspace]
+members = ["src-tauri", "obrenna-mcp"]
+resolver = "2"
+
+[workspace.dependencies]
+cookie = "0.18"
+time = "0.3.36"
+
+[profile.release]
+lto = true
+opt-level = 3
+strip = true
+
+[profile.dev]
+opt-level = 0

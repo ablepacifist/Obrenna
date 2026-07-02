@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from .hardware_catalog import load_catalog, tool_call_mode_for
 
@@ -73,6 +73,23 @@ def _get_kv_cache_gb_per_1k(catalog: dict, model_id: str) -> float:
 
 def _get_constants(catalog: dict) -> dict:
     return catalog["global_constants"]
+
+
+def _keep_alive_for(role_block: dict | None, default) -> Any:
+    """Extract the Ollama ``keep_alive`` value from a catalog role block.
+
+    Each role block (orchestrator/summarizer/utility/helpers) carries a
+    ``keep_alive_policy`` object whose ``keep_alive`` member is the source of
+    truth (see ``hardware_catalog.json``) — never hardcode these in the runtime.
+    ``-1`` pins a model in VRAM/RAM for the whole session (orchestrator); a
+    duration string like ``"5m"``/``"10m"`` keeps a lazy role loaded briefly
+    after its last call, then evicts it. Falls back to ``default`` when the block
+    or the policy is absent.
+    """
+    block = role_block or {}
+    policy = block.get("keep_alive_policy") or {}
+    value = policy.get("keep_alive")
+    return value if value is not None else default
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +339,7 @@ def choose_and_validate(
                 "ctx_min": plan["orchestrator"].get("ctx_min"),
                 "ctx_max": plan["orchestrator"].get("ctx_max"),
                 "tool_call_mode": tool_call_mode_for(catalog, plan["orchestrator"]["model"]),
+                "keep_alive": _keep_alive_for(plan["orchestrator"], -1),
             },
             "summarizer": None,
             "utility": None,
@@ -332,12 +350,14 @@ def choose_and_validate(
         if "summarizer" in plan:
             resp_sum = dict(plan["summarizer"])
             resp_sum["device"] = plan["summarizer"].get("device", "cpu")
+            resp_sum["keep_alive"] = _keep_alive_for(plan["summarizer"], None)
             response["summarizer"] = resp_sum
 
         # Add utility if present
         if "utility" in plan:
             resp_util = dict(plan["utility"])
             resp_util["device"] = plan["utility"].get("device", "cpu")
+            resp_util["keep_alive"] = _keep_alive_for(plan["utility"], None)
             response["utility"] = resp_util
         elif "helpers" in plan:
             # cpu_only_tiers plans define a single combined "helpers" block
@@ -354,6 +374,7 @@ def choose_and_validate(
                 "count_min": 1,
                 "count_max": helpers_block.get("count_max", 1),
                 "resident": "lazy",
+                "keep_alive": _keep_alive_for(helpers_block, "5m"),
             }
 
         return response

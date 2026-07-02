@@ -24,7 +24,7 @@ from ..agent.events import (
     new_message_id,
     phase_event,
 )
-from ..agent.emitter import get_emitter
+from ..agent.emitter import get_emitter, TokenCoalescer
 from ..agent.runtime import (
     build_resolved_plan,
     get_allowed_mcp_tool_names,
@@ -57,6 +57,16 @@ from ..services.storage import artifact_pdf_path
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat")
+
+
+def _commit_or_http_error(db: Session, *, phase: str) -> None:
+    """Commit request-scoped chat state or fail the request cleanly."""
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Chat DB commit failed during %s: %s", phase, exc)
+        raise HTTPException(status_code=503, detail=f"Could not persist chat state: {exc}") from exc
 
 # ── Intent keywords ──────────────────────────────────────────────────────────
 
@@ -287,6 +297,11 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     msg_id: str = payload.assistant_message_id or new_message_id()
     used_runtime = False
     is_exp0 = False
+    effective_workers_enabled = (
+        payload.workers_enabled
+        if payload.workers_enabled is not None
+        else _get_global_workers_setting(db)
+    )
 
     csv_file = next((f for f in file_records if f.filename.lower().endswith(".csv")), None)
 
@@ -301,11 +316,15 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     else:
         logger.info("NORMAL CHAT PATH: delegating to agent runtime")
         used_runtime = True
+        # The model/tool path can take seconds. Do not hold SQLite's write lock
+        # from the chat/user INSERTs while orchestration runs, or concurrent UI
+        # requests/new chats fail with `database is locked`.
+        _commit_or_http_error(db, phase="initial user message")
         # Normal chat — use agent runtime
         reply_text, msg_id, is_exp0 = _handle_normal_chat(db, chat, user_msg, payload,
                                                   assistant_message_id=msg_id,
                                                   web_search=payload.web_search,
-                                                  workers_enabled=payload.workers_enabled if payload.workers_enabled is not None else _get_global_workers_setting(db),
+                                                  workers_enabled=effective_workers_enabled,
                                                   thinking_enabled=payload.thinking_enabled)
 
     # DEBUG, not INFO: reply text is private local content.
@@ -326,7 +345,10 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         chat.title = payload.message[:60]
     chat.updated_at = datetime.now(timezone.utc)
 
-    # Record turn and build memory events
+    # Record turn and build memory events. record_turn_after_response may commit
+    # the assistant message, chat metadata, and ChatTurn together; the explicit
+    # commit below is still required for paths where turn recording is skipped or
+    # fails after the assistant message has been added.
     memory_events: list[dict] = []
     try:
         turn_id = record_turn_after_response(db, chat, user_msg, asst_msg)
@@ -335,6 +357,9 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
             memory_events = [{"type": "MEMORY_ACTIVE", "count": len(active_facts)}]
     except Exception as exc:
         logger.warning("Turn recording failed: %s", exc)
+
+    _commit_or_http_error(db, phase="assistant response")
+    db.refresh(asst_msg)
 
     # Dispatch fact extraction in background. Pass only IDs — the request's
     # SQLAlchemy Session is not thread-safe and must never be shared with a
@@ -359,15 +384,6 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
             t.start()
         except Exception as exc:
             logger.warning("Failed to start fact extraction: %s", exc)
-
-    # Commit
-    try:
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        logger.error("Chat commit failed: %s", exc)
-
-    db.refresh(asst_msg)
 
     if not used_runtime:
         get_emitter().emit(done_event(chat.id, message_id=asst_msg.id))
@@ -546,37 +562,51 @@ def _handle_normal_chat(
         async def _collect():
             tokens = []
             emitter = get_emitter()
-            async for event in orchestrate_turn(
-                payload.message,
-                chat.id,
-                db,
-                config,
-                resolved_plan,
-                assistant_message_id=msg_id,
-                file_ids=payload.file_ids,
-                previous_messages=previous_messages,
-                web_search=web_search,
-                workers_enabled=workers_enabled,
-                thinking_enabled=thinking_enabled,
-            ):
-                # Stream every orchestrator event live to the Rust sidecar via stdout.
-                # token/tool/done/error drive the existing frontend streaming UI;
-                # thinking_delta drives the ephemeral reasoning pane.
-                emitter.emit(event)
-                if event.type == "token":
-                    tokens.append(event.payload.get("text", ""))
-                elif event.type == "error":
-                    # Per failure_modes.orchestrator_error =
-                    # "emit_typed_error_persist_clean_message": the typed
-                    # error event has already been streamed to the UI above.
-                    # Do NOT raise here — raising would bubble into an HTTP
-                    # 503 in the caller, which rolls back the whole request
-                    # transaction (including the user's message and chat
-                    # row) even though tokens already reached the client.
-                    # Return whatever text streamed so far so the turn is
-                    # still persisted, with a marker so the caller knows it
-                    # ended in error rather than completing normally.
-                    return "".join(tokens), event.payload.get("message", "Orchestration error")
+            # Coalesce consecutive token events into fewer, larger token
+            # envelopes before they hit stdout → the Rust sidecar relays ~16x
+            # fewer Tauri events for long answers. Non-token events are
+            # boundaries: they flush pending tokens first, then pass through
+            # unchanged. ``tokens`` still accumulates EVERY token (from the
+            # original per-token events) so the persisted reply text is whole.
+            coalescer = TokenCoalescer(emitter, chat_id=chat.id, message_id=msg_id)
+            try:
+                async for event in orchestrate_turn(
+                    payload.message,
+                    chat.id,
+                    db,
+                    config,
+                    resolved_plan,
+                    assistant_message_id=msg_id,
+                    file_ids=payload.file_ids,
+                    previous_messages=previous_messages,
+                    web_search=web_search,
+                    workers_enabled=workers_enabled,
+                    thinking_enabled=thinking_enabled,
+                ):
+                    # Stream every orchestrator event live to the Rust sidecar
+                    # via stdout. token/tool/done/error drive the existing
+                    # frontend streaming UI; thinking_delta drives the
+                    # ephemeral reasoning pane. Token events are coalesced;
+                    # all others pass straight through.
+                    coalescer.feed(event)
+                    if event.type == "token":
+                        tokens.append(event.payload.get("text", ""))
+                    elif event.type == "error":
+                        # Per failure_modes.orchestrator_error =
+                        # "emit_typed_error_persist_clean_message": the typed
+                        # error event has already been streamed to the UI above.
+                        # Do NOT raise here — raising would bubble into an HTTP
+                        # 503 in the caller, which rolls back the whole request
+                        # transaction (including the user's message and chat
+                        # row) even though tokens already reached the client.
+                        # Return whatever text streamed so far so the turn is
+                        # still persisted, with a marker so the caller knows it
+                        # ended in error rather than completing normally.
+                        return "".join(tokens), event.payload.get("message", "Orchestration error")
+            finally:
+                # Flush any tail tokens that didn't reach the batch threshold
+                # (done/error already flush as boundaries; this is a backstop).
+                coalescer.flush()
             return "".join(tokens), None
 
         reply_text, error_message = _run(_collect())

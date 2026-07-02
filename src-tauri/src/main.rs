@@ -35,28 +35,16 @@ fn main() {
 
             // Resolve MCP server path
             let resource_dir = app.path().resource_dir().expect("failed to get resource dir");
-            let mcp_server_path = resource_dir
-                .join("mcp")
-                .join(backend::executable_name("obrenna-mcp"));
-            let mcp_server_path = if mcp_server_path.exists() {
-                mcp_server_path
-            } else {
-                let mcp_exe = mcp_server_path.with_extension("exe");
-                if mcp_exe.exists() {
-                    mcp_exe
-                } else {
-                    PathBuf::new()
-                }
-            };
+            let mcp_server_path = resolve_mcp_server_path(&resource_dir);
 
             // Start supervisor
-            let mut processes = app.state::<Mutex<BackendProcesses>>();
+            let processes = app.state::<Mutex<BackendProcesses>>();
             let mut proc_guard = processes.lock().unwrap();
             let _ = proc_guard.start(
                 app.handle(),
                 port,
                 &data_dir,
-                &mcp_server_path,
+                mcp_server_path.as_deref(),
             );
 
             let mut state = setup_state.lock().unwrap();
@@ -93,6 +81,29 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Obrenna");
+}
+
+fn resolve_mcp_server_path(resource_dir: &PathBuf) -> Option<PathBuf> {
+    // Packaged resources: resource_dir/mcp/obrenna-mcp.exe
+    let packed = resource_dir.join("mcp").join(backend::executable_name("obrenna-mcp"));
+    if packed.exists() {
+        return Some(packed);
+    }
+
+    // Dev mode: CARGO_MANIFEST_DIR/../resources/mcp/obrenna-mcp.exe
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.to_path_buf())
+        .and_then(|parent| {
+            let dev = parent.join("src-tauri").join("resources").join("mcp").join("obrenna-mcp.exe");
+            if dev.exists() {
+                Some(dev)
+            } else {
+                None
+            }
+        });
+
+    dev_path
 }
 
 fn get_data_dir() -> PathBuf {

@@ -145,6 +145,8 @@ def build_runtime_context_message(*, compact: bool = False, timezone: str | None
     if compact:
         content = (
             f"Today is {clock.human_date}.\n"
+            f"Current year: {clock.year}.\n"
+            f"Current date: {clock.date_iso}.\n"
             f"Timezone: {clock.timezone} (UTC offset {clock.utc_offset}).\n"
             "Resolve relative dates using this date.\n"
             "Use get_time for exact current time."
@@ -153,6 +155,8 @@ def build_runtime_context_message(*, compact: bool = False, timezone: str | None
         content = (
             "Runtime context:\n"
             f"- Today is {clock.human_date}.\n"
+            f"- Current year is {clock.year}.\n"
+            f"- Current local date is {clock.date_iso}.\n"
             f"- Current local timezone is {clock.timezone} (UTC offset {clock.utc_offset}).\n"
             f"- Current local datetime is {clock.iso_datetime}.\n"
             "- Treat relative dates like today, tomorrow, yesterday, last year, next month, "

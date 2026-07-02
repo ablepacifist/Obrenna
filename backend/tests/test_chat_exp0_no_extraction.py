@@ -159,6 +159,32 @@ class TestSendMessageSkipsExtractionOnExp0:
             "the tier forbids loading the embedding model entirely"
         )
 
+    def test_user_message_is_committed_before_model_orchestration(self, monkeypatch, db):
+        """Normal chat must not hold an uncommitted INSERT through generation."""
+        from app.routers import chat as chat_router
+        from app.schemas.api import ChatRequest
+
+        commits = []
+        real_commit = db.commit
+
+        def tracking_commit():
+            commits.append("commit")
+            return real_commit()
+
+        def fake_handle_normal_chat(*args, **kwargs):
+            assert commits, "send_message must commit chat/user rows before orchestration"
+            assert not db.new, "no pending INSERTs should be held during orchestration"
+            return "reply", "asst-precommit-1", True
+
+        monkeypatch.setattr(db, "commit", tracking_commit)
+        monkeypatch.setattr(chat_router, "_handle_normal_chat", fake_handle_normal_chat)
+        monkeypatch.setattr(chat_router, "record_turn_after_response", lambda *a, **k: None)
+
+        payload = ChatRequest(message="hi there")
+        chat_router.send_message(payload, db=db)
+
+        assert len(commits) >= 2
+
     def test_non_exp0_turn_still_dispatches_fact_extraction_thread(self, monkeypatch, db):
         from app.agent.events import StreamEvent
         from app.routers import chat as chat_router

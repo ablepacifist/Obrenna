@@ -14,6 +14,7 @@ import math
 import re
 import sqlite3
 import struct
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -167,10 +168,41 @@ class KnowledgePackRetriever:
         self._keyword_weight = keyword_weight
         self._confidence_weight = confidence_weight
         self._edge_weight = edge_weight
+        # SQLite connection-per-pack pool (Fix #7). Pack files are read-only,
+        # so one shared connection per pack is safe across turns; the per-pack
+        # lock serializes access because FastAPI may serve across threads.
+        self._conn_cache: dict[str, sqlite3.Connection] = {}
+        self._conn_locks: dict[str, threading.Lock] = {}
+        self._pool_lock = threading.Lock()
 
     @property
     def pack_paths(self) -> list[str]:
         return list(self._pack_paths)
+
+    def _get_conn(self, pack_path: str) -> tuple[sqlite3.Connection, threading.Lock]:
+        """Return the pooled (connection, lock) for a pack, opening it on first use."""
+        with self._pool_lock:
+            conn = self._conn_cache.get(pack_path)
+            if conn is None:
+                conn = sqlite3.connect(pack_path, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                lock = threading.Lock()
+                self._conn_cache[pack_path] = conn
+                self._conn_locks[pack_path] = lock
+            else:
+                lock = self._conn_locks[pack_path]
+            return conn, lock
+
+    def close(self) -> None:
+        """Close every pooled connection (process teardown / singleton rebuild)."""
+        with self._pool_lock:
+            for conn in self._conn_cache.values():
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 - best-effort teardown
+                    pass
+            self._conn_cache.clear()
+            self._conn_locks.clear()
 
     def search(
         self,
@@ -195,9 +227,9 @@ class KnowledgePackRetriever:
                 logger.warning("knowledge pack missing: %s", pack_path)
                 continue
 
-            try:
-                with sqlite3.connect(pack_path) as conn:
-                    conn.row_factory = sqlite3.Row
+            conn, conn_lock = self._get_conn(pack_path)
+            with conn_lock:
+                try:
                     cursor = conn.cursor()
                     candidate_ids: set[str] | None = None
                     if _fts_available(conn) and query_tokens:
@@ -268,8 +300,8 @@ class KnowledgePackRetriever:
                     expanded_hits, expanded_hints = self._expand_one_hop(conn, pack_path, hits, query_terms)
                     hits.extend(expanded_hits)
                     graph_hints.extend(expanded_hints)
-            except sqlite3.Error as exc:
-                logger.warning("failed to read knowledge pack %s: %s", pack_path, exc)
+                except sqlite3.Error as exc:
+                    logger.warning("failed to read knowledge pack %s: %s", pack_path, exc)
 
         unique: dict[str, KnowledgeCardHit] = {}
         for hit in hits:

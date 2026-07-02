@@ -82,7 +82,7 @@ impl McpProxy {
     /// Returns the URL that Python should use to connect.
     pub fn spawn_server(
         &self,
-        server_path: &std::path::PathBuf,
+        server_path: &std::path::Path,
         file_allowlist: &str,
     ) -> Result<String, String> {
         let mut cmd = Command::new(server_path);

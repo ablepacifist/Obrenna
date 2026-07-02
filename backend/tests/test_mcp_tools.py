@@ -12,6 +12,7 @@ from app.mcp.tools import (
     tool_web_search,
     tool_get_location,
     TOOL_DEFS,
+    TOOLS,
 )
 
 
@@ -213,6 +214,16 @@ class TestCallToolAsync:
     def test_call_tool_sync_handler(self):
         result = call_tool("calculator", {"expression": "2+2"})
         assert result["result"] == 4
+
+    def test_call_tool_async_handler_without_existing_loop(self, monkeypatch):
+        async def async_handler(args):
+            return {"ok": True, "value": args["value"]}
+
+        monkeypatch.setitem(TOOLS, "test_async", async_handler)
+
+        result = call_tool("test_async", {"value": 7})
+
+        assert result == {"ok": True, "value": 7}
 
 
 class TestGetLocation:

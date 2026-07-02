@@ -86,6 +86,7 @@ async def dispatch_workers(
     helper_count: int,
     timeout_seconds: int = 12,
     workers_enabled: bool = True,
+    keep_alive: Any = None,
 ) -> list[WorkerResult]:
     """Dispatch utility worker tasks with concurrency control.
 
@@ -116,7 +117,10 @@ async def dispatch_workers(
         async with semaphore:
             try:
                 result = await asyncio.wait_for(
-                    _execute_worker(config, utility_model, system_prompt, user_prompt),
+                    _execute_worker(
+                        config, utility_model, system_prompt, user_prompt,
+                        keep_alive=keep_alive,
+                    ),
                     timeout=timeout_seconds,
                 )
                 if result is None:
@@ -169,6 +173,8 @@ async def _execute_worker(
     model: str,
     system_prompt: str,
     user_prompt: str,
+    *,
+    keep_alive: Any = None,
 ) -> str | None:
     """Execute a single worker task via streaming."""
     messages = [
@@ -181,6 +187,7 @@ async def _execute_worker(
         async for event in chat_completion_stream(
             config, messages, model=model, role="utility",
             temperature=0.1, timeout=15.0,
+            keep_alive=keep_alive,
         ):
             if isinstance(event, dict) and event.get("type") == "token":
                 collected.append(event["content"])
@@ -202,6 +209,7 @@ async def summarize_into_evidence_pack(
     evidence_pack: EvidencePack,
     *,
     summarizer_prompt: str | None = None,
+    keep_alive: Any = None,
 ) -> tuple[str, bool]:
     """Fold worker results through the summarizer.
 
@@ -234,6 +242,7 @@ async def summarize_into_evidence_pack(
         summary = await _collect_from_stream(
             config, messages, model=summarizer_model, role="summarizer",
             temperature=0.1, timeout=30.0,
+            keep_alive=keep_alive,
         )
         return summary.strip(), True
     except Exception as exc:
@@ -249,6 +258,7 @@ async def _collect_from_stream(
     role: str,
     temperature: float,
     timeout: float,
+    keep_alive: Any = None,
 ) -> str:
     """Collect all tokens from a streaming call into one string."""
     collected = []
@@ -256,6 +266,7 @@ async def _collect_from_stream(
         async for event in chat_completion_stream(
             config, messages, model=model, role=role,
             temperature=temperature, timeout=timeout,
+            keep_alive=keep_alive,
         ):
             if isinstance(event, dict) and event.get("type") == "token":
                 collected.append(event["content"])

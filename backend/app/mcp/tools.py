@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 TOOL_DEFS = [
     {
         "name": "get_time",
-        "description": "Return the current local system time and timezone offset.",
+        "description": (
+            "Return the current local system date and time, including year, "
+            "ISO date/datetime, weekday, timezone, and timezone offset."
+        ),
+        "is_read_only": True,
+        "depends_on": [],
+        "requires_user_prompt": False,
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -35,6 +41,9 @@ TOOL_DEFS = [
             "Supports +, -, *, /, **, %, parentheses, and decimal numbers. "
             "Never uses eval, exec, or code execution."
         ),
+        "is_read_only": True,
+        "depends_on": [],
+        "requires_user_prompt": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -53,6 +62,9 @@ TOOL_DEFS = [
             "Rejects arbitrary absolute paths. Only accepts file IDs from the "
             "File table or paths in the user-surfaced allowlist."
         ),
+        "is_read_only": True,
+        "depends_on": [],
+        "requires_user_prompt": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -74,6 +86,9 @@ TOOL_DEFS = [
             "Return web search snippets with source URLs only. "
             "No full-page fetch. Returns an array of result objects."
         ),
+        "is_read_only": True,
+        "depends_on": [],
+        "requires_user_prompt": False,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -97,6 +112,12 @@ TOOL_DEFS = [
             "Routes through Rust permission broker. "
             "Returns granted/denied/unavailable."
         ),
+        # Sensitive + broker-routed → never gathered in parallel. The broker is
+        # not actually wired today, so ``is_read_only=False`` plus the hard name
+        # exclusion in handle_tool_calls keeps this strictly serial.
+        "is_read_only": False,
+        "depends_on": [],
+        "requires_user_prompt": False,
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -503,8 +524,7 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     try:
         result = handler(args)
         if asyncio.iscoroutine(result):
-            import asyncio as _asyncio
-            return _asyncio.get_event_loop().run_until_complete(result)
+            return asyncio.run(result)
         return result
     except Exception as exc:
         logger.error("Tool '%s' failed: %s", name, exc)

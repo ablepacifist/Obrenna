@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from ..config import DEFAULT_BASE_URL
 from ..db import get_db
 from ..models import AppSettings, ModelEndpoint
 from ..model_runtime.client import test_connection_sync
@@ -8,10 +9,22 @@ from ..model_runtime.config import RuntimeConfig
 from ..schemas.api import (
     AppSettingsDTO,
     ModelEndpointConfig,
+    ModelRoles,
     TestConnectionResult,
 )
 
 router = APIRouter(prefix="/api/settings")
+
+
+def _normalize_models(models) -> dict:
+    """Convert ModelRoles Pydantic model or plain dict to a plain dict for JSON columns."""
+    if models is None:
+        return {}
+    if isinstance(models, ModelRoles):
+        return models.model_dump()
+    if isinstance(models, dict):
+        return models
+    return {}
 
 
 # --- model endpoint ----------------------------------------------------------
@@ -19,6 +32,17 @@ router = APIRouter(prefix="/api/settings")
 @router.get("/model-endpoint", response_model=ModelEndpointConfig)
 def get_model_endpoint(db: Session = Depends(get_db)):
     row = db.get(ModelEndpoint, 1)
+    if row is None:
+        row = ModelEndpoint(
+            id=1,
+            provider="openai_compatible",
+            base_url=DEFAULT_BASE_URL,
+            api_key="",
+            models={},
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
     return ModelEndpointConfig(
         provider=row.provider,
         base_url=row.base_url,
@@ -30,10 +54,13 @@ def get_model_endpoint(db: Session = Depends(get_db)):
 @router.post("/model-endpoint", response_model=ModelEndpointConfig)
 def save_model_endpoint(payload: ModelEndpointConfig, db: Session = Depends(get_db)):
     row = db.get(ModelEndpoint, 1)
+    if row is None:
+        row = ModelEndpoint(id=1)
+        db.add(row)
     row.provider = payload.provider
     row.base_url = payload.base_url
-    row.api_key = payload.api_key or None
-    row.models = payload.models or {}
+    row.api_key = payload.api_key or ""
+    row.models = _normalize_models(payload.models)
     db.commit()
     db.refresh(row)
     return ModelEndpointConfig(
@@ -50,7 +77,7 @@ def test_model_endpoint(payload: ModelEndpointConfig, db: Session = Depends(get_
         provider=payload.provider,
         base_url=payload.base_url,
         api_key=payload.api_key or "",
-        models=payload.models or {},
+        models=_normalize_models(payload.models),
     )
     result = test_connection_sync(cfg)
     return TestConnectionResult(**result)

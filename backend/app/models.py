@@ -146,6 +146,9 @@ class Chat(Base):
     )
     rolling_summary: Mapped[str] = mapped_column(Text, default="")
     summarized_upto_turn_index: Mapped[int] = mapped_column(Integer, default=-1)
+    # Incremented on every summary fold so the assembled-context cache
+    # invalidates when the rolling summary text changes (Fix #7).
+    rolling_summary_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -209,7 +212,43 @@ class MemoryFact(Base):
     source_chat_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     user_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Per-row version: incremented on UPDATE/DELETE so the per-row embedding
+    # cache (vector_store) invalidates for that fact alone (Fix #7).
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class AccountMemoryVersion(Base):
+    """Per-account version counter invalidated on any fact write (Fix #7).
+
+    The cached account facts block and assembled memory context are keyed by
+    this counter, so any ADD/UPDATE/DELETE/reconcile of a fact — including a
+    user_locked fact — atomically invalidates the cache. Because locked-fact
+    writes bump this same counter, the cache can never serve a stale locked
+    fact: a locked-fact edit invalidates immediately and the next turn re-reads.
+    """
+
+    __tablename__ = "account_memory_version"
+
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChatMemoryVersion(Base):
+    """Per-chat version counter invalidated on turn record (Fix #7).
+
+    Bumped when a ChatTurn is recorded, which changes the recency buffer and
+    the archived-turn vector-search results. The assembled memory context is
+    keyed on this counter (plus the rolling-summary version) so a new turn
+    invalidates the cached context.
+    """
+
+    __tablename__ = "chat_memory_version"
+
+    chat_id: Mapped[str] = mapped_column(String, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

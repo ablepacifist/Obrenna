@@ -5,6 +5,7 @@
 /// On shutdown, Rust attempts graceful Python shutdown via HTTP, then
 /// forced kill+wait on both children.
 
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -44,48 +45,48 @@ impl BackendProcesses {
         app: &tauri::AppHandle,
         port: u16,
         data_dir: &std::path::PathBuf,
-        mcp_server_path: &std::path::PathBuf,
+        mcp_server_path: Option<&Path>,
     ) -> Result<String, String> {
-        // Step 1: Spawn MCP proxy
-        let mcp_proxy = McpProxy::new()
-            .map_err(|e| format!("Failed to create MCP proxy: {}", e))?;
+        // Step 1: Create MCP proxy and spawn server only if path exists
+        if let Some(server_path) = mcp_server_path {
+            if server_path.exists() {
+                let mcp_proxy = McpProxy::new()
+                    .map_err(|e| format!("Failed to create MCP proxy: {}", e))?;
 
-        let proxy_url = mcp_proxy.proxy_url();
+                let proxy_url = mcp_proxy.proxy_url();
 
-        // Step 2: Spawn MCP server if available
-        if !mcp_server_path.as_os_str().is_empty() && mcp_server_path.exists() {
-            // file_read is scoped to the app's own data directory (uploads +
-            // artifacts) — never the whole filesystem. See CRIT-003 in the
-            // audit: an unset allowlist previously meant "read anything".
-            let uploads_dir = data_dir.join("uploads");
-            let artifacts_dir = data_dir.join("artifacts");
-            let file_allowlist = std::env::join_paths([&uploads_dir, &artifacts_dir])
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+                // file_read is scoped to the app's own data directory (uploads +
+                // artifacts) — never the whole filesystem. See CRIT-003 in the
+                // audit: an unset allowlist previously meant "read anything".
+                let uploads_dir = data_dir.join("uploads");
+                let artifacts_dir = data_dir.join("artifacts");
+                let file_allowlist = std::env::join_paths([&uploads_dir, &artifacts_dir])
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
 
-            mcp_proxy.spawn_server(mcp_server_path, &file_allowlist)
-                .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
-            mcp_proxy.start_proxy()
-                .map_err(|e| format!("MCP proxy relay failed: {}", e))?;
-        } else {
-            eprintln!("Warning: MCP server not found at {:?}", mcp_server_path);
+                mcp_proxy.spawn_server(server_path, &file_allowlist)
+                    .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
+                mcp_proxy.start_proxy()
+                    .map_err(|e| format!("MCP proxy relay failed: {}", e))?;
+
+                self.mcp_proxy = Some(mcp_proxy);
+                self.mcp_proxy_url = Some(proxy_url.clone());
+            } else {
+                eprintln!("Warning: MCP server not found, Python will use in-process transport");
+            }
         }
 
-        // Step 3: Store MCP handle
-        self.mcp_proxy = Some(mcp_proxy);
-        self.mcp_proxy_url = Some(proxy_url.clone());
-
-        // Step 4: Spawn Python with OBRENNA_MCP_PROXY_URL in child env
-        let child = self.spawn_python_sidecar(app, port, data_dir, &proxy_url)?;
+        // Step 2: Spawn Python sidecar
+        let child = self.spawn_python_sidecar(app, port, data_dir)?;
         self.python_sidecar = Some(child);
 
-        // Store app handle for event emission
+        // Step 3: Store app handle for event emission
         {
             let mut handle_opt = self.app_handle.lock().unwrap();
             *handle_opt = Some(app.clone());
         }
 
-        // Step 5: Start stdout reader thread
+        // Step 4: Start stdout reader thread
         let app_clone = app.clone();
         let python_child = self.python_sidecar.as_mut().unwrap().stdout.take();
         if let Some(stdout) = python_child {
@@ -103,7 +104,7 @@ impl BackendProcesses {
             });
         }
 
-        Ok(proxy_url)
+        Ok(self.mcp_proxy_url.clone().unwrap_or_default())
     }
 
     fn spawn_python_sidecar(
@@ -111,7 +112,6 @@ impl BackendProcesses {
         app: &tauri::AppHandle,
         port: u16,
         data_dir: &std::path::PathBuf,
-        proxy_url: &str,
     ) -> Result<Child, String> {
         let resource_dir = app.path().resource_dir().map_err(|e| format!("failed to get resource dir: {}", e))?;
         let backend_exe = resource_dir.join("backend").join(executable_name("obrenna-server"));
@@ -140,13 +140,16 @@ impl BackendProcesses {
             cmd.arg(&backend_script).current_dir(root.join("backend"));
         }
 
-        cmd.env("OBRENNA_DATA_DIR", data_dir_str)
+        let mut cmd = cmd.env("OBRENNA_DATA_DIR", data_dir_str)
             .env("OBRENNA_PORT", port.to_string())
             .env("OBRENNA_DESKTOP", "1")
-            .env("OBRENNA_MCP_PROXY_URL", proxy_url)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if let Some(ref url) = self.mcp_proxy_url {
+            cmd = cmd.env("OBRENNA_MCP_PROXY_URL", url);
+        }
 
         let mut child = cmd
             .spawn()

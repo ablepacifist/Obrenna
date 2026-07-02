@@ -27,6 +27,17 @@ from app.routers import (
 async def lifespan(app: FastAPI):
     init_db()
     yield
+    # Close the shared model-runtime httpx client pool (Fix #3). The Python
+    # sidecar runs this same FastAPI app via uvicorn, so this teardown covers
+    # every production entry path.
+    from app.model_runtime.client_pool import close_model_client
+    await close_model_client()
+    # Close the persistent MCP client connections (Fix #6).
+    from app.mcp.client import get_mcp_manager
+    await get_mcp_manager().shutdown()
+    # Close pooled knowledge-pack sqlite3 connections (Fix #7).
+    from app.services.memory import reset_knowledge_retriever
+    reset_knowledge_retriever()
 
 
 app = FastAPI(title="Obrenna", version="0.1.0", lifespan=lifespan)

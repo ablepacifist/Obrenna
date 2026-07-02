@@ -38,31 +38,46 @@
     "allowed": [
       {
         "name": "get_time",
-        "description": "Return local system time and timezone offset.",
-        "category": "utility"
+        "description": "Return local system date and time, including year, ISO date/datetime, weekday, timezone, and timezone offset.",
+        "category": "utility",
+        "is_read_only": true,
+        "depends_on": [],
+        "requires_user_prompt": false
       },
       {
         "name": "calculator",
         "description": "Evaluate a sandboxed arithmetic expression. Never eval, AST execution, or JS Function.",
         "category": "utility",
-        "sandbox": "expression_only"
+        "sandbox": "expression_only",
+        "is_read_only": true,
+        "depends_on": [],
+        "requires_user_prompt": false
       },
       {
         "name": "file_read",
         "description": "Read file contents by resolved file ID or allowlisted path. Reject arbitrary absolute paths.",
         "category": "file_access",
-        "allowlist_mode": "file_id_or_allowlist_only"
+        "allowlist_mode": "file_id_or_allowlist_only",
+        "is_read_only": true,
+        "depends_on": [],
+        "requires_user_prompt": false
       },
       {
         "name": "web_search",
         "description": "Return search snippets with source URLs only. No full-page fetch.",
-        "category": "web"
+        "category": "web",
+        "is_read_only": true,
+        "depends_on": [],
+        "requires_user_prompt": false
       },
       {
         "name": "get_location",
         "description": "Return current geographic location. Routes through Rust permission broker.",
         "category": "sensitive",
-        "requires_permission": true
+        "requires_permission": true,
+        "is_read_only": false,
+        "depends_on": [],
+        "requires_user_prompt": false
       }
     ],
     "restricted_worker_tools": ["spawn_worker"],

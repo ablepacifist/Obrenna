@@ -137,6 +137,37 @@ async def test_non_ollama_does_not_send_reasoning_controls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_keep_alive_sent_when_provided(monkeypatch):
+    """A non-None keep_alive is forwarded verbatim in the Ollama payload."""
+    captured: dict = {}
+    lines = _sse({"choices": [{"delta": {"content": "ok"}}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, captured))
+
+    async for _ in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", keep_alive=-1,
+    ):
+        pass
+
+    assert captured["keep_alive"] == -1
+
+
+@pytest.mark.asyncio
+async def test_keep_alive_omitted_when_none(monkeypatch):
+    """keep_alive=None must NOT add the field — preserve the runtime default."""
+    captured: dict = {}
+    lines = _sse({"choices": [{"delta": {"content": "ok"}}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, captured))
+
+    async for _ in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}], model="qwen3:8b",
+    ):
+        pass
+
+    assert "keep_alive" not in captured
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "delta",
     [
@@ -168,6 +199,36 @@ async def test_message_form_reasoning_emits_thinking_delta(monkeypatch):
     )]
 
     assert events[0] == {"type": "thinking_delta", "content": "full reasoning"}
+
+
+@pytest.mark.asyncio
+async def test_ollama_eval_counters_yielded_as_terminal_stream_stats(monkeypatch):
+    # Ollama emits prompt_eval_count / eval_count (and friends) at the top level
+    # of the terminal stream chunk. The runtime needs these as a single terminal
+    # event to record prefill/decode telemetry, and the Ollama payload must carry
+    # stream_options.include_usage so the endpoint emits usage at all.
+    chunk = {
+        "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
+        "prompt_eval_count": 12,
+        "prompt_eval_duration": 0.045,
+        "eval_count": 3,
+        "eval_duration": 0.030,
+    }
+    captured: dict = {}
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(_sse(chunk), captured))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}], model="qwen3:8b",
+    )]
+
+    stats_events = [e for e in events if e["type"] == "stream_stats"]
+    assert len(stats_events) == 1
+    assert stats_events[0]["stats"]["prompt_eval_count"] == 12
+    assert stats_events[0]["stats"]["eval_count"] == 3
+    # stream_stats is the terminal event (after the token).
+    assert events[-1] == stats_events[0]
+    # The stream_options include_usage flag is sent on the wire for Ollama.
+    assert captured.get("stream_options") == {"include_usage": True}
 
 
 @pytest.mark.asyncio
@@ -295,6 +356,31 @@ async def test_prompt_json_envelope_synthesizes_tool_call(monkeypatch):
     assert call["function"]["name"] == "get_time"
     assert call["function"]["arguments"] == {}
     assert call["id"].startswith("call_")
+
+
+@pytest.mark.asyncio
+async def test_prompt_json_direct_action_web_search_synthesizes_tool_call(monkeypatch):
+    # Regression: small models sometimes emitted this direct-action shorthand,
+    # which used to leak to chat as plain JSON instead of executing web_search.
+    envelope = '{"action":"web_search","query":"what year is it","max_results":5}'
+    lines = _sse({"choices": [{"delta": {"content": envelope}, "finish_reason": "stop"}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "search"}],
+        model="qwen3:8b", tool_call_mode="prompt_json",
+    )]
+
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "web_search" not in tokens
+    tc = [e for e in events if e["type"] == "tool_calls_done"]
+    assert len(tc) == 1
+    call = tc[0]["calls"][0]
+    assert call["function"]["name"] == "web_search"
+    assert call["function"]["arguments"] == {
+        "query": "what year is it",
+        "max_results": 5,
+    }
 
 
 @pytest.mark.asyncio

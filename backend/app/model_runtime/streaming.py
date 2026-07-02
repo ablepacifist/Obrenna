@@ -13,9 +13,8 @@ import re
 import uuid
 from typing import Any, AsyncIterator
 
-import httpx
-
 from .client import _run
+from .client_pool import get_model_client
 from .config import RuntimeConfig
 
 logger = logging.getLogger(__name__)
@@ -54,6 +53,7 @@ def _is_tool_call_chunk(chunk: dict[str, Any]) -> bool:
 # envelope itself from the token stream so it never reaches the UI as text.
 
 _ENVELOPE_MARKER = '{"action"'
+_DIRECT_ACTION_TOOL_NAMES = {"get_time", "calculator", "file_read", "web_search", "get_location"}
 # Characters held back while a marker may be forming at the tail of the buffer.
 # Must exceed len('{"action":"tool_call"') so a partial marker is never flushed.
 _PROMPT_JSON_HOLDACK = 24
@@ -151,13 +151,25 @@ class PromptJsonToolScanner:
             self._flushed = end
             return (pre + slice_, None)
 
-        if not isinstance(obj, dict) or obj.get("action") != "tool_call":
+        if not isinstance(obj, dict):
             # Valid JSON but not a tool call — emit as text, keep scanning.
             self._flushed = end
             return (pre + slice_, None)
 
-        tool = obj.get("tool", "")
-        args = obj.get("arguments", {})
+        action = obj.get("action")
+        if action == "tool_call":
+            tool = obj.get("tool", "")
+            args = obj.get("arguments", {})
+        elif isinstance(action, str) and action in _DIRECT_ACTION_TOOL_NAMES:
+            # Compatibility for small models that emit {"action":"web_search", ...}
+            # instead of the canonical prompt-JSON tool_call envelope.
+            tool = action
+            args = {k: v for k, v in obj.items() if k != "action"}
+        else:
+            # Valid JSON but not a tool call — emit as text, keep scanning.
+            self._flushed = end
+            return (pre + slice_, None)
+
         if isinstance(args, str):
             try:
                 args = json.loads(args)
@@ -187,6 +199,7 @@ async def chat_completion_stream(
     tools: list[dict] | None = None,
     think: bool = False,
     tool_call_mode: str = "openai_native",
+    keep_alive: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream tokens from an OpenAI-compatible endpoint.
 
@@ -225,138 +238,177 @@ async def chat_completion_stream(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    # Ollama model residency. ``-1`` pins the model in VRAM/RAM for the whole
+    # session (orchestrator); a duration string (e.g. ``"5m"``) keeps a lazy
+    # role loaded briefly after its last call then evicts it. ``None`` = omit
+    # the field entirely (preserve the runtime's default behaviour). The value
+    # is sourced from hardware_catalog.json via the resolver — never hardcoded
+    # in the runtime.
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
     # Ollama OpenAI-compatible reasoning control. Never send native `think`/
     # `options.think` to /v1/chat/completions — only the OpenAI-style field.
     if config.runtime_kind == "ollama":
         payload["reasoning_effort"] = "medium" if think else "none"
+        # Ask Ollama's OpenAI-compatible endpoint to emit a ``usage`` object (and
+        # the non-standard top-level eval counters) in the final stream chunk so
+        # the runtime can record prefill/decode telemetry. Harmless on non-Ollama
+        # runtimes that ignore unknown fields; Ollama honours it.
+        payload["stream_options"] = {"include_usage": True}
 
     logger.info("STREAMING REQUEST: model=%s url=%s messages_count=%d temperature=%.1f tools=%s",
                 chosen, config.url("chat/completions"), len(messages), temperature,
                 "yes" if tools else "no")
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream(
-            "POST",
-            config.url("chat/completions"),
-            headers=config.headers,
-            json=payload,
-        ) as resp:
-            resp.raise_for_status()
-            logger.info("STREAMING RESPONSE: status=%d", resp.status_code)
+    # Ollama eval/usage counters. These appear at the top level of the terminal
+    # stream chunk (sibling of ``choices``); capture whichever keys are present
+    # and yield them once as a terminal ``stream_stats`` event for the runtime to
+    # record. Non-Ollama runtimes leave this empty.
+    _OLLAMA_STAT_KEYS = (
+        "prompt_eval_count", "prompt_eval_duration",
+        "eval_count", "eval_duration",
+        "total_duration", "load_duration", "prompt_eval_rate",
+    )
+    stats: dict[str, Any] = {}
 
-            # Track tool_calls by index across SSE chunks
-            tool_calls_buffer: dict[int, dict[str, Any]] = {}
-            # Prompt-JSON envelope scanner (only active for non-native models).
-            prompt_json_scanner = PromptJsonToolScanner() if tool_call_mode == "prompt_json" else None
+    client = get_model_client()
+    async with client.stream(
+        "POST",
+        config.url("chat/completions"),
+        headers=config.headers,
+        json=payload,
+        timeout=timeout,
+    ) as resp:
+        resp.raise_for_status()
+        logger.info("STREAMING RESPONSE: status=%d", resp.status_code)
 
-            async for line in resp.aiter_lines():
-                if not line or line == "data: [DONE]":
-                    continue
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:]  # strip "data: " prefix
-                if not data_str.strip():
-                    continue
-                try:
-                    chunk = json.loads(data_str)
-                    choices = chunk.get("choices", [])
-                    for choice in choices:
-                        delta = choice.get("delta", {})
-                        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        # Track tool_calls by index across SSE chunks
+        tool_calls_buffer: dict[int, dict[str, Any]] = {}
+        # Prompt-JSON envelope scanner (only active for non-native models).
+        prompt_json_scanner = PromptJsonToolScanner() if tool_call_mode == "prompt_json" else None
 
-                        # Reasoning / thinking (extracted before content so it
-                        # streams into the ephemeral thinking pane, not the answer).
-                        thinking = _first_non_empty_str(
-                            delta.get("reasoning_content"),
-                            delta.get("reasoning"),
-                            delta.get("thinking"),
-                            message.get("reasoning_content"),
-                            message.get("reasoning"),
-                            message.get("thinking"),
-                        )
-                        if thinking:
-                            yield {"type": "thinking_delta", "content": thinking}
-                            continue
+        async for line in resp.aiter_lines():
+            if not line or line == "data: [DONE]":
+                continue
+            if not line.startswith("data: "):
+                continue
+            data_str = line[6:]  # strip "data: " prefix
+            if not data_str.strip():
+                continue
+            try:
+                chunk = json.loads(data_str)
+                # Capture Ollama eval/usage counters. The terminal chunk
+                # carries the totals; later values overwrite earlier ones so
+                # the last-seen (final) value wins. ``usage`` is the
+                # OpenAI-standard fallback when the raw eval keys are absent.
+                for key in _OLLAMA_STAT_KEYS:
+                    if key in chunk:
+                        stats[key] = chunk[key]
+                if isinstance(chunk.get("usage"), dict):
+                    stats["usage"] = chunk["usage"]
+                choices = chunk.get("choices", [])
+                for choice in choices:
+                    delta = choice.get("delta", {})
+                    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
 
-                        # Text content
-                        content = delta.get("content")
-                        if content:
-                            if prompt_json_scanner is not None:
-                                text, tool_event = prompt_json_scanner.feed(content)
-                                if text:
-                                    yield {"type": "token", "content": text}
-                                if tool_event is not None:
-                                    yield tool_event
-                            else:
-                                yield {"type": "token", "content": content}
+                    # Reasoning / thinking (extracted before content so it
+                    # streams into the ephemeral thinking pane, not the answer).
+                    thinking = _first_non_empty_str(
+                        delta.get("reasoning_content"),
+                        delta.get("reasoning"),
+                        delta.get("thinking"),
+                        message.get("reasoning_content"),
+                        message.get("reasoning"),
+                        message.get("thinking"),
+                    )
+                    if thinking:
+                        yield {"type": "thinking_delta", "content": thinking}
+                        continue
 
-                        # Tool calls
-                        tool_calls = delta.get("tool_calls")
-                        if tool_calls:
-                            for tc in tool_calls:
-                                idx = tc.get("index", 0)
-                                if idx not in tool_calls_buffer:
-                                    tool_calls_buffer[idx] = {
-                                        "id": "",
-                                        "type": "function",
-                                        "function": {"name": "", "arguments": ""},
-                                    }
-                                tc_buf = tool_calls_buffer[idx]
-                                if tc.get("id"):
-                                    tc_buf["id"] = tc["id"]
-                                if tc.get("type"):
-                                    tc_buf["type"] = tc["type"]
-                                func = tc.get("function")
-                                if func:
-                                    if func.get("name"):
-                                        tc_buf["function"]["name"] = func["name"]
-                                    if func.get("arguments"):
-                                        tc_buf["function"]["arguments"] += func["arguments"]
+                    # Text content
+                    content = delta.get("content")
+                    if content:
+                        if prompt_json_scanner is not None:
+                            text, tool_event = prompt_json_scanner.feed(content)
+                            if text:
+                                yield {"type": "token", "content": text}
+                            if tool_event is not None:
+                                yield tool_event
+                        else:
+                            yield {"type": "token", "content": content}
 
-                        # Finish detection
-                        finish_reason = choice.get("finish_reason")
-                        if finish_reason == "tool_calls" and tool_calls_buffer:
-                            # Aggregate complete tool calls
-                            calls = []
-                            for idx in sorted(tool_calls_buffer.keys()):
-                                tc = tool_calls_buffer[idx]
-                                args = tc["function"]["arguments"]
-                                try:
-                                    args_dict = json.loads(args)
-                                except (json.JSONDecodeError, TypeError):
-                                    args_dict = args
-                                calls.append({
-                                    "id": tc["id"],
-                                    "type": tc["type"],
-                                    "function": {
-                                        "name": tc["function"]["name"],
-                                        "arguments": args_dict,
-                                    },
-                                })
-                            tool_calls_buffer.clear()
-                            yield {"type": "tool_calls_done", "calls": calls}
-                        elif finish_reason == "stop":
-                            # Stream ended without tool calls — drop any partial
-                            # buffer. Do NOT clear on None: that is the value on
-                            # intermediate chunks, and tool-call argument fragments
-                            # must accumulate across chunks until finish_reason
-                            # "tool_calls" flushes them.
-                            tool_calls_buffer.clear()
-                            if prompt_json_scanner is not None:
-                                tail = prompt_json_scanner.flush()
-                                if tail:
-                                    yield {"type": "token", "content": tail}
+                    # Tool calls
+                    tool_calls = delta.get("tool_calls")
+                    if tool_calls:
+                        for tc in tool_calls:
+                            idx = tc.get("index", 0)
+                            if idx not in tool_calls_buffer:
+                                tool_calls_buffer[idx] = {
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            tc_buf = tool_calls_buffer[idx]
+                            if tc.get("id"):
+                                tc_buf["id"] = tc["id"]
+                            if tc.get("type"):
+                                tc_buf["type"] = tc["type"]
+                            func = tc.get("function")
+                            if func:
+                                if func.get("name"):
+                                    tc_buf["function"]["name"] = func["name"]
+                                if func.get("arguments"):
+                                    tc_buf["function"]["arguments"] += func["arguments"]
 
-                except json.JSONDecodeError:
-                    logger.warning("Failed to parse SSE chunk: %s", data_str[:100])
-                    continue
+                    # Finish detection
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason == "tool_calls" and tool_calls_buffer:
+                        # Aggregate complete tool calls
+                        calls = []
+                        for idx in sorted(tool_calls_buffer.keys()):
+                            tc = tool_calls_buffer[idx]
+                            args = tc["function"]["arguments"]
+                            try:
+                                args_dict = json.loads(args)
+                            except (json.JSONDecodeError, TypeError):
+                                args_dict = args
+                            calls.append({
+                                "id": tc["id"],
+                                "type": tc["type"],
+                                "function": {
+                                    "name": tc["function"]["name"],
+                                    "arguments": args_dict,
+                                },
+                            })
+                        tool_calls_buffer.clear()
+                        yield {"type": "tool_calls_done", "calls": calls}
+                    elif finish_reason == "stop":
+                        # Stream ended without tool calls — drop any partial
+                        # buffer. Do NOT clear on None: that is the value on
+                        # intermediate chunks, and tool-call argument fragments
+                        # must accumulate across chunks until finish_reason
+                        # "tool_calls" flushes them.
+                        tool_calls_buffer.clear()
+                        if prompt_json_scanner is not None:
+                            tail = prompt_json_scanner.flush()
+                            if tail:
+                                yield {"type": "token", "content": tail}
 
-            # Defensive final flush: some streams end with [DONE] and no explicit
-            # finish_reason. Emit any text the prompt-JSON scanner is still holding.
-            if prompt_json_scanner is not None:
-                tail = prompt_json_scanner.flush()
-                if tail:
-                    yield {"type": "token", "content": tail}
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse SSE chunk: %s", data_str[:100])
+                continue
+
+        # Defensive final flush: some streams end with [DONE] and no explicit
+        # finish_reason. Emit any text the prompt-JSON scanner is still holding.
+        if prompt_json_scanner is not None:
+            tail = prompt_json_scanner.flush()
+            if tail:
+                yield {"type": "token", "content": tail}
+
+        # Yield the captured Ollama eval/usage counters as a single terminal
+        # event. Empty on non-Ollama runtimes or when no counters were present.
+        if stats:
+            yield {"type": "stream_stats", "stats": stats}
 
 
 # ── Sync wrapper for use from sync contexts ──────────────────────────────────

@@ -52,6 +52,12 @@ def run_migrations(db: Session) -> None:
                 text("ALTER TABLE chats ADD COLUMN summarized_upto_turn_index INTEGER NOT NULL DEFAULT -1")
             )
 
+        # --- chats.rolling_summary_version (Fix #7) ---
+        if not _column_exists(db, "chats", "rolling_summary_version"):
+            db.execute(
+                text("ALTER TABLE chats ADD COLUMN rolling_summary_version INTEGER NOT NULL DEFAULT 1")
+            )
+
         # --- chat_turns table ---
         if not _table_exists(db, "chat_turns"):
             db.execute(text("""
@@ -81,7 +87,34 @@ def run_migrations(db: Session) -> None:
                     user_locked INTEGER NOT NULL DEFAULT 0,
                     deleted_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL,
-                    updated_at TIMESTAMP NOT NULL
+                    updated_at TIMESTAMP NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1
+                )
+            """))
+        else:
+            # Add per-row version column to pre-existing tables (Fix #7).
+            if not _column_exists(db, "memory_facts", "version"):
+                db.execute(
+                    text("ALTER TABLE memory_facts ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+                )
+
+        # --- account_memory_version table (Fix #7) ---
+        if not _table_exists(db, "account_memory_version"):
+            db.execute(text("""
+                CREATE TABLE account_memory_version (
+                    account_id TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    updated_at TIMESTAMP
+                )
+            """))
+
+        # --- chat_memory_version table (Fix #7) ---
+        if not _table_exists(db, "chat_memory_version"):
+            db.execute(text("""
+                CREATE TABLE chat_memory_version (
+                    chat_id TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    updated_at TIMESTAMP
                 )
             """))
 

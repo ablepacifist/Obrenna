@@ -10,6 +10,7 @@ This module orchestrates a single chat turn:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from typing import Any, AsyncIterator
 
 from sqlalchemy.orm import Session
 
-from ..mcp.client import MCPClient, InMemoryTransport
+from ..mcp.client import InMemoryTransport
 from ..mcp.tools import list_tools, call_tool, tool_def_by_name
 from ..model_runtime.config import RuntimeConfig
 from ..model_runtime.streaming import chat_completion_stream
@@ -32,6 +33,7 @@ from ..services.architecture_config import (
 from ..services.hardware_resolver import choose_and_validate, build_fingerprint, build_live
 from ..services.hardware_resolver import HardwareFingerprint, LiveFreeResources
 from ..services.memory import assemble_context, MemoryContext
+from ..services.telemetry import write_turn_telemetry
 from ..services.runtime_context import (
     build_runtime_context_message,
     build_relative_date_hint_message,
@@ -100,6 +102,30 @@ class ResolvedPlan:
     def utility_model(self) -> str:
         return self.utility.get("model", "")
 
+    @property
+    def orchestrator_keep_alive(self):
+        """Ollama keep_alive for the orchestrator (``-1`` = pin for the session).
+
+        Sourced from the catalog via the resolver (never hardcoded here) so the
+        orchestrator stays resident in VRAM/RAM across turns and avoids
+        repeated cold-loads. ``None`` means the resolver didn't populate it.
+        """
+        return self.orchestrator.get("keep_alive")
+
+    @property
+    def utility_keep_alive(self):
+        """Ollama keep_alive for utility workers (e.g. ``"5m"`` — evictable).
+
+        Lazy residency: keep a worker loaded briefly after its last call, then
+        evict to free RAM/VRAM for the orchestrator. ``None`` = don't send it.
+        """
+        return self.utility.get("keep_alive")
+
+    @property
+    def summarizer_keep_alive(self):
+        """Ollama keep_alive for the summarizer (e.g. ``"10m"`` — evictable)."""
+        return self.summarizer.get("keep_alive")
+
 
 def build_resolved_plan(resolver_result: dict[str, Any]) -> ResolvedPlan:
     """Create a ResolvedPlan from the hardware resolver output."""
@@ -145,19 +171,54 @@ class TurnTelemetry:
     model_done_at: float | None = None
     done_at: float | None = None
     token_count: int = 0
+    # ── Performance-pass instrumentation ───────────────────────────────────
+    # Wall-clock around assemble_context() so retrieval caching (Fix #7) is
+    # measurable.
+    memory_context_runtime_ms: int | None = None
+    # Per-tool-call wall-clock (ms), in execution order.
+    tool_runtimes_ms: list[int] = None  # type: ignore[assignment]
+    tool_round_count: int = 0
+    # Total typed stream events emitted this turn (for coalescer before/after).
+    stream_event_count: int = 0
+    # Per-round Ollama eval counters captured from the terminal stream chunk.
+    # Round 1 = first orchestrator call; keys: prompt_eval_count,
+    # prompt_eval_duration, eval_count, eval_duration, usage.
+    ollama_stats: dict[int, dict[str, Any]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.tool_runtimes_ms is None:
+            self.tool_runtimes_ms = []
+        if self.ollama_stats is None:
+            self.ollama_stats = {}
 
     def mark_event(self) -> None:
         if self.first_event_at is None:
             self.first_event_at = time.perf_counter()
+        self.stream_event_count += 1
 
     def mark_token(self) -> None:
         if self.first_token_at is None:
             self.first_token_at = time.perf_counter()
         self.token_count += 1
 
+    def record_tool_runtime(self, elapsed_s: float) -> None:
+        self.tool_runtimes_ms.append(int(elapsed_s * 1000))
+
+    def record_ollama_stats(self, round_no: int, stats: dict[str, Any]) -> None:
+        if stats:
+            self.ollama_stats[round_no] = stats
+
     def summary(self) -> dict[str, Any]:
         end = self.done_at or time.perf_counter()
         total = end - self.started_at
+        # Derived prefix-cache indicator: if round 2 prefilled materially fewer
+        # tokens than round 1, the Ollama prefix cache is hitting across rounds.
+        prefix_cache_hit: bool | None = None
+        if len(self.ollama_stats) >= 2:
+            r1 = self.ollama_stats.get(1, {}).get("prompt_eval_count")
+            r2 = self.ollama_stats.get(2, {}).get("prompt_eval_count")
+            if isinstance(r1, (int, float)) and isinstance(r2, (int, float)) and r1 > 0:
+                prefix_cache_hit = r2 < r1
         return {
             "time_to_first_event_ms": int(((self.first_event_at or end) - self.started_at) * 1000),
             "time_to_first_token_ms": (
@@ -183,6 +244,12 @@ class TurnTelemetry:
             ),
             "token_count": self.token_count,
             "tokens_per_second": round(self.token_count / total, 2) if total > 0 else None,
+            "memory_context_runtime_ms": self.memory_context_runtime_ms,
+            "tool_round_count": self.tool_round_count,
+            "tool_runtime_ms": self.tool_runtimes_ms,
+            "stream_event_count": self.stream_event_count,
+            "prefix_cache_hit": prefix_cache_hit,
+            "ollama_stats": self.ollama_stats,
         }
 
 
@@ -269,6 +336,7 @@ async def orchestrate_turn(
         else:
             yield tracked(phase_event(chat_id, msg_id, "resolving_context", "Checking context"))
         yield tracked(phase_event(chat_id, msg_id, "memory", "Loading memory"))
+        _mem_start = time.perf_counter()
         memory_ctx = assemble_context(
             db,
             type("Chat", (), {"id": chat_id})(),
@@ -276,11 +344,26 @@ async def orchestrate_turn(
             memory_mode="exp0_recency_only" if exp0_fast_path else "default",
             max_context_chars=4000 if exp0_fast_path else None,
         )
-        system_parts = memory_ctx.to_messages()
+        telemetry.memory_context_runtime_ms = int((time.perf_counter() - _mem_start) * 1000)
+        # Fix #1: split the orchestrator's system content into a static,
+        # cross-turn cacheable band (Band A) and a dynamic per-turn memory
+        # band (Band B). The static band leads so Ollama's prefix cache
+        # reuses it across turns; the dynamic, version-stamped band follows.
+        static_parts = memory_ctx.to_static_messages()
+        dynamic_parts = memory_ctx.to_dynamic_messages()
     except Exception as exc:
         logger.warning("Memory context assembly failed: %s", exc)
-        system_parts = []
+        static_parts = []
+        dynamic_parts = []
     telemetry.context_done_at = time.perf_counter()
+    # The runtime only needs the DB for initial context assembly. End the
+    # read transaction before slow worker/model/tool calls so SQLite does not
+    # keep a shared lock open for the duration of generation.
+    try:
+        if db is not None and hasattr(db, "rollback"):
+            db.rollback()
+    except Exception as exc:
+        logger.debug("Could not close context assembly DB transaction: %s", exc)
 
     # Step 2: Optional worker dispatch
     evidence_summary = ""
@@ -295,7 +378,7 @@ async def orchestrate_turn(
     if use_workers and previous_messages:
         yield tracked(phase_event(chat_id, msg_id, "workers", "Preparing helper tasks"))
         worker_tasks, system_prompt = _prepare_worker_tasks(
-            user_message, system_parts, resolved_plan
+            user_message, dynamic_parts, resolved_plan
         )
         if worker_tasks:
             worker_results = await dispatch_workers(
@@ -303,6 +386,7 @@ async def orchestrate_turn(
                 helper_count=resolved_plan.helper_count,
                 timeout_seconds=worker_timeout,
                 workers_enabled=workers_enabled,
+                keep_alive=resolved_plan.utility_keep_alive,
             )
             evidence_pack = EvidencePack(
                 entries=[r.to_evidence_entry() for r in worker_results],
@@ -311,6 +395,7 @@ async def orchestrate_turn(
             if use_summarizer and resolved_plan.summarizer_model:
                 summary_text, success = await summarize_into_evidence_pack(
                     config, resolved_plan.summarizer_model, evidence_pack,
+                    keep_alive=resolved_plan.summarizer_keep_alive,
                 )
                 if success:
                     evidence_summary = summary_text
@@ -340,7 +425,7 @@ async def orchestrate_turn(
     yield tracked(phase_event(chat_id, msg_id, "runtime_context", "Checking local date and time"))
 
     orchestrator_messages = _build_orchestrator_messages(
-        user_message, system_parts, evidence_summary, previous_messages or [],
+        user_message, static_parts, dynamic_parts, evidence_summary, previous_messages or [],
         tool_call_mode=tool_call_mode, allowed_tools=allowed_tools,
     )
     # DEBUG, not INFO: message content is private local content.
@@ -348,33 +433,41 @@ async def orchestrate_turn(
 
     # Step 4: Prepare MCP client and tool definitions
     import os
-    from ..mcp.client import create_mcp_client
+    from ..mcp.client import get_mcp_manager, make_tcp_transport_factory
     from ..mcp.tools import acall_tool as _acall_tool
 
     # Check for MCP proxy URL (set by Rust Tauri when MCP server is available)
     proxy_url = os.getenv("OBRENNA_MCP_PROXY_URL")
 
-    if proxy_url:
-        # Use TCP transport to connect to Rust MCP proxy
-        mcp_client = create_mcp_client(proxy_url)
-    else:
-        # Fallback: use in-process transport for dev/testing. Wrap the raw
-        # tool result in the same {content:[{type,text}], isError} envelope
-        # the stdio server produces, so MCPClient.call_tool's parsing path
-        # (which expects that shape) behaves identically to production.
-        async def _dev_tools_call(params: dict) -> dict:
-            result = await _acall_tool(params["name"], params.get("arguments", {}))
-            return {
-                "content": [{"type": "text", "text": json.dumps(result)}],
-                "isError": bool(result.get("error", False)) if isinstance(result, dict) else False,
-            }
+    # Fix #6: one persistent MCP client per server for the process lifetime,
+    # managed by MCPClientManager. The transport factory (re)builds the
+    # transport on connect/reconnect; the manager caches the client and the
+    # tools/list result so the per-turn initialize()+tools/list handshake only
+    # happens once across the whole session.
+    async def _dev_tools_call(params: dict) -> dict:
+        result = await _acall_tool(params["name"], params.get("arguments", {}))
+        return {
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "isError": bool(result.get("error", False)) if isinstance(result, dict) else False,
+        }
 
+    def _dev_transport_factory():
+        # In-process transport for dev/testing. Wrap the raw tool result in
+        # the same {content:[{type,text}], isError} envelope the stdio server
+        # produces, so MCPClient.call_tool's parsing path behaves identically
+        # to production. Handlers are stateless; registering per (re)build is
+        # safe and cheap.
         transport = InMemoryTransport()
         transport.register_handler("tools/list", lambda p: {"tools": list_tools()})
         transport.register_handler("tools/call", _dev_tools_call)
-        mcp_client = MCPClient(transport)
+        return transport
 
-    await mcp_client.initialize()
+    if proxy_url:
+        transport_factory = make_tcp_transport_factory(proxy_url)
+    else:
+        transport_factory = _dev_transport_factory
+
+    mcp_client = await get_mcp_manager().connect("obrenna-mcp", transport_factory)
 
     # Native tool calling sends OpenAI tool definitions via the `tools` field;
     # prompt-JSON relies on the contract injected into the messages and the
@@ -387,12 +480,15 @@ async def orchestrate_turn(
     # Step 5: Stream orchestrator response with tool support
     stream_timeout = orchestration_cfg.get("worker_timeout_seconds", 12) * 10
     tool_round = 0
+    finalization_round = False
+    last_tool_payloads: list[tuple[str, str]] = []
     all_tokens = []
 
     yield tracked(phase_event(chat_id, msg_id, "model", "Writing response"))
 
-    while tool_round < max_tool_rounds:
+    while tool_round < max_tool_rounds + 1:
         tool_round += 1
+        telemetry.tool_round_count = tool_round
         detected_tool_calls = []
 
         try:
@@ -409,11 +505,16 @@ async def orchestrate_turn(
                 tools=model_tools,
                 think=thinking_enabled,
                 tool_call_mode=tool_call_mode,
+                keep_alive=resolved_plan.orchestrator_keep_alive,
             ):
                 if event.get("type") == "thinking_delta":
                     text = event.get("content", "") or event.get("text", "")
                     if text:
                         yield thinking_delta_event(chat_id, text=text, message_id=msg_id)
+                    continue
+                if event.get("type") == "stream_stats":
+                    # Terminal Ollama eval/usage counters for this round.
+                    telemetry.record_ollama_stats(tool_round, event.get("stats", {}))
                     continue
                 if event.get("type") == "token":
                     text = event.get("content", "")
@@ -424,6 +525,22 @@ async def orchestrate_turn(
                 elif event.get("type") == "tool_calls_done":
                     calls = event.get("calls", [])
                     if calls:
+                        if finalization_round:
+                            # The finalization pass exists only to turn already
+                            # collected tool evidence into natural language. If
+                            # the model tries to call tools again, do not run an
+                            # unbounded loop or finish empty; emit a safe answer
+                            # from the tool results we already have.
+                            logger.warning(
+                                "Model requested tools during forced finalization; using tool-result fallback."
+                            )
+                            fallback = _fallback_answer_from_tool_results(user_message, last_tool_payloads)
+                            if fallback:
+                                all_tokens.append(fallback)
+                                telemetry.mark_token()
+                                yield tracked(token_event(chat_id, text=fallback, message_id=msg_id))
+                            detected_tool_calls = []
+                            break
                         detected_tool_calls = calls
                         # Yield individual tool_call events for each tool
                         for tc in calls:
@@ -448,7 +565,9 @@ async def orchestrate_turn(
                         ))
 
                         # Execute tool calls
+                        _tool_start = time.perf_counter()
                         tool_results = await handle_tool_calls(calls, mcp_client)
+                        telemetry.record_tool_runtime(time.perf_counter() - _tool_start)
                         tool_round_results = 0
                         executed = []  # (tool_call, call_id, content)
                         for tc, result in zip(calls, tool_results):
@@ -474,6 +593,7 @@ async def orchestrate_turn(
                                 message_id=msg_id,
                             ))
                             executed.append((tc, call_id, content))
+                            last_tool_payloads.append((tool_name, content))
                             tool_round_results += 1
 
                         # Feed tool results back into conversation history. The
@@ -497,6 +617,14 @@ async def orchestrate_turn(
                                         fn.get("name", ""), content,
                                     ),
                                 })
+                            orchestrator_messages.append({
+                                "role": "user",
+                                "content": (
+                                    "If the TOOL_RESULT messages above are sufficient, answer the original user now "
+                                    "in natural language. Do not repeat the same tool call. Only call another tool "
+                                    "if the current results are clearly insufficient."
+                                ),
+                            })
                         else:
                             # Native OpenAI tool-call message format: the assistant
                             # message announcing the tool_calls MUST precede the
@@ -541,7 +669,15 @@ async def orchestrate_turn(
         # If we detected tool calls, continue loop to feed results back to model
         if detected_tool_calls:
             if tool_round >= max_tool_rounds:
-                logger.warning("Max tool rounds (%d) reached — sending answer without tool results", max_tool_rounds)
+                logger.warning("Max tool rounds (%d) reached — forcing final answer from tool results", max_tool_rounds)
+                finalization_round = True
+                orchestrator_messages.append({
+                    "role": "user",
+                    "content": (
+                        "Tool limit reached. You must now answer the original user using the TOOL_RESULT "
+                        "messages already provided. Do not output JSON. Do not call any more tools."
+                    ),
+                })
             # model_tools is set to None on next iteration (no tools on follow-up calls)
             model_tools = None
             all_tokens = []  # Reset for final answer tokens
@@ -551,6 +687,13 @@ async def orchestrate_turn(
         break
 
     logger.info("MODEL RESPONSE COMPLETE: total_tokens=%d", len(all_tokens))
+    if not all_tokens and last_tool_payloads:
+        logger.warning("No final model tokens after tool execution; emitting tool-result fallback.")
+        fallback = _fallback_answer_from_tool_results(user_message, last_tool_payloads)
+        if fallback:
+            all_tokens.append(fallback)
+            telemetry.mark_token()
+            yield tracked(token_event(chat_id, text=fallback, message_id=msg_id))
     telemetry.model_done_at = time.perf_counter()
     yield tracked(phase_event(chat_id, msg_id, "finalizing", "Finalizing"))
     telemetry.done_at = time.perf_counter()
@@ -558,6 +701,12 @@ async def orchestrate_turn(
     yield tracked(done_event(chat_id, message_id=msg_id))
     if os.getenv("OBRENNA_CHAT_TELEMETRY") == "1":
         yield tracked(telemetry_event(chat_id, msg_id, telemetry.summary()))
+    # Persist structured per-turn telemetry to a local JSONL sink so performance
+    # changes can be measured before/after. Never blocks or breaks the turn.
+    try:
+        write_turn_telemetry(chat_id, telemetry.summary())
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Telemetry sink write failed: %s", exc)
 
 
 def _prepare_worker_tasks(
@@ -595,7 +744,8 @@ def _prepare_worker_tasks(
 
 def _build_orchestrator_messages(
     user_message: str,
-    system_parts: list[dict],
+    static_parts: list[dict],
+    dynamic_parts: list[dict],
     evidence_summary: str,
     previous_messages: list[dict],
     *,
@@ -604,14 +754,38 @@ def _build_orchestrator_messages(
 ) -> list[dict]:
     """Build the full message sequence for the orchestrator.
 
-    For ``prompt_json`` models, a tool contract system message is injected so the
-    model knows the JSON envelope format for calling tools (it has no native
-    tool-call template). Native models learn tools via the OpenAI ``tools`` field
-    and need no prompt contract.
-    """
-    messages = list(system_parts)
+    Band layout (Fix #1) — the leading bands are byte-stable across turns so
+    Ollama's prefix/KV cache reuses them on turns 2+:
 
-    # Inject per-turn runtime clock context so small models stay grounded.
+      A.  Static orchestrator identity/role prompt (constant) — ``static_parts``.
+      A′. Prompt-JSON tool contract (constant within a tool set) — moved BEFORE
+          the dynamic memory so the cacheable prefix includes it.
+      B.  Per-turn memory block, version-stamped — ``dynamic_parts``.
+      C.  Runtime clock + relative-date hint (per-turn, dynamic).
+      D.  Worker evidence summary (per-turn, dynamic).
+      Then ``previous_messages`` and the final user message.
+
+    For ``prompt_json`` models, the tool contract (Band A′) teaches the JSON
+    envelope format for calling tools (no native tool-call template). Native
+    models learn tools via the OpenAI ``tools`` field and get no contract.
+    """
+    from ..services.memory import canonicalise_system_content
+
+    # Band A: static identity/role prompt (leads → prefix-cached across turns).
+    messages = list(static_parts)
+
+    # Band A′: prompt-JSON tool contract. Placed before the dynamic memory so
+    # the cacheable prefix includes it. Canonicalised to a byte-stable string.
+    if tool_call_mode == "prompt_json" and allowed_tools:
+        messages.append({
+            "role": "system",
+            "content": canonicalise_system_content(_build_prompt_json_tool_contract(allowed_tools)),
+        })
+
+    # Band B: per-turn memory block (version-stamped, dynamic).
+    messages.extend(dynamic_parts)
+
+    # Band C: per-turn runtime clock context so small models stay grounded.
     runtime_clock_msg = build_runtime_context_message(
         compact=(tool_call_mode == "prompt_json"),
     )
@@ -621,18 +795,11 @@ def _build_orchestrator_messages(
     if relative_date_hint:
         messages.append(relative_date_hint)
 
-    # Inject evidence summary if available
+    # Band D: evidence summary (per-turn, dynamic).
     if evidence_summary:
         messages.append({
             "role": "system",
             "content": f"**Worker evidence pack summary:**\n{evidence_summary}",
-        })
-
-    # Inject the prompt-JSON tool contract for non-native tool-calling models.
-    if tool_call_mode == "prompt_json" and allowed_tools:
-        messages.append({
-            "role": "system",
-            "content": _build_prompt_json_tool_contract(allowed_tools),
         })
 
     # Append previous conversation messages (if stateful turn)
@@ -669,7 +836,10 @@ def _build_prompt_json_tool_contract(allowed_tools: list[dict]) -> str:
     lines = [
         "You have access to tools. To call a tool, output a single JSON object on its own line in EXACTLY this format and nothing else on that line:",
         '{"action":"tool_call","tool":"<tool_name>","arguments":{<arguments as a JSON object>}}',
+        'Example: {"action":"tool_call","tool":"web_search","arguments":{"query":"latest AI news","max_results":5}}',
+        'Example: {"action":"tool_call","tool":"get_time","arguments":{}}',
         "After you emit a tool call, the system runs it and replies with a TOOL_RESULT(...) message. Then continue: call another tool with the same envelope, or answer the user directly without the envelope.",
+        "Do not use shortcuts like {\"action\":\"web_search\",...}; always use action=tool_call with tool and arguments.",
         "Do not mention or narrate that you are calling a tool — just emit the JSON object.",
         "",
         "Available tools:",
@@ -694,7 +864,95 @@ def _prompt_json_tool_result(tool: str, content: str) -> str:
     return f"TOOL_RESULT({tool}): {content}"
 
 
+def _fallback_answer_from_tool_results(
+    user_message: str,
+    tool_payloads: list[tuple[str, str]],
+) -> str:
+    """Build a non-empty answer if the model exhausts tool rounds.
+
+    This is a last-resort safety net for prompt-JSON models that repeatedly ask
+    for the same tool instead of converting the final TOOL_RESULT into prose.
+    The normal path is still a final model pass; this only prevents a completed
+    empty assistant message.
+    """
+    search_items: list[dict[str, Any]] = []
+    other_notes: list[str] = []
+
+    for tool_name, raw in tool_payloads[-5:]:
+        parsed: Any = None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+
+        candidates: list[Any] = []
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("results"), list):
+                candidates = parsed["results"]
+            elif isinstance(parsed.get("items"), list):
+                candidates = parsed["items"]
+        elif isinstance(parsed, list):
+            candidates = parsed
+
+        for item in candidates:
+            if isinstance(item, dict) and (item.get("title") or item.get("snippet")):
+                search_items.append(item)
+
+        if not candidates and raw:
+            other_notes.append(f"{tool_name}: {raw[:300]}")
+
+    if search_items:
+        lines = [
+            f"Here are the most relevant results I found for: {user_message}",
+            "",
+        ]
+        for item in search_items[:5]:
+            title = str(item.get("title") or "Result").strip()
+            snippet = str(item.get("snippet") or "").strip()
+            url = str(item.get("url") or "").strip()
+            line = f"- {title}"
+            if snippet:
+                line += f": {snippet}"
+            if url:
+                line += f" ({url})"
+            lines.append(line)
+        return "\n".join(lines)
+
+    if other_notes:
+        return "I gathered tool results, but the model did not produce a final response. Relevant tool output:\n\n" + "\n".join(
+            f"- {note}" for note in other_notes[:5]
+        )
+
+    return "I gathered tool results, but could not produce a final response."
+
+
 # ── MCP tool call handling ────────────────────────────────────────────────────
+
+
+def _is_gather_eligible(tool_name: str) -> bool:
+    """Whether a tool call may run concurrently with others in the same batch.
+
+    A call is gather-eligible only when the tool is read-only, takes no user
+    prompt, and declares no dependency on another tool's output. The flags come
+    from ``mcp/tools.py::TOOL_DEFS`` (mirrored in ``architecture_config.json``);
+    fail closed (serial) when the tool is unknown or any flag is missing.
+
+    ``get_location`` is ALWAYS serial: it is sensitive/broker-routed (the
+    broker is not actually wired today — keep the hard name exclusion).
+    """
+    if tool_name == "get_location":
+        return False
+    tdef = tool_def_by_name(tool_name)
+    if not tdef:
+        return False
+    if not tdef.get("is_read_only", False):
+        return False
+    if tdef.get("requires_user_prompt", False):
+        return False
+    depends_on = tdef.get("depends_on") or []
+    if depends_on:
+        return False
+    return True
 
 
 async def handle_tool_calls(
@@ -714,9 +972,16 @@ async def handle_tool_calls(
         List of tool result dicts with keys: tool_call_id, tool_name, content.
         ``content`` is always a string — the MCP client result (which may be
         a dict/list) is JSON-stringified so callers can treat it uniformly.
+        Results are returned in the SAME ORDER as ``tool_calls``.
+
+    Dispatch policy: gather-eligible (read-only, no-dependency) calls run
+    concurrently via ``asyncio.gather``; the rest run serially in order.
+    Independently-eligible tools therefore overlap in wall-clock, while
+    stateful / sensitive / dependent tools stay sequential.
     """
-    results = []
-    for tc in tool_calls:
+    # Pre-resolve args + gather-eligibility per call, preserving original order.
+    plan: list[dict] = []
+    for idx, tc in enumerate(tool_calls):
         fn = tc.get("function", {})
         tool_name = fn.get("name", "")
         tool_args = fn.get("arguments", {})
@@ -725,24 +990,59 @@ async def handle_tool_calls(
                 tool_args = json.loads(tool_args)
             except (json.JSONDecodeError, TypeError):
                 tool_args = {}
-
         call_id = tc.get("id", tc.get("call_id", ""))
+        plan.append({
+            "idx": idx,
+            "name": tool_name,
+            "args": tool_args,
+            "call_id": call_id,
+            "parallel": _is_gather_eligible(tool_name),
+        })
 
+    results: list[dict | None] = [None] * len(tool_calls)
+
+    async def _exec(item: dict) -> dict:
+        tool_name = item["name"]
         try:
-            result = await mcp_client.call_tool(tool_name, tool_args)
+            result = await mcp_client.call_tool(tool_name, item["args"])
             content = result if isinstance(result, str) else json.dumps(result)
-            results.append({
-                "tool_call_id": call_id,
+            return {
+                "tool_call_id": item["call_id"],
                 "tool_name": tool_name,
                 "content": content,
-            })
+            }
         except Exception as exc:
             logger.warning("MCP tool call '%s' failed: %s", tool_name, exc)
-            results.append({
-                "tool_call_id": call_id,
+            return {
+                "tool_call_id": item["call_id"],
                 "tool_name": tool_name,
                 "content": f"Tool error: {exc}",
-            })
+            }
+
+    # Parallel batch: gather-eligible calls run concurrently. Exceptions are
+    # caught inside ``_exec`` (never re-raised), so each gathered result is a
+    # well-formed result dict; the ``return_exceptions=True`` guard below only
+    # covers the unexpected case where ``_exec`` itself raised before its
+    # try/except (e.g. an async-cancelled coroutine).
+    parallel_items = [p for p in plan if p["parallel"]]
+    if parallel_items:
+        gathered = await asyncio.gather(
+            *[_exec(p) for p in parallel_items], return_exceptions=True,
+        )
+        for p, g in zip(parallel_items, gathered):
+            if isinstance(g, Exception):
+                g = {
+                    "tool_call_id": p["call_id"],
+                    "tool_name": p["name"],
+                    "content": f"Tool error: {g}",
+                }
+            results[p["idx"]] = g
+
+    # Serial batch: remaining calls run in original order.
+    for p in plan:
+        if p["parallel"]:
+            continue
+        results[p["idx"]] = await _exec(p)
 
     return results
 

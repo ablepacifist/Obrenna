@@ -174,13 +174,21 @@
           "quant": "Q4_K_M",
           "device": "gpu",
           "ctx_min": 32768,
-          "ctx_max": 131072
+          "ctx_max": 131072,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite4.0-h-tiny-7b-a1b",
           "quant": "Q5_K_M",
           "device": "cpu",
-          "resident": "always"
+          "resident": "always",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "qwen3.5-0.8b",
@@ -188,7 +196,11 @@
           "device": "cpu",
           "count_min": 3,
           "count_max": 5,
-          "resident": "always"
+          "resident": "always",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["cuda", "vulkan"]
       },
@@ -204,13 +216,21 @@
           "quant": "Q4_K_M",
           "device": "gpu",
           "ctx_min": 16384,
-          "ctx_max": 32768
+          "ctx_max": 32768,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite4.0-h-tiny-7b-a1b",
           "quant": "Q5_K_M",
           "device": "cpu",
-          "resident": "always"
+          "resident": "always",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "qwen3.5-0.8b",
@@ -218,7 +238,11 @@
           "device": "cpu",
           "count_min": 3,
           "count_max": 5,
-          "resident": "always"
+          "resident": "always",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["cuda", "rocm", "vulkan"]
       },
@@ -234,13 +258,21 @@
           "quant": "Q8_0",
           "device": "gpu",
           "ctx_min": 16384,
-          "ctx_max": 65536
+          "ctx_max": 65536,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q6_K",
           "device": "cpu",
-          "resident": "always"
+          "resident": "always",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "qwen3.5-0.8b",
@@ -248,7 +280,11 @@
           "device": "cpu",
           "count_min": 2,
           "count_max": 4,
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["cuda", "rocm", "vulkan"]
       },
@@ -264,13 +300,21 @@
           "quant": "Q6_K",
           "device": "gpu",
           "ctx_min": 8192,
-          "ctx_max": 32768
+          "ctx_max": 32768,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q5_K_M",
           "device": "cpu",
-          "resident": "always"
+          "resident": "always",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "qwen3.5-0.8b",
@@ -278,7 +322,11 @@
           "device": "cpu",
           "count_min": 2,
           "count_max": 3,
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["cuda", "rocm", "vulkan"]
       },
@@ -294,13 +342,21 @@
           "quant": "Q4_K_M",
           "device": "gpu",
           "ctx_min": 8192,
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q5_K_M",
           "device": "cpu",
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "qwen3.5-0.8b",
@@ -308,7 +364,11 @@
           "device": "cpu",
           "count_min": 1,
           "count_max": 2,
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["cuda", "rocm", "vulkan"]
       },
@@ -325,13 +385,21 @@
           "quant": "Q5_K_M",
           "device": "gpu",
           "ctx_min": 8192,
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q5_K_M",
           "device": "cpu",
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "qwen3.5-0.8b",
@@ -339,7 +407,11 @@
           "device": "cpu",
           "count_min": 1,
           "count_max": 2,
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["vulkan"],
         "runtime_forbidden": ["ollama"],
@@ -365,13 +437,21 @@
           "quant": "Q4_K_M",
           "device": "gpu",
           "ctx_min": 8192,
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "summarizer": {
           "model": "granite-4.0-h-350m",
           "quant": "Q4_K_M",
           "device": "cpu",
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "10m",
+            "mode": "lazy"
+          }
         },
         "utility": {
           "model": "granite-4.0-h-350m",
@@ -379,7 +459,11 @@
           "device": "cpu",
           "count_min": 1,
           "count_max": 1,
-          "resident": "lazy"
+          "resident": "lazy",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "runtime_priority": ["vulkan", "cuda"]
       }
@@ -519,13 +603,21 @@
           "quant": "Q4_K_M",
           "device": "cpu",
           "ctx_min": 8192,
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "helpers": {
           "model": "granite-4.0-h-350m",
           "quant": "IQ3_XXS",
           "count_max": 1,
-          "execution_mode": "strict_serial"
+          "execution_mode": "strict_serial",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "expected_tok_s": "15-25"
       },
@@ -544,13 +636,21 @@
           "quant": "Q5_K_M",
           "device": "cpu",
           "ctx_min": 8192,
-          "ctx_max": 12288
+          "ctx_max": 12288,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "helpers": {
           "model": "qwen3.5-0.8b",
           "quant": "Q6_K",
           "count_max": 1,
-          "execution_mode": "serial"
+          "execution_mode": "serial",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "expected_tok_s": "6-10"
       },
@@ -569,13 +669,21 @@
           "quant": "Q6_K",
           "device": "cpu",
           "ctx_min": 12288,
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "helpers": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q5_K_M",
           "count_max": 2,
-          "execution_mode": "limited_parallel"
+          "execution_mode": "limited_parallel",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "expected_tok_s": "8-14"
       },
@@ -594,13 +702,21 @@
           "quant": "Q4_K_M",
           "device": "cpu",
           "ctx_min": 16384,
-          "ctx_max": 32768
+          "ctx_max": 32768,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "helpers": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q5_K_M",
           "count_max": 2,
-          "execution_mode": "parallel"
+          "execution_mode": "parallel",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "expected_tok_s": "10-18"
       },
@@ -619,13 +735,21 @@
           "quant": "Q5_K_M",
           "device": "cpu",
           "ctx_min": 32768,
-          "ctx_max": 65536
+          "ctx_max": 65536,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "helpers": {
           "model": "granite4.0-h-micro-3b",
           "quant": "Q6_K",
           "count_max": 3,
-          "execution_mode": "parallel"
+          "execution_mode": "parallel",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "expected_tok_s": "15-25"
       }
@@ -652,7 +776,11 @@
         "orchestrator": {
           "model": "qwen3.5-4b-claude-opus-reasoning-distilled-v2",
           "quant": "Q5_K_M",
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         }
       },
       {
@@ -664,7 +792,11 @@
         "orchestrator": {
           "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q4_K_M",
-          "ctx_max": 16384
+          "ctx_max": 16384,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         }
       },
       {
@@ -676,7 +808,11 @@
         "orchestrator": {
           "model": "qwen3.5-9b-claude-opus-reasoning-distilled",
           "quant": "Q8_0",
-          "ctx_max": 32768
+          "ctx_max": 32768,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         }
       },
       {
@@ -688,7 +824,11 @@
         "orchestrator": {
           "model": "qwen3.5-27b",
           "quant": "Q4_K_M",
-          "ctx_max": 32768
+          "ctx_max": 32768,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         }
       },
       {
@@ -700,7 +840,11 @@
         "orchestrator": {
           "model": "qwen3.6-35b-a3b",
           "quant": "Q4_K_M",
-          "ctx_max": 65536
+          "ctx_max": 65536,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         }
       },
       {
@@ -712,7 +856,11 @@
         "orchestrator": {
           "model": "qwen3.6-35b-a3b",
           "quant": "Q5_K_M",
-          "ctx_max": 131072
+          "ctx_max": 131072,
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         }
       }
     ],
@@ -759,7 +907,11 @@
           "ctx_min": 4096,
           "ctx_max": 16384,
           "device": "cpu",
-          "notes": "16384 is this model's own fine-tuning context window per its model card — do not exceed it in ctx_max. CoT-style reasoning in <think> tags; author explicitly warns of hallucination risk on external facts."
+          "notes": "16384 is this model's own fine-tuning context window per its model card — do not exceed it in ctx_max. CoT-style reasoning in <think> tags; author explicitly warns of hallucination risk on external facts.",
+          "keep_alive_policy": {
+            "keep_alive": -1,
+            "mode": "resident"
+          }
         },
         "helper": {
           "model": "granite-4.0-h-350m",
@@ -767,7 +919,11 @@
           "quant": "Q4_K_M",
           "size_gb": 0.25,
           "device": "cpu",
-          "notes": "Hybrid Mamba2/attention 350M, IBM vendor release with published benchmarks — fits the utility-worker extraction/JSON-validation job directly."
+          "notes": "Hybrid Mamba2/attention 350M, IBM vendor release with published benchmarks — fits the utility-worker extraction/JSON-validation job directly.",
+          "keep_alive_policy": {
+            "keep_alive": "5m",
+            "mode": "lazy"
+          }
         },
         "swarm_shape": "2 models only: orchestrator + ONE helper. No summarizer, no embedding model, no memory/retrieval subsystem at this tier.",
         "total_model_footprint_gb": 0.78,
