@@ -84,7 +84,8 @@ async def chat_completion(
         resp.raise_for_status()
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-        logger.info("SYNC RESPONSE: status=%d content=%r", resp.status_code, content)
+        # DEBUG, not INFO: model response content is private local content.
+        logger.debug("SYNC RESPONSE: status=%d content=%r", resp.status_code, content)
     return content
 
 
