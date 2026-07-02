@@ -24,6 +24,15 @@ class MCPTransport:
     Can be extended for direct stdio or HTTP/SSE later.
     """
 
+    async def connect(self) -> bool:
+        """Establish the underlying connection, if any. Returns True on success.
+
+        Default no-op for transports (like InMemoryTransport) that need no
+        connection setup. Transports requiring a real connection (TCP) must
+        override this and actually establish it before ``send`` is usable.
+        """
+        return True
+
     async def send(self, request: dict[str, Any]) -> dict[str, Any]:
         """Send an MCP JSON-RPC request and return the response."""
         raise NotImplementedError
@@ -139,6 +148,10 @@ class MCPClient:
     async def initialize(self) -> bool:
         """Initialize the MCP connection."""
         try:
+            connected = await self.transport.connect()
+            if not connected:
+                logger.warning("MCP transport connect() failed; not initializing.")
+                return False
             response = await self.transport.send({
                 "method": "initialize",
                 "params": {

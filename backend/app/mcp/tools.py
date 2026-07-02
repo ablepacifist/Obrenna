@@ -111,12 +111,28 @@ TOOL_DEFS = [
 
 def tool_get_time(args: dict[str, Any]) -> dict[str, Any]:
     """Get local system time."""
-    now = datetime.datetime.now()
-    utc_offset = now.astimezone().strftime("%z")
+    now = datetime.datetime.now().astimezone()
+    utc_offset = now.strftime("%z")
+    utc_offset_iso = utc_offset
+    if len(utc_offset) == 5:
+        utc_offset_iso = f"{utc_offset[:3]}:{utc_offset[3:]}"
+
+    iso_datetime = now.isoformat()
+
     return {
-        "time": now.isoformat(),
+        # Backward-compatible fields
+        "time": iso_datetime,
         "timezone_offset": utc_offset,
         "unix_timestamp": int(now.timestamp()),
+        # Extended dynamic fields for small-model grounding/tool responses
+        "iso_datetime": iso_datetime,
+        "human_readable": now.strftime("%A, %B %d, %Y at %I:%M %p"),
+        "date": now.strftime("%Y-%m-%d"),
+        "local_time": now.strftime("%H:%M:%S"),
+        "weekday": now.strftime("%A"),
+        "year": now.year,
+        "timezone": now.tzname() or "Local",
+        "utc_offset": utc_offset_iso,
     }
 
 
@@ -173,11 +189,15 @@ def _safe_eval_expression(expr: str) -> float:
                 result %= right
         return result
 
+    _MAX_EXPONENT = 1000  # generous for legitimate use, small enough to never hang/allocate
+
     def parse_power() -> float:
         base = parse_unary()
         if pos[0] < len(tokens) and tokens[pos[0]] == '**':
             pos[0] += 1
             exp = parse_unary()
+            if abs(exp) > _MAX_EXPONENT:
+                raise ValueError(f"Exponent magnitude too large (max {_MAX_EXPONENT})")
             return base ** exp
         return base
 
@@ -206,7 +226,10 @@ def _safe_eval_expression(expr: str) -> float:
             return float(token)
         raise ValueError(f"Unexpected token: {token}")
 
-    return parse_expr()
+    result = parse_expr()
+    if pos[0] != len(tokens):
+        raise ValueError(f"Unexpected trailing token: {tokens[pos[0]]!r}")
+    return result
 
 
 def _tokenize(expr: str) -> list:
@@ -401,6 +424,68 @@ def list_tools() -> list[dict[str, Any]]:
     return TOOL_DEFS
 
 
+# Index of TOOL_DEFS by name — built once at import time.
+_TOOL_DEF_BY_NAME: dict[str, dict[str, Any]] = {t["name"]: t for t in TOOL_DEFS}
+
+
+def tool_def_by_name(name: str) -> dict[str, Any] | None:
+    """Return the canonical tool definition for ``name``, or ``None`` if unknown.
+
+    ``TOOL_DEFS`` is the single source of truth for tool schemas (including
+    ``inputSchema``). Callers building model-facing tool definitions must merge
+    schemas through this helper rather than trusting allowlist entries (which
+    intentionally carry only name/description/category).
+    """
+    return _TOOL_DEF_BY_NAME.get(name)
+
+
+def tool_names() -> list[str]:
+    """Return the sorted list of canonical tool names."""
+    return sorted(_TOOL_DEF_BY_NAME)
+
+
+def _validate_tool_args(name: str, args: Any) -> dict[str, Any] | None:
+    """Validate ``args`` against the canonical TOOL_DEFS schema for ``name``.
+
+    Returns ``None`` when valid, or a clean retryable error dict when the
+    arguments don't match the schema (missing required, wrong type, etc.).
+    This is especially important for prompt-JSON models, which may emit
+    malformed arguments; a clear error lets the runtime ask the model to retry
+    instead of crashing the tool call. Schemas are sourced from TOOL_DEFS via
+    :func:`tool_def_by_name`.
+    """
+    canonical = tool_def_by_name(name)
+    if canonical is None:
+        return None  # no canonical schema — let the handler decide
+    schema = canonical.get("inputSchema")
+    if not schema:
+        return None
+    if not isinstance(args, dict):
+        return {
+            "error": True,
+            "message": f"Tool '{name}' expects a JSON object of arguments.",
+            "retryable": True,
+        }
+    required = schema.get("required", []) or []
+    missing = [r for r in required if r not in args or args.get(r) is None]
+    if missing:
+        return {
+            "error": True,
+            "message": f"Missing required argument(s) for {name}: {', '.join(missing)}",
+            "retryable": True,
+        }
+    try:
+        import jsonschema
+        jsonschema.validate(args, schema)
+    except jsonschema.ValidationError as exc:
+        return {
+            "error": True,
+            "message": f"Invalid arguments for {name}: {exc.message}",
+            "retryable": True,
+        }
+    return None
+
+
 def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Call a tool by name with the given arguments (sync only).
 
@@ -410,6 +495,10 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     handler = TOOLS.get(name)
     if not handler:
         return {"error": True, "message": f"Unknown tool: {name}"}
+
+    schema_err = _validate_tool_args(name, args)
+    if schema_err:
+        return schema_err
 
     try:
         result = handler(args)
@@ -430,6 +519,10 @@ async def acall_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
     handler = TOOLS.get(name)
     if not handler:
         return {"error": True, "message": f"Unknown tool: {name}"}
+
+    schema_err = _validate_tool_args(name, args)
+    if schema_err:
+        return schema_err
 
     try:
         result = handler(args)

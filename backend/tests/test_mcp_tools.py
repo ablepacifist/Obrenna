@@ -107,6 +107,30 @@ class TestCalculator:
         # (15*2) - 9 = 30 - 9 = 21
         assert result["result"] == 21
 
+    def test_rejects_trailing_tokens(self):
+        """MED-014: before the fix, "2 2" silently returned 2 — the parser
+        never checked whether all tokens were consumed."""
+        result = tool_calculator({"expression": "2 2"})
+        assert result["error"] is True
+
+    def test_rejects_trailing_tokens_after_parens(self):
+        result = tool_calculator({"expression": "(1+1)3"})
+        assert result["error"] is True
+
+    def test_rejects_trailing_operator_garbage(self):
+        result = tool_calculator({"expression": "3)3"})
+        assert result["error"] is True
+
+    def test_rejects_oversized_exponent(self):
+        """MED-014: an unbounded exponent (e.g. 9**9**9) can hang the
+        process computing/allocating an astronomically large int/float."""
+        result = tool_calculator({"expression": "2**99999"})
+        assert result["error"] is True
+
+    def test_allows_reasonable_exponent(self):
+        result = tool_calculator({"expression": "2**10"})
+        assert result["result"] == 1024
+
 
 class TestGetTime:
     """Test get_time tool."""
@@ -116,6 +140,14 @@ class TestGetTime:
         assert "time" in result
         assert "timezone_offset" in result
         assert "unix_timestamp" in result
+        assert "iso_datetime" in result
+        assert "human_readable" in result
+        assert "date" in result
+        assert "local_time" in result
+        assert "weekday" in result
+        assert "year" in result
+        assert "timezone" in result
+        assert "utc_offset" in result
 
     def test_unix_timestamp_is_int(self):
         result = tool_get_time({})
@@ -126,6 +158,13 @@ class TestGetTime:
         # Should be parseable as ISO format
         from datetime import datetime
         datetime.fromisoformat(result["time"])
+        datetime.fromisoformat(result["iso_datetime"])
+
+    def test_year_matches_iso_datetime(self):
+        result = tool_get_time({})
+        from datetime import datetime
+        parsed = datetime.fromisoformat(result["iso_datetime"])
+        assert result["year"] == parsed.year
 
 
 class TestWebSearch:

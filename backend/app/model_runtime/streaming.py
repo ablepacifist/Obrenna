@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import uuid
 from typing import Any, AsyncIterator
 
 import httpx
@@ -41,6 +43,138 @@ def _is_tool_call_chunk(chunk: dict[str, Any]) -> bool:
     return bool(delta.get("tool_calls")) or delta.get("finish_reason") == "tool_calls"
 
 
+# ── Prompt-JSON tool-call scanner ────────────────────────────────────────────
+#
+# For models that lack native OpenAI tool-call support (small distilled GGUF
+# orchestrators), the runtime injects a tool contract into the prompt asking the
+# model to emit a JSON envelope: {"action":"tool_call","tool":...,"arguments":...}.
+# This scanner watches the streaming text, emits any text that is NOT part of an
+# envelope as token events, and synthesizes a ``tool_calls_done`` event (matching
+# the native path's shape) when a complete envelope arrives — suppressing the
+# envelope itself from the token stream so it never reaches the UI as text.
+
+_ENVELOPE_MARKER = '{"action"'
+# Characters held back while a marker may be forming at the tail of the buffer.
+# Must exceed len('{"action":"tool_call"') so a partial marker is never flushed.
+_PROMPT_JSON_HOLDACK = 24
+# A leading markdown code fence (```json / ```) immediately before the envelope.
+# Small models often wrap the JSON in a fence; suppress it so it never streams.
+_LEADING_FENCE_RE = re.compile(r"\s*```[a-zA-Z0-9.+\-]*\s*\n?\s*$")
+
+
+def _find_json_object_end(buffer: str, start: int) -> int | None:
+    """Return the exclusive end index of the JSON object starting at ``start``.
+
+    Scans from the ``{`` at ``start``, tracking string literals and escapes, and
+    returns the index just past the matching closing brace. Returns ``None`` if
+    the object is not yet balanced (more chunks needed).
+    """
+    if start >= len(buffer) or buffer[start] != "{":
+        return None
+    depth = 0
+    in_str = False
+    escaped = False
+    for i in range(start, len(buffer)):
+        ch = buffer[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+class PromptJsonToolScanner:
+    """Scan a streaming text buffer for a prompt-JSON tool-call envelope."""
+
+    def __init__(self) -> None:
+        self._buffer: str = ""
+        self._flushed: int = 0  # index up to which text has been emitted
+        self._done: bool = False  # stop after one synthesized tool call
+
+    def feed(self, content: str) -> tuple[str, dict[str, Any] | None]:
+        """Accept new content; return (token_text, tool_calls_done_event|None)."""
+        if self._done:
+            return ("", None)
+        if content:
+            self._buffer += content
+        return self._scan()
+
+    def flush(self) -> str:
+        """At stream end, emit any held-back text (no envelope pending)."""
+        if self._done:
+            return ""
+        remaining = self._buffer[self._flushed:]
+        self._flushed = len(self._buffer)
+        return remaining
+
+    def _scan(self) -> tuple[str, dict[str, Any] | None]:
+        marker = self._buffer.find(_ENVELOPE_MARKER, self._flushed)
+        if marker == -1:
+            # No envelope yet — emit everything except a holdback tail in case a
+            # marker is still forming at the end of the buffer.
+            safe_to = max(self._flushed, len(self._buffer) - _PROMPT_JSON_HOLDACK)
+            text = self._buffer[self._flushed:safe_to]
+            self._flushed = safe_to
+            return (text, None)
+
+        # Emit any text that precedes the candidate envelope, stripping a
+        # leading markdown code fence (```json / ```) so it doesn't leak as text.
+        pre = self._buffer[self._flushed:marker]
+        fence_match = _LEADING_FENCE_RE.search(pre)
+        if fence_match:
+            pre = pre[:fence_match.start()]
+        self._flushed = marker
+
+        end = _find_json_object_end(self._buffer, marker)
+        if end is None:
+            # JSON not yet closed — hold everything from the marker onward.
+            return (pre, None)
+
+        slice_ = self._buffer[marker:end]
+        try:
+            obj = json.loads(slice_)
+        except json.JSONDecodeError:
+            # Looked like a marker but isn't valid JSON — treat as plain text and
+            # continue scanning after it.
+            self._flushed = end
+            return (pre + slice_, None)
+
+        if not isinstance(obj, dict) or obj.get("action") != "tool_call":
+            # Valid JSON but not a tool call — emit as text, keep scanning.
+            self._flushed = end
+            return (pre + slice_, None)
+
+        tool = obj.get("tool", "")
+        args = obj.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        call = {
+            "id": "call_" + uuid.uuid4().hex[:12],
+            "type": "function",
+            "function": {"name": tool, "arguments": args},
+        }
+        self._flushed = end
+        self._done = True
+        return (pre, {"type": "tool_calls_done", "calls": [call]})
+
+
 async def chat_completion_stream(
     config: RuntimeConfig,
     messages: list[dict],
@@ -52,6 +186,7 @@ async def chat_completion_stream(
     stop: list[str] | None = None,
     tools: list[dict] | None = None,
     think: bool = False,
+    tool_call_mode: str = "openai_native",
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream tokens from an OpenAI-compatible endpoint.
 
@@ -69,6 +204,11 @@ async def chat_completion_stream(
     events. Non-Ollama runtimes send no reasoning controls.
 
     When `tools` is None, yields only token events (backward-compatible behavior).
+
+    When `tool_call_mode` is ``"prompt_json"``, the model lacks native tool-call
+    support: ``tools`` is expected to be None (no OpenAI tools field sent) and the
+    streaming text is scanned for a ``{"action":"tool_call",...}`` envelope, which
+    is synthesized into a ``tool_calls_done`` event (and suppressed from tokens).
     """
     chosen = model or config.model_for(role)
     if not chosen:
@@ -106,6 +246,8 @@ async def chat_completion_stream(
 
             # Track tool_calls by index across SSE chunks
             tool_calls_buffer: dict[int, dict[str, Any]] = {}
+            # Prompt-JSON envelope scanner (only active for non-native models).
+            prompt_json_scanner = PromptJsonToolScanner() if tool_call_mode == "prompt_json" else None
 
             async for line in resp.aiter_lines():
                 if not line or line == "data: [DONE]":
@@ -139,7 +281,14 @@ async def chat_completion_stream(
                         # Text content
                         content = delta.get("content")
                         if content:
-                            yield {"type": "token", "content": content}
+                            if prompt_json_scanner is not None:
+                                text, tool_event = prompt_json_scanner.feed(content)
+                                if text:
+                                    yield {"type": "token", "content": text}
+                                if tool_event is not None:
+                                    yield tool_event
+                            else:
+                                yield {"type": "token", "content": content}
 
                         # Tool calls
                         tool_calls = delta.get("tool_calls")
@@ -186,13 +335,28 @@ async def chat_completion_stream(
                                 })
                             tool_calls_buffer.clear()
                             yield {"type": "tool_calls_done", "calls": calls}
-                        elif finish_reason in ("stop", None):
-                            # Reset buffer if stream ends without tool calls
+                        elif finish_reason == "stop":
+                            # Stream ended without tool calls — drop any partial
+                            # buffer. Do NOT clear on None: that is the value on
+                            # intermediate chunks, and tool-call argument fragments
+                            # must accumulate across chunks until finish_reason
+                            # "tool_calls" flushes them.
                             tool_calls_buffer.clear()
+                            if prompt_json_scanner is not None:
+                                tail = prompt_json_scanner.flush()
+                                if tail:
+                                    yield {"type": "token", "content": tail}
 
                 except json.JSONDecodeError:
                     logger.warning("Failed to parse SSE chunk: %s", data_str[:100])
                     continue
+
+            # Defensive final flush: some streams end with [DONE] and no explicit
+            # finish_reason. Emit any text the prompt-JSON scanner is still holding.
+            if prompt_json_scanner is not None:
+                tail = prompt_json_scanner.flush()
+                if tail:
+                    yield {"type": "token", "content": tail}
 
 
 # ── Sync wrapper for use from sync contexts ──────────────────────────────────

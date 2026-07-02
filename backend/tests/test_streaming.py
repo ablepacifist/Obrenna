@@ -2,6 +2,11 @@
 import httpx
 import pytest
 
+from app.agent.runtime import (
+    _format_tools_for_model,
+    _get_allowed_tools_for_request,
+    allowed_mcp_tools_config,
+)
 from app.model_runtime.config import RuntimeConfig
 from app.model_runtime.streaming import chat_completion_stream
 
@@ -193,3 +198,164 @@ async def test_tool_calls_still_stream(monkeypatch):
 
     assert events[-1]["type"] == "tool_calls_done"
     assert events[-1]["calls"][0]["function"]["name"] == "get_time"
+
+
+@pytest.mark.asyncio
+async def test_online_toggle_puts_web_search_on_wire(monkeypatch):
+    # web_search=True must result in a real web_search tool definition (with the
+    # `query` parameter) in the request payload sent to the model, plus
+    # tool_choice="auto". This would have failed before the schema-merge fix.
+    captured: dict = {}
+    lines = _sse({"choices": [{"delta": {"content": "ok"}}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, captured))
+
+    allowed = _get_allowed_tools_for_request(allowed_mcp_tools_config(), web_search_enabled=True)
+    tools = _format_tools_for_model(allowed)
+    async for _ in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tools=tools,
+    ):
+        pass
+
+    assert captured.get("tool_choice") == "auto"
+    assert "tools" in captured
+    ws = next(t for t in captured["tools"] if t["function"]["name"] == "web_search")
+    assert ws["function"]["parameters"]["required"] == ["query"]
+
+
+@pytest.mark.asyncio
+async def test_online_toggle_off_omits_web_search(monkeypatch):
+    captured: dict = {}
+    lines = _sse({"choices": [{"delta": {"content": "ok"}}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, captured))
+
+    allowed = _get_allowed_tools_for_request(allowed_mcp_tools_config(), web_search_enabled=False)
+    tools = _format_tools_for_model(allowed)
+    async for _ in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tools=tools,
+    ):
+        pass
+
+    names = [t["function"]["name"] for t in captured.get("tools", [])]
+    assert "web_search" not in names
+    assert "calculator" in names  # other tools still offered
+
+
+@pytest.mark.asyncio
+async def test_tool_call_arguments_split_across_chunks(monkeypatch):
+    # The parser must accumulate function.arguments as a string across chunks
+    # sharing the same tool_calls index until finish_reason="tool_calls" flushes.
+    # Split the JSON {"query":"news this week"} across two intermediate chunks.
+    def _tc_delta(index, **function_fields):
+        func = {"name": "", "arguments": ""}
+        func.update(function_fields)
+        return {"tool_calls": [{"index": index, "id": "call_1", "type": "function", "function": func}]}
+
+    chunk1 = {"choices": [{"delta": _tc_delta(0, name="web_search", arguments='{"quer')}]}
+    chunk2 = {"choices": [{"delta": _tc_delta(0, arguments='y":"news this week"}')}]}
+    chunk3 = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+    lines = _sse(chunk1, chunk2, chunk3)
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tools=[{"type": "function", "function": {"name": "web_search"}}],
+    )]
+
+    assert events[-1]["type"] == "tool_calls_done"
+    call = events[-1]["calls"][0]
+    assert call["function"]["name"] == "web_search"
+    assert call["function"]["arguments"] == {"query": "news this week"}
+
+
+# ── Prompt-JSON tool-call adapter ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_prompt_json_envelope_synthesizes_tool_call(monkeypatch):
+    # A prompt-json model emits the tool-call envelope inline in the text stream.
+    envelope = '{"action":"tool_call","tool":"get_time","arguments":{}}'
+    lines = _sse({"choices": [{"delta": {"content": "Let me check. " + envelope}, "finish_reason": "stop"}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tool_call_mode="prompt_json",
+    )]
+
+    # Only the preamble streams as text; the envelope is suppressed.
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "Let me check. " in tokens
+    assert "tool_call" not in tokens
+    # A synthesized tool_calls_done event is emitted with the parsed call.
+    tc = [e for e in events if e["type"] == "tool_calls_done"]
+    assert len(tc) == 1
+    call = tc[0]["calls"][0]
+    assert call["function"]["name"] == "get_time"
+    assert call["function"]["arguments"] == {}
+    assert call["id"].startswith("call_")
+
+
+@pytest.mark.asyncio
+async def test_prompt_json_envelope_split_across_chunks(monkeypatch):
+    # The envelope arrives fragmented across chunks (incl. mid-marker). The
+    # scanner must hold back the partial marker, accumulate, and synthesize once
+    # complete. Text after the envelope is suppressed (the runtime breaks on the
+    # tool call, so trailing text would be discarded anyway).
+    envelope = '{"action":"tool_call","tool":"get_time","arguments":{}}'
+    parts = ["Sure. ", envelope[:7], envelope[7:18], envelope[18:]]
+    chunks = [{"choices": [{"delta": {"content": p}}]} for p in parts]
+    chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    lines = _sse(*chunks)
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tool_call_mode="prompt_json",
+    )]
+
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert tokens == "Sure. "
+    tc = [e for e in events if e["type"] == "tool_calls_done"]
+    assert len(tc) == 1
+    assert tc[0]["calls"][0]["function"]["name"] == "get_time"
+
+
+@pytest.mark.asyncio
+async def test_native_mode_does_not_scan_for_envelope(monkeypatch):
+    # In native mode (default), envelope-shaped text is plain text — no scanner.
+    envelope = '{"action":"tool_call","tool":"get_time","arguments":{}}'
+    lines = _sse({"choices": [{"delta": {"content": "text " + envelope}, "finish_reason": "stop"}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}], model="qwen3:8b",
+    )]  # default tool_call_mode = openai_native
+
+    assert not any(e["type"] == "tool_calls_done" for e in events)
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert envelope in tokens
+
+
+@pytest.mark.asyncio
+async def test_prompt_json_envelope_in_markdown_fence(monkeypatch):
+    # Small models often wrap the envelope in a markdown code fence; the marker
+    # search (for the literal {"action") must still find it inside the fence.
+    envelope = '{"action":"tool_call","tool":"get_time","arguments":{}}'
+    content = "```json\n" + envelope + "\n```"
+    lines = _sse({"choices": [{"delta": {"content": content}, "finish_reason": "stop"}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tool_call_mode="prompt_json",
+    )]
+
+    tc = [e for e in events if e["type"] == "tool_calls_done"]
+    assert len(tc) == 1
+    assert tc[0]["calls"][0]["function"]["name"] == "get_time"
+    # The fence and envelope don't leak as answer text.
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "```" not in tokens
+    assert "tool_call" not in tokens
