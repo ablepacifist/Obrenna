@@ -5,11 +5,24 @@ CDN is required. The HTML is written to a temp file, loaded file://, then printe
 """
 from __future__ import annotations
 
+import html as _html
 import json
 import math
 import tempfile
 from pathlib import Path
 from typing import Any
+
+
+def _esc(value: Any) -> str:
+    """HTML-escape any value before interpolating it into the export template.
+
+    Card labels, table cells, titles, and report paragraphs originate from
+    arbitrary CSV/user content and were previously interpolated unescaped
+    into HTML rendered by a real headless Chromium (page.goto(file://...)).
+    A crafted cell like ``</style><script>...</script>`` would execute in
+    that context — this closes that hole for every interpolation site below.
+    """
+    return _html.escape(str(value), quote=True)
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +54,7 @@ def _bar_svg(x: list[str], series: list[dict], width: int = 560, height: int = 2
         ly = pad_t + chart_h + 16
         short = label[:8] + "…" if len(label) > 8 else label
         bars.append(
-            f'<text x="{lx}" y="{ly}" text-anchor="middle" font-size="9" fill="#6B6762">{short}</text>'
+            f'<text x="{lx}" y="{ly}" text-anchor="middle" font-size="9" fill="#6B6762">{_esc(short)}</text>'
         )
     return (
         f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg">'
@@ -76,7 +89,7 @@ def _area_svg(x: list[str], series: list[dict], width: int = 560, height: int = 
     )
     labels = "".join(
         f'<text x="{pts[i][0]:.1f}" y="{pad_t + chart_h + 16}" '
-        f'text-anchor="middle" font-size="9" fill="#6B6762">{x[i][:8]}</text>'
+        f'text-anchor="middle" font-size="9" fill="#6B6762">{_esc(x[i][:8])}</text>'
         for i in range(0, n, max(1, n // 6))
     )
     return (
@@ -131,9 +144,9 @@ def _cards_html(cards: list[dict]) -> str:
     for c in cards:
         items.append(
             f'<div class="card">'
-            f'<div class="card-label">{c.get("label","")}</div>'
-            f'<div class="card-value">{c.get("value","")}</div>'
-            f'<div class="card-desc">{c.get("description","")}</div>'
+            f'<div class="card-label">{_esc(c.get("label",""))}</div>'
+            f'<div class="card-value">{_esc(c.get("value",""))}</div>'
+            f'<div class="card-desc">{_esc(c.get("description",""))}</div>'
             f'</div>'
         )
     return f'<div class="cards">{"".join(items)}</div>'
@@ -142,12 +155,12 @@ def _cards_html(cards: list[dict]) -> str:
 def _table_html(table: dict) -> str:
     cols = table.get("columns", [])
     rows = table.get("rows", [])
-    ths = "".join(f"<th>{c}</th>" for c in cols)
+    ths = "".join(f"<th>{_esc(c)}</th>" for c in cols)
     trs = "".join(
-        "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+        "<tr>" + "".join(f"<td>{_esc(cell)}</td>" for cell in row) + "</tr>"
         for row in rows
     )
-    title = f'<div class="chart-title">{table.get("title","")}</div>' if table.get("title") else ""
+    title = f'<div class="chart-title">{_esc(table.get("title",""))}</div>' if table.get("title") else ""
     return f'{title}<table><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table>'
 
 
@@ -158,7 +171,7 @@ def _dashboard_html(spec: dict, title: str, summary: str) -> str:
         svg = _chart_svg(ch)
         charts_h += (
             f'<div class="chart-box">'
-            f'<div class="chart-title">{ch.get("title","")}</div>'
+            f'<div class="chart-title">{_esc(ch.get("title",""))}</div>'
             f'{svg}'
             f'</div>'
         )
@@ -168,11 +181,11 @@ def _dashboard_html(spec: dict, title: str, summary: str) -> str:
     insights = spec.get("insights", [])
     insights_h = (
         '<div class="section insights"><h2>Insights</h2><ul>'
-        + "".join(f"<li>{i}</li>" for i in insights)
+        + "".join(f"<li>{_esc(i)}</li>" for i in insights)
         + "</ul></div>"
     ) if insights else ""
     return (
-        f'<h1>{title}</h1><p class="summary">{summary}</p>'
+        f'<h1>{_esc(title)}</h1><p class="summary">{_esc(summary)}</p>'
         f'{cards_h}'
         f'<div class="section"><h2>Charts</h2>{charts_h}</div>'
         f'<div class="section"><h2>Tables</h2>{tables_h}</div>'
@@ -183,25 +196,25 @@ def _dashboard_html(spec: dict, title: str, summary: str) -> str:
 def _report_html(spec: dict, title: str, summary: str) -> str:
     meta = []
     if spec.get("prepared"):
-        meta.append(f"Prepared: {spec['prepared']}")
+        meta.append(f"Prepared: {_esc(spec['prepared'])}")
     if spec.get("prepared_for"):
-        meta.append(f"For: {spec['prepared_for']}")
+        meta.append(f"For: {_esc(spec['prepared_for'])}")
     if spec.get("prepared_by"):
-        meta.append(f"By: {spec['prepared_by']}")
+        meta.append(f"By: {_esc(spec['prepared_by'])}")
     meta_h = f'<p class="summary">{" &nbsp;·&nbsp; ".join(meta)}</p>' if meta else ""
     secs = ""
     for s in spec.get("sections", []):
-        paras = "".join(f"<p>{p}</p>" for p in s.get("paragraphs", []))
+        paras = "".join(f"<p>{_esc(p)}</p>" for p in s.get("paragraphs", []))
         tbl = f'<div style="margin-top:8px">{_table_html(s["table"])}</div>' if s.get("table") else ""
-        secs += f'<div class="section"><h2>{s.get("heading","")}</h2>{paras}{tbl}</div>'
-    return f'<h1>{title}</h1>{meta_h}{secs}'
+        secs += f'<div class="section"><h2>{_esc(s.get("heading",""))}</h2>{paras}{tbl}</div>'
+    return f'<h1>{_esc(title)}</h1>{meta_h}{secs}'
 
 
 def _chart_html(spec: dict, title: str, summary: str) -> str:
     ch = spec.get("chart", {})
     svg = _chart_svg(ch)
     return (
-        f'<h1>{title}</h1><p class="summary">{summary}</p>'
+        f'<h1>{_esc(title)}</h1><p class="summary">{_esc(summary)}</p>'
         f'<div class="chart-box">{svg}</div>'
     )
 
@@ -209,13 +222,12 @@ def _chart_html(spec: dict, title: str, summary: str) -> str:
 def _table_only_html(spec: dict, title: str, summary: str) -> str:
     t = spec.get("table", {})
     return (
-        f'<h1>{title}</h1><p class="summary">{summary}</p>'
+        f'<h1>{_esc(title)}</h1><p class="summary">{_esc(summary)}</p>'
         f'<div class="chart-box">{_table_html(t)}</div>'
     )
 
 
 def _document_html(spec: dict, title: str, summary: str) -> str:
-    import html as _html
     md = spec.get("markdown", "")
     # Minimal markdown → HTML (bold, headings, bullets).
     lines = []
@@ -236,7 +248,7 @@ def _document_html(spec: dict, title: str, summary: str) -> str:
             escaped = escaped.replace("**", "<strong>", 1).replace("**", "</strong>", 1)
             lines.append(f"<p>{escaped}</p>")
     return (
-        f'<h1>{title}</h1><p class="summary">{summary}</p>'
+        f'<h1>{_esc(title)}</h1><p class="summary">{_esc(summary)}</p>'
         f'<div class="md">{"".join(lines)}</div>'
     )
 

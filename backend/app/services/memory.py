@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from ..model_runtime.client import chat_completion_sync
 from ..model_runtime.config import RuntimeConfig
 from ..services.embeddings import embed_text
+from ..services.knowledge_packs.config import resolve_pack_paths
+from ..services.knowledge_packs.retriever import KnowledgePackRetriever
 from ..services.memory_config import (
     CONTEXT_TIERS,
     DEFAULT_CONTEXT_TIER,
@@ -97,11 +99,13 @@ class MemoryContext:
         rolling_summary: str = "",
         facts: list[dict] | None = None,
         archive_turns: list[dict] | None = None,
+        knowledge_cards: list[dict] | None = None,
     ):
         self.recency = recency or []
         self.rolling_summary = rolling_summary
         self.facts = facts or []
         self.archive_turns = archive_turns or []
+        self.knowledge_cards = knowledge_cards or []
 
     def to_messages(self) -> list[dict]:
         """Convert to a list of LLM system/user messages for the orchestrator."""
@@ -111,6 +115,15 @@ class MemoryContext:
         # 1. Rolling summary always
         if self.rolling_summary:
             parts.append(f"**Context Summary (from previous turns):**\n{self.rolling_summary}")
+
+        # Recency-only mode uses assistant turns directly and intentionally skips
+        # vector/archive retrieval for small local orchestrators.
+        if self.recency:
+            recent_lines = "\n".join(
+                f"- {m.get('role', 'assistant')}: {m.get('text', '')}"
+                for m in self.recency
+            )
+            parts.append(f"**Recent conversation context:**\n{recent_lines}")
 
         # 2. Account/local facts
         if self.facts:
@@ -125,6 +138,15 @@ class MemoryContext:
                 for t in self.archive_turns
             )
             parts.append(f"**Relevant past conversation:**\n{turn_lines}")
+
+        # 4. Pack knowledge cards (curated workflow/domain guidance)
+        if self.knowledge_cards:
+            card_lines = []
+            for card in self.knowledge_cards:
+                card_lines.append(
+                    f"- [{card.get('card_type', 'card')}] {card.get('topic', '')}: {card.get('content', '')}"
+                )
+            parts.append(f"**Retrieved knowledge packs:**\n" + "\n".join(card_lines))
 
         # Only include markdown hint when there's actual context content
         if parts:
@@ -146,6 +168,8 @@ def assemble_context(
     user_message: str,
     *,
     recent_count: int = 6,
+    memory_mode: str = "default",
+    max_context_chars: int | None = None,
 ) -> MemoryContext:
     """Build memory context for a chat turn.
 
@@ -166,12 +190,11 @@ def assemble_context(
     for m in reversed(all_msgs):
         recency.append({"role": "assistant", "text": m.text})
 
+    if memory_mode == "exp0_recency_only":
+        return _cap_recency_context(MemoryContext(recency=recency), max_context_chars or 4000)
+
     # Rolling summary
     rolling_summary = getattr(chat, "rolling_summary", "") or ""
-
-    # Memory facts
-    facts = search_facts(db, user_message, top_k=get_default_top_k())
-    facts_out = [{"id": f[0], "text": f[2]} for f in facts]
 
     # Archived turns (determine top-k based on budget)
     budget = getattr(chat, "managed_ctx", None) or getattr(chat, "_managed_ctx", None)
@@ -193,7 +216,17 @@ def assemble_context(
 
     budget_tokens = pick_memory_budget(ctx_max) if ctx_max else 4096
     archive_top_k = TIGHT_ARCHIVE_TOP_K if budget_tokens < 4096 else TIGHT_ARCHIVE_TOP_K
-    facts_top_k = TIGHT_FACT_TOP_K if budget_tokens < 4096 else FACT_TOP_K
+    facts_top_k = TIGHT_FACT_TOP_K if budget_tokens < 4096 else get_default_top_k()
+
+    # Memory facts. user_locked means "protected from auto-overwrite/delete"
+    # (see _reconcile_fact), NOT "hidden from retrieval" — excluding locked
+    # facts here meant a user's own explicitly-created memories (which
+    # default to user_locked=True, see _add_fact) were never surfaced to the
+    # orchestrator, only auto-extracted ones. Soft-deleted facts are still
+    # excluded via exclude_deleted (deletion also sets user_locked=True as a
+    # tombstone marker, but deleted_at is the authoritative deletion flag).
+    facts = search_facts(db, user_message, top_k=facts_top_k, exclude_locked=False)
+    facts_out = [{"id": f[0], "text": f[2]} for f in facts]
 
     archive_scores = search_turns(db, chat.id, user_message, top_k=archive_top_k * 2)
     archive_out: list[dict] = []
@@ -207,12 +240,42 @@ def assemble_context(
                 "assistant_text": turn.assistant_text[:200],
             })
 
+    knowledge_cards: list[dict] = []
+    try:
+        pack_paths = resolve_pack_paths()
+        if pack_paths:
+            retriever = KnowledgePackRetriever(pack_paths)
+            knowledge_context = retriever.search(
+                user_message,
+                max_cards=4,
+                max_tokens=max(256, budget_tokens // 2),
+            )
+            knowledge_cards = [card.as_dict() for card in knowledge_context.cards]
+    except Exception as exc:
+        logger.warning("Knowledge pack retrieval failed: %s", exc)
+
     return MemoryContext(
         recency=recency,
         rolling_summary=rolling_summary,
         facts=facts_out,
         archive_turns=archive_out,
+        knowledge_cards=knowledge_cards,
     )
+
+
+def _cap_recency_context(context: MemoryContext, max_chars: int) -> MemoryContext:
+    """Trim recency-only EXP0 context to a small deterministic character budget."""
+    remaining = max_chars
+    capped: list[dict] = []
+    for msg in reversed(context.recency):
+        text = str(msg.get("text", ""))
+        if remaining <= 0:
+            break
+        trimmed = text[-remaining:]
+        remaining -= len(trimmed)
+        capped.append({"role": msg.get("role", "assistant"), "text": trimmed})
+    capped.reverse()
+    return MemoryContext(recency=capped)
 
 
 def build_model_messages(
