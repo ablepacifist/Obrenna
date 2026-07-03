@@ -19,6 +19,9 @@ use crate::mcp::McpProxy;
 pub struct BackendProcesses {
     pub mcp_proxy: Option<McpProxy>,
     pub python_sidecar: Option<Child>,
+    /// The bundled `ollama serve` we spawned, if any. `None` means Ollama was
+    /// already running (external / user-owned) and must not be killed by us.
+    pub ollama: Option<Child>,
     pub mcp_proxy_url: Option<String>,
     pub app_handle: Mutex<Option<tauri::AppHandle>>,
 }
@@ -28,6 +31,7 @@ impl BackendProcesses {
         BackendProcesses {
             mcp_proxy: None,
             python_sidecar: None,
+            ollama: None,
             mcp_proxy_url: None,
             app_handle: Mutex::new(None),
         }
@@ -47,6 +51,28 @@ impl BackendProcesses {
         data_dir: &std::path::PathBuf,
         mcp_server_path: Option<&Path>,
     ) -> Result<String, String> {
+        // Step 0: Ensure the local Ollama engine is serving before the Python
+        // sidecar starts, so its first model call connects cleanly instead of
+        // hammering a dead port (which is what caused the 30s startup hangs).
+        // Reuses an already-running instance; only kills what we spawn.
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            match crate::ollama::ensure_serving(&resource_dir, data_dir) {
+                crate::ollama::EnsureOutcome::AlreadyRunning => {
+                    eprintln!("[obrenna] Ollama already running on port {}", crate::ollama::OLLAMA_PORT);
+                }
+                crate::ollama::EnsureOutcome::Started(child) => {
+                    eprintln!("[obrenna] Started bundled Ollama engine");
+                    self.ollama = Some(child);
+                }
+                crate::ollama::EnsureOutcome::NotFound => {
+                    eprintln!("[obrenna] Warning: bundled Ollama engine not found; model calls will fail until it is installed");
+                }
+                crate::ollama::EnsureOutcome::Failed(e) => {
+                    eprintln!("[obrenna] Warning: failed to start Ollama engine: {}", e);
+                }
+            }
+        }
+
         // Step 1: Create MCP proxy and spawn server only if path exists
         if let Some(server_path) = mcp_server_path {
             if server_path.exists() {
@@ -215,6 +241,13 @@ impl BackendProcesses {
         // Step 3: Stop MCP proxy
         if let Some(mcp) = self.mcp_proxy.take() {
             let _ = mcp.stop();
+        }
+
+        // Step 4: Stop the Ollama engine, but only the one we spawned. If
+        // `ollama` is None it was external (user-owned) and left untouched.
+        if let Some(mut engine) = self.ollama.take() {
+            let _ = engine.kill();
+            let _ = engine.wait();
         }
 
         self.mcp_proxy_url = None;

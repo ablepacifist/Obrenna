@@ -2,6 +2,7 @@
 
 mod backend;
 mod mcp;
+mod ollama;
 mod supervisor;
 mod updater;
 
@@ -58,6 +59,7 @@ fn main() {
             backend::open_data_dir,
             backend::open_logs_dir,
             backend::get_logs_dir,
+            ollama::start_ollama,
             updater::check_update,
             updater::install_update,
             updater::get_app_version,

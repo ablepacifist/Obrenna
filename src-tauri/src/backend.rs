@@ -210,3 +210,6 @@ pub fn open_logs_dir() -> Result<(), String> {
 pub fn get_logs_dir() -> String {
     get_obrenna_dir().join("logs").to_string_lossy().to_string()
 }
+
+// Ollama engine lifecycle lives in `ollama.rs`. `migrate_data_dir` above is
+// reused there to locate the model store.
