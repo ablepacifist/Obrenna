@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from sqlalchemy.orm import Session
 from ..mcp.client import InMemoryTransport
 from ..mcp.tools import list_tools, call_tool, tool_def_by_name
 from ..model_runtime.config import RuntimeConfig
+from .tool_narration import gather_narrations, narration_desc
 from ..model_runtime.streaming import chat_completion_stream
 from ..services.architecture_config import (
     get_config,
@@ -38,6 +40,7 @@ from ..services.runtime_context import (
     build_runtime_context_message,
     build_relative_date_hint_message,
 )
+from ..services.trace_logging import trace_event
 from .events import (
     done_event,
     error_event,
@@ -93,6 +96,41 @@ class ResolvedPlan:
         """
         mode = self.orchestrator.get("tool_call_mode", "openai_native")
         return mode if mode in ("openai_native", "prompt_json") else "openai_native"
+
+    @property
+    def reasoning_distilled(self) -> bool:
+        """Whether the orchestrator is a reasoning-distilled (always-CoT) model.
+
+        Discriminator for the per-round thinking-effort lever: distilled models
+        need in-stream CoT to form tool-call envelopes, stock models emit them
+        structurally. Sourced from the catalog via the resolver (model identity),
+        not inferred from ``tool_call_mode`` (transport). Defaults to False.
+        """
+        return bool(self.orchestrator.get("reasoning_distilled", False))
+
+    @property
+    def max_tool_rounds(self) -> int:
+        """Per-orchestrator cap on chained tool calls in a single turn.
+
+        Sourced from the catalog model_definition (via the resolver). Defaults to
+        3 — a safe mid-tier value — when the resolver didn't populate it.
+        """
+        val = self.orchestrator.get("max_tool_rounds", 3)
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+        return 3
+
+    @property
+    def tool_result_budget(self) -> int:
+        """Per-orchestrator char budget for compacting a single tool result.
+
+        Sourced from the catalog model_definition (via the resolver). Defaults to
+        4000 chars when the resolver didn't populate it.
+        """
+        val = self.orchestrator.get("tool_result_budget", 4000)
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+        return 4000
 
     @property
     def summarizer_model(self) -> str:
@@ -159,6 +197,139 @@ def classify_intent_fast(message: str, files: list[str] | None = None) -> str:
 def route_requires_workers(intent: str) -> bool:
     """Worker fan-out is reserved for routes that benefit from extra evidence."""
     return intent in {"web_research", "artifact_dashboard", "artifact_report"}
+
+
+# ── Deterministic per-turn routing ───────────────────────────────────────────
+#
+# Small distilled orchestrators are unreliable at choosing tools on their own,
+# so obviously-classifiable requests are routed deterministically:
+#   current/news queries  → web_search (or a clear "web is off" answer)
+#   plain arithmetic      → calculator (expression normalised from prose)
+#   time/date questions   → get_time
+# The routed tool is executed BEFORE the first model pass and its result is fed
+# in as tool evidence; the model still writes the final prose answer.
+
+_NEWS_QUERY_RE = re.compile(r"\b(news|headlines?)\b", re.IGNORECASE)
+_TIME_QUERY_RE = re.compile(
+    r"\b(what time is it|current time|what'?s the time|time is it right now|"
+    r"what day is (it|today)|today'?s date|what'?s the date|current date)\b",
+    re.IGNORECASE,
+)
+_MATH_VERB_RE = re.compile(
+    r"\b(calculate|compute|solve|evaluate|math|nearest (decimal|integer|whole))\b",
+    re.IGNORECASE,
+)
+# "6*25+90 all divided by 4" → divide the ENTIRE preceding expression by 4.
+_ALL_DIVIDED_RE = re.compile(
+    r"\b(?:all|everything|the whole thing|the total)\s+divided\s+by\s+(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_WORD_OPS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bmultiplied\s+by\b", re.IGNORECASE), " * "),
+    (re.compile(r"\btimes\b", re.IGNORECASE), " * "),
+    (re.compile(r"\bdivided\s+by\b", re.IGNORECASE), " / "),
+    (re.compile(r"\bplus\b", re.IGNORECASE), " + "),
+    (re.compile(r"\bminus\b", re.IGNORECASE), " - "),
+]
+_MATH_EXPR_RE = re.compile(r"[\d.(][\d\s.+\-*/%()]*")
+
+
+def is_current_news_query(message: str) -> bool:
+    """True for queries about news/headlines — inherently current information."""
+    return bool(_NEWS_QUERY_RE.search(message or ""))
+
+
+def extract_math_expression(message: str) -> str | None:
+    """Deterministically normalise a natural-language arithmetic ask.
+
+    Returns a pure calculator expression, or None when the message is not an
+    unambiguous arithmetic request. "X all divided by N" parenthesises the
+    whole preceding expression — "6*25+90 all divided by 4" → "(6*25+90)/4"
+    (= 60.0), never the operator-precedence reading 6*25 + 90/4 (= 172.5).
+    """
+    text = message or ""
+    divisor = None
+    m = _ALL_DIVIDED_RE.search(text)
+    if m:
+        divisor = m.group(1)
+        text = text[: m.start()] + " " + text[m.end():]
+    for rx, sym in _WORD_OPS:
+        text = rx.sub(sym, text)
+
+    best: str | None = None
+    for cand in _MATH_EXPR_RE.finditer(text):
+        s = cand.group(0).strip()
+        if re.search(r"\d", s) and re.search(r"[+\-*/%]", s):
+            if best is None or len(s) > len(best):
+                best = s
+    if best is None:
+        return None
+    expr = best.strip().rstrip("+-*/%(. ")
+    # Guard against prose false-positives (dates, ranges like "2-3pm"): route
+    # only when the expression has 2+ operators, or the user explicitly asked
+    # for a computation, or we saw an "all divided by" construction.
+    op_count = len(re.findall(r"[+\-*/%]", expr))
+    explicit = bool(_MATH_VERB_RE.search(message or "")) or divisor is not None
+    if op_count < 2 and not explicit:
+        return None
+    if not re.fullmatch(r"[\d\s.+\-*/%()]+", expr):
+        return None
+    if divisor:
+        expr = f"({expr})/{divisor}"
+    return expr
+
+
+def classify_deterministic_route(
+    message: str,
+    *,
+    web_search_enabled: bool,
+) -> tuple[str, dict] | None:
+    """Return a forced (tool_name, arguments) route for obvious intents.
+
+    ``("web_search_disabled", {})`` is a pseudo-route: the user asked for
+    current news but web access is off — the runtime must answer that web
+    access is needed instead of letting the model guess or replay stale text.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    expr = extract_math_expression(text)
+    if expr is not None:
+        return ("calculator", {"expression": expr})
+    if is_current_news_query(text):
+        if web_search_enabled:
+            return ("web_search", {"query": text})
+        return ("web_search_disabled", {})
+    if _TIME_QUERY_RE.search(text):
+        return ("get_time", {})
+    return None
+
+
+WEB_DISABLED_NEWS_ANSWER = (
+    "I can't look up current news right now because web search is turned off "
+    "for this chat. Enable the web toggle and ask again, and I'll fetch the "
+    "latest for you."
+)
+
+# Injected as a system message whenever the user has the web-search toggle ON.
+# The model is already told the tool *exists* (via the prompt-JSON contract or
+# the OpenAI tools field), but small distilled orchestrators tend to answer from
+# memory unless pushed. This is the active nudge: the user explicitly opted into
+# web access for this chat, so prefer `web_search` for anything that benefits
+# from fresh or external information. Kept out of the deterministic router so it
+# still applies to general factual/recent queries, not just obvious news asks.
+WEB_SEARCH_HINT = (
+    "The user has explicitly enabled web search for this chat, which signals "
+    "they want answers grounded in fresh, external information rather than from "
+    "your training memory alone. You have the `web_search` tool available — "
+    "prefer to call it whenever the user's question would benefit from current, "
+    "verifiable, or external facts: news, recent events, prices, releases, "
+    "people, statistics, documentation, or anything where your knowledge could "
+    "be stale or uncertain. When in doubt about whether a fact is current, "
+    "search. Do NOT search for things you can compute or determine locally "
+    "(arithmetic, the current time, the user's own files) or for pure opinion/"
+    "creative tasks. After searching, cite the source URLs in your answer."
+)
 
 
 @dataclass
@@ -256,6 +427,30 @@ class TurnTelemetry:
 # ── Main orchestration ──────────────────────────────────────────────────────
 
 
+async def _execute_with_narration(
+    config: RuntimeConfig,
+    calls: list[dict],
+    exec_coro: "Any",
+    *,
+    narr_timeout: float = 2.0,
+) -> tuple[list[dict], list]:
+    """Run tool execution concurrently with helper-model narration.
+
+    Narration starts the moment we know the calls and races the tool
+    execution; after execution returns we give narration a short bounded
+    moment to finish so the description usually lands before the result
+    event flips the card to done. Returns (exec_results, narrations).
+    """
+    narration_task = asyncio.create_task(gather_narrations(config, calls))
+    results = await exec_coro
+    try:
+        narrations = await asyncio.wait_for(narration_task, timeout=narr_timeout)
+    except asyncio.TimeoutError:
+        narration_task.cancel()
+        narrations = [None] * len(calls)
+    return results, narrations
+
+
 async def orchestrate_turn(
     user_message: str,
     chat_id: str,
@@ -304,6 +499,20 @@ async def orchestrate_turn(
         telemetry.mark_event()
         return event
 
+    async def _handle_tool_calls_with_trace(
+        calls: list[dict],
+        mcp_client: Any,
+        ctx: dict[str, Any],
+    ) -> list[dict]:
+        try:
+            return await handle_tool_calls(
+                calls, mcp_client, trace_context=ctx, user_message=user_message,
+            )
+        except TypeError as exc:
+            if "trace_context" not in str(exc):
+                raise
+            return await handle_tool_calls(calls, mcp_client)
+
     exp0_fast_path = is_exp0_plan(resolved_plan)
     fast_intent = classify_intent_fast(user_message, file_ids)
     skip_workers = exp0_fast_path and not route_requires_workers(fast_intent)
@@ -316,10 +525,39 @@ async def orchestrate_turn(
     use_summarizer = bool(resolved_plan.summarizer_model)
     orchestration_cfg = get_orchestration_config()
     worker_timeout = orchestration_cfg.get("worker_timeout_seconds", 12)
-    max_tool_rounds = orchestration_cfg.get("max_tool_rounds", 5)
+    # Per-orchestrator-model cap on chained tool calls, sourced from the catalog
+    # via the resolver (not the global config). The legacy
+    # architecture_config.json::mcp_tools.max_tool_rounds key was miswired (read
+    # from agent_runtime.orchestration, which never held it) and always fell back
+    # to the hardcoded 5; it is now superseded by the resolved per-model value.
+    max_tool_rounds = resolved_plan.max_tool_rounds
     # DEBUG, not INFO: user_message is private local content and must not
     # land in default-level logs on a local-first/private-by-default product.
     logger.debug("=== ORCHESTRATE TURN === chat_id=%s user_message=%r orchestrator_model=%s summarizer_model=%s utility_model=%s workers_enabled=%s", chat_id, user_message, resolved_plan.orchestrator_model, resolved_plan.summarizer_model, resolved_plan.utility_model, workers_enabled)
+    trace_context = {"chat_id": chat_id, "message_id": msg_id}
+    trace_event(
+        "turn_start",
+        **trace_context,
+        user_message=user_message,
+        file_ids=file_ids or [],
+        previous_messages=previous_messages or [],
+        web_search=web_search,
+        workers_enabled=workers_enabled,
+        thinking_enabled=thinking_enabled,
+        fast_intent=fast_intent,
+        skip_workers=skip_workers,
+        use_workers=use_workers,
+        use_summarizer=use_summarizer,
+        plan={
+            "path": resolved_plan.path,
+            "ctx": resolved_plan.ctx,
+            "helper_count": resolved_plan.helper_count,
+            "orchestrator_model": resolved_plan.orchestrator_model,
+            "summarizer_model": resolved_plan.summarizer_model,
+            "utility_model": resolved_plan.utility_model,
+            "tool_call_mode": resolved_plan.orchestrator_tool_call_mode,
+        },
+    )
 
     yield tracked(phase_event(chat_id, msg_id, "accepted", "Starting"))
 
@@ -343,6 +581,10 @@ async def orchestrate_turn(
             user_message,
             memory_mode="exp0_recency_only" if exp0_fast_path else "default",
             max_context_chars=4000 if exp0_fast_path else None,
+            # When real conversation turns are already in the prompt, do NOT
+            # also inject recent assistant replies as system context — the
+            # duplicated previous answer is what small orchestrators replay.
+            include_recency=not bool(previous_messages),
         )
         telemetry.memory_context_runtime_ms = int((time.perf_counter() - _mem_start) * 1000)
         # Fix #1: split the orchestrator's system content into a static,
@@ -351,8 +593,16 @@ async def orchestrate_turn(
         # reuses it across turns; the dynamic, version-stamped band follows.
         static_parts = memory_ctx.to_static_messages()
         dynamic_parts = memory_ctx.to_dynamic_messages()
+        trace_event(
+            "memory_context_built",
+            **trace_context,
+            runtime_ms=telemetry.memory_context_runtime_ms,
+            static_parts=static_parts,
+            dynamic_parts=dynamic_parts,
+        )
     except Exception as exc:
         logger.warning("Memory context assembly failed: %s", exc)
+        trace_event("memory_context_error", **trace_context, error=str(exc))
         static_parts = []
         dynamic_parts = []
     telemetry.context_done_at = time.perf_counter()
@@ -368,6 +618,7 @@ async def orchestrate_turn(
     # Step 2: Optional worker dispatch
     evidence_summary = ""
     if skip_workers:
+        trace_event("workers_skipped", **trace_context, reason="exp0_lightweight_route")
         yield tracked(phase_event(
             chat_id,
             msg_id,
@@ -380,6 +631,12 @@ async def orchestrate_turn(
         worker_tasks, system_prompt = _prepare_worker_tasks(
             user_message, dynamic_parts, resolved_plan
         )
+        trace_event(
+            "worker_tasks_prepared",
+            **trace_context,
+            system_prompt=system_prompt,
+            tasks=worker_tasks,
+        )
         if worker_tasks:
             worker_results = await dispatch_workers(
                 worker_tasks, config, resolved_plan.utility_model, system_prompt,
@@ -387,15 +644,23 @@ async def orchestrate_turn(
                 timeout_seconds=worker_timeout,
                 workers_enabled=workers_enabled,
                 keep_alive=resolved_plan.utility_keep_alive,
+                trace_context=trace_context,
             )
             evidence_pack = EvidencePack(
                 entries=[r.to_evidence_entry() for r in worker_results],
                 failure_count=sum(1 for r in worker_results if r.status != WorkerStatus.SUCCESS),
             )
+            trace_event(
+                "evidence_pack_built",
+                **trace_context,
+                entries=evidence_pack.entries,
+                failure_count=evidence_pack.failure_count,
+            )
             if use_summarizer and resolved_plan.summarizer_model:
                 summary_text, success = await summarize_into_evidence_pack(
                     config, resolved_plan.summarizer_model, evidence_pack,
                     keep_alive=resolved_plan.summarizer_keep_alive,
+                    trace_context=trace_context,
                 )
                 if success:
                     evidence_summary = summary_text
@@ -414,6 +679,7 @@ async def orchestrate_turn(
                         return
             else:
                 evidence_summary = evidence_pack.to_compact_string()
+            trace_event("worker_evidence_summary", **trace_context, evidence_summary=evidence_summary)
     telemetry.workers_done_at = time.perf_counter()
 
     # Step 3: Resolve allowed tools + tool-call mode, then build orchestrator
@@ -421,15 +687,54 @@ async def orchestrate_turn(
     # model knows the envelope format before it sees the user request.
     allowed_tools = _get_allowed_tools_for_request(allowed_mcp_tools_config(), web_search)
     tool_call_mode = resolved_plan.orchestrator_tool_call_mode
+    trace_event(
+        "tools_resolved",
+        **trace_context,
+        web_search_enabled=web_search,
+        tool_call_mode=tool_call_mode,
+        allowed_tools=allowed_tools,
+    )
+
+    # Deterministic routing for obvious intents (math/current-news/time). This
+    # runs BEFORE any model call so a small orchestrator can't misroute them.
+    forced_route = classify_deterministic_route(user_message, web_search_enabled=web_search)
+    if forced_route:
+        trace_event("deterministic_route", **trace_context, route=forced_route)
+    if forced_route and forced_route[0] == "web_search_disabled":
+        # Current-news ask with web off: answer honestly and deterministically —
+        # never let the model guess or replay stale content.
+        telemetry.mark_token()
+        trace_event(
+            "deterministic_response_complete",
+            **trace_context,
+            response=WEB_DISABLED_NEWS_ANSWER,
+        )
+        yield tracked(token_event(chat_id, text=WEB_DISABLED_NEWS_ANSWER, message_id=msg_id))
+        telemetry.model_done_at = time.perf_counter()
+        yield tracked(phase_event(chat_id, msg_id, "finalizing", "Finalizing"))
+        telemetry.done_at = time.perf_counter()
+        yield tracked(done_event(chat_id, message_id=msg_id))
+        try:
+            write_turn_telemetry(chat_id, telemetry.summary())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Telemetry sink write failed: %s", exc)
+        return
 
     yield tracked(phase_event(chat_id, msg_id, "runtime_context", "Checking local date and time"))
 
     orchestrator_messages = _build_orchestrator_messages(
         user_message, static_parts, dynamic_parts, evidence_summary, previous_messages or [],
         tool_call_mode=tool_call_mode, allowed_tools=allowed_tools,
+        web_search_enabled=web_search,
     )
     # DEBUG, not INFO: message content is private local content.
     logger.debug("ORCHESTRATOR MESSAGES: %d messages, first_user=%r last_user=%r", len(orchestrator_messages), orchestrator_messages[0]["content"] if orchestrator_messages and len(orchestrator_messages) > 0 else "", orchestrator_messages[-1]["content"] if orchestrator_messages else "")
+    trace_event(
+        "orchestrator_messages_built",
+        **trace_context,
+        message_count=len(orchestrator_messages),
+        messages=orchestrator_messages,
+    )
 
     # Step 4: Prepare MCP client and tool definitions
     import os
@@ -484,6 +789,83 @@ async def orchestrate_turn(
     last_tool_payloads: list[tuple[str, str]] = []
     all_tokens = []
 
+    # Step 4½: Execute a deterministically-routed tool BEFORE the first model
+    # pass and feed its result in as tool evidence. The model still writes the
+    # final prose; if it produces nothing, the existing tool-result fallback
+    # guarantees a non-empty answer grounded in the tool output.
+    if forced_route and forced_route[0] != "web_search_disabled":
+        forced_name, forced_args = forced_route
+        forced_call = {
+            "id": "call_" + uuid.uuid4().hex[:12],
+            "type": "function",
+            "function": {"name": forced_name, "arguments": forced_args},
+        }
+        yield tracked(tool_call_event(
+            chat_id=chat_id, tool_name=forced_name, call_id=forced_call["id"],
+            arguments=forced_args, message_id=msg_id,
+        ))
+        _tool_start = time.perf_counter()
+        forced_results, forced_narrations = await _execute_with_narration(
+            config,
+            [forced_call],
+            _handle_tool_calls_with_trace(
+                [forced_call],
+                mcp_client,
+                {**trace_context, "round": 0, "deterministic_route": True},
+            ),
+        )
+        telemetry.record_tool_runtime(time.perf_counter() - _tool_start)
+        # Emit a helper-model narration of what this tool is doing, landing
+        # while the card is still `running` (before the result flips it done).
+        forced_desc = narration_desc(forced_narrations[0], forced_name)
+        if forced_desc:
+            yield tracked(tool_progress_event(
+                chat_id=chat_id, tool_name=forced_name, call_id=forced_call["id"],
+                status="running", stage="narrating", summary=forced_desc,
+                message_id=msg_id,
+            ))
+        forced_content = forced_results[0].get("content", "")
+        yield tracked(tool_result_event(
+            chat_id=chat_id, tool_name=forced_name, call_id=forced_call["id"],
+            result=forced_content, message_id=msg_id,
+        ))
+        last_tool_payloads.append((forced_name, forced_content))
+        if tool_call_mode == "prompt_json":
+            orchestrator_messages.append({
+                "role": "assistant",
+                "content": _prompt_json_envelope_text(forced_name, forced_args),
+            })
+            orchestrator_messages.append({
+                "role": "user",
+                "content": _prompt_json_tool_result(forced_name, forced_content),
+            })
+            orchestrator_messages.append({
+                "role": "user",
+                "content": (
+                    "Answer the latest user message now in natural language using the "
+                    "TOOL_RESULT above. Do not repeat earlier answers and do not call "
+                    "the same tool again."
+                ),
+            })
+        else:
+            orchestrator_messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": forced_call["id"],
+                    "type": "function",
+                    "function": {
+                        "name": forced_name,
+                        "arguments": json.dumps(forced_args),
+                    },
+                }],
+            })
+            orchestrator_messages.append({
+                "role": "tool",
+                "tool_call_id": forced_call["id"],
+                "content": forced_content,
+            })
+
     yield tracked(phase_event(chat_id, msg_id, "model", "Writing response"))
 
     while tool_round < max_tool_rounds + 1:
@@ -495,6 +877,23 @@ async def orchestrate_turn(
             logger.info("CALLING MODEL: model=%s temperature=%.1f round=%d tools=%s",
                         resolved_plan.orchestrator_model, 0.2, tool_round,
                         "yes" if model_tools else "no")
+            reasoning_effort = _round_reasoning_effort(
+                thinking_enabled, tool_round, finalization_round,
+                resolved_plan.reasoning_distilled,
+            )
+            trace_event(
+                "orchestrator_call_start",
+                **trace_context,
+                round=tool_round,
+                finalization_round=finalization_round,
+                model=resolved_plan.orchestrator_model,
+                temperature=0.2,
+                timeout=stream_timeout,
+                tools_enabled=bool(model_tools),
+                model_tools=model_tools,
+                reasoning_effort=reasoning_effort,
+                messages=orchestrator_messages,
+            )
             async for event in chat_completion_stream(
                 config,
                 orchestrator_messages,
@@ -503,13 +902,14 @@ async def orchestrate_turn(
                 temperature=0.2,
                 timeout=stream_timeout,
                 tools=model_tools,
-                think=thinking_enabled,
+                think=reasoning_effort,
                 tool_call_mode=tool_call_mode,
                 keep_alive=resolved_plan.orchestrator_keep_alive,
             ):
                 if event.get("type") == "thinking_delta":
                     text = event.get("content", "") or event.get("text", "")
                     if text:
+                        trace_event("orchestrator_thinking_delta", **trace_context, round=tool_round, text=text)
                         yield thinking_delta_event(chat_id, text=text, message_id=msg_id)
                     continue
                 if event.get("type") == "stream_stats":
@@ -525,6 +925,7 @@ async def orchestrate_turn(
                 elif event.get("type") == "tool_calls_done":
                     calls = event.get("calls", [])
                     if calls:
+                        trace_event("orchestrator_tool_calls", **trace_context, round=tool_round, calls=calls)
                         if finalization_round:
                             # The finalization pass exists only to turn already
                             # collected tool evidence into natural language. If
@@ -566,8 +967,47 @@ async def orchestrate_turn(
 
                         # Execute tool calls
                         _tool_start = time.perf_counter()
-                        tool_results = await handle_tool_calls(calls, mcp_client)
+                        tool_results, narrations = await _execute_with_narration(
+                            config,
+                            calls,
+                            _handle_tool_calls_with_trace(
+                                calls,
+                                mcp_client,
+                                {**trace_context, "round": tool_round},
+                            ),
+                        )
                         telemetry.record_tool_runtime(time.perf_counter() - _tool_start)
+                        # Emit per-call helper-model narration before the
+                        # result events so each card describes what it is
+                        # doing while still `running`.
+                        for tc, narration in zip(calls, narrations):
+                            _fn = tc.get("function", {})
+                            _name = _fn.get("name", "")
+                            _desc = narration_desc(narration, _name)
+                            if _desc:
+                                yield tracked(tool_progress_event(
+                                    chat_id=chat_id, tool_name=_name,
+                                    call_id=tc.get("id", ""), status="running",
+                                    stage="narrating", summary=_desc,
+                                    message_id=msg_id,
+                                ))
+                        # Compact tool results before feed-back: structural trim
+                        # bounds context growth (the "blows context" anti-pattern
+                        # that model_tools=None was compensating for). Both feed-back
+                        # branches and last_tool_payloads read result.content, so this
+                        # single chokepoint covers every path. Per-result budget is
+                        # sourced from the catalog via resolved_plan.tool_result_budget.
+                        raw_chars, compacted_chars = _compact_tool_results(
+                            tool_results, calls, resolved_plan.tool_result_budget,
+                        )
+                        trace_event(
+                            "tool_result_compaction",
+                            **trace_context,
+                            round=tool_round,
+                            raw_chars=raw_chars,
+                            compacted_chars=compacted_chars,
+                            per_result_budget=resolved_plan.tool_result_budget,
+                        )
                         tool_round_results = 0
                         executed = []  # (tool_call, call_id, content)
                         for tc, result in zip(calls, tool_results):
@@ -658,6 +1098,7 @@ async def orchestrate_turn(
 
         except Exception as exc:
             logger.error("Orchestrator streaming failed: %s", exc)
+            trace_event("orchestrator_call_error", **trace_context, round=tool_round, error=str(exc))
             yield tracked(error_event(
                 chat_id,
                 error_code="orchestrator_error",
@@ -678,8 +1119,17 @@ async def orchestrate_turn(
                         "messages already provided. Do not output JSON. Do not call any more tools."
                     ),
                 })
-            # model_tools is set to None on next iteration (no tools on follow-up calls)
-            model_tools = None
+            # Keep tools available on continuation rounds so the orchestrator can
+            # chain (say something -> tool -> reason -> tool) — bounded by
+            # max_tool_rounds, the per-tier tool_result_budget compaction above, and
+            # the cheap continuation-round reasoning_effort. Only drop tools on the
+            # finalization round, where the model must turn collected evidence into
+            # prose with no further tool calls. (The finalization pass at the loop
+            # top also refuses tool calls and falls back to tool results, so this is
+            # belt-and-suspenders, not the only guard.) prompt_json models keep
+            # model_tools=None throughout — they chain via the in-message contract.
+            if finalization_round:
+                model_tools = None
             all_tokens = []  # Reset for final answer tokens
             continue
 
@@ -687,6 +1137,14 @@ async def orchestrate_turn(
         break
 
     logger.info("MODEL RESPONSE COMPLETE: total_tokens=%d", len(all_tokens))
+    final_response = "".join(all_tokens)
+    trace_event(
+        "orchestrator_response_complete",
+        **trace_context,
+        total_token_chunks=len(all_tokens),
+        response=final_response,
+        tool_payloads=last_tool_payloads,
+    )
     if not all_tokens and last_tool_payloads:
         logger.warning("No final model tokens after tool execution; emitting tool-result fallback.")
         fallback = _fallback_answer_from_tool_results(user_message, last_tool_payloads)
@@ -698,6 +1156,7 @@ async def orchestrate_turn(
     yield tracked(phase_event(chat_id, msg_id, "finalizing", "Finalizing"))
     telemetry.done_at = time.perf_counter()
     logger.info("CHAT TURN TELEMETRY: %s", telemetry.summary())
+    trace_event("turn_complete", **trace_context, telemetry=telemetry.summary(), response="".join(all_tokens))
     yield tracked(done_event(chat_id, message_id=msg_id))
     if os.getenv("OBRENNA_CHAT_TELEMETRY") == "1":
         yield tracked(telemetry_event(chat_id, msg_id, telemetry.summary()))
@@ -751,6 +1210,7 @@ def _build_orchestrator_messages(
     *,
     tool_call_mode: str = "openai_native",
     allowed_tools: list[dict] | None = None,
+    web_search_enabled: bool = False,
 ) -> list[dict]:
     """Build the full message sequence for the orchestrator.
 
@@ -760,6 +1220,9 @@ def _build_orchestrator_messages(
       A.  Static orchestrator identity/role prompt (constant) — ``static_parts``.
       A′. Prompt-JSON tool contract (constant within a tool set) — moved BEFORE
           the dynamic memory so the cacheable prefix includes it.
+      A″. Web-search usage hint — present only when the user has the web toggle
+          on. Applies to both tool-call modes (native models only get a bare tool
+          description otherwise). Stable within a chat, so still prefix-cached.
       B.  Per-turn memory block, version-stamped — ``dynamic_parts``.
       C.  Runtime clock + relative-date hint (per-turn, dynamic).
       D.  Worker evidence summary (per-turn, dynamic).
@@ -780,6 +1243,17 @@ def _build_orchestrator_messages(
         messages.append({
             "role": "system",
             "content": canonicalise_system_content(_build_prompt_json_tool_contract(allowed_tools)),
+        })
+
+    # Band A″: web-search usage hint. Active nudge (not just an "it exists"
+    # listing) so the orchestrator prefers `web_search` for fresh/external
+    # facts. Stable within a chat, so it stays in the cacheable prefix. Applies
+    # to both tool-call modes — native models otherwise only see the bare tool
+    # description via the OpenAI tools field.
+    if web_search_enabled:
+        messages.append({
+            "role": "system",
+            "content": canonicalise_system_content(WEB_SEARCH_HINT),
         })
 
     # Band B: per-turn memory block (version-stamped, dynamic).
@@ -838,8 +1312,12 @@ def _build_prompt_json_tool_contract(allowed_tools: list[dict]) -> str:
         '{"action":"tool_call","tool":"<tool_name>","arguments":{<arguments as a JSON object>}}',
         'Example: {"action":"tool_call","tool":"web_search","arguments":{"query":"latest AI news","max_results":5}}',
         'Example: {"action":"tool_call","tool":"get_time","arguments":{}}',
+        "To call several independent tools at once in a single turn, use the plural form with a calls array:",
+        '{"action":"tool_calls","calls":[{"tool":"<tool_name>","arguments":{<args>}}, ...]}',
+        'Example: {"action":"tool_calls","calls":[{"tool":"get_time","arguments":{}},{"tool":"web_search","arguments":{"query":"weather today","max_results":3}}]}',
+        "Prefer the plural form only when the calls are genuinely independent. If one call's arguments depend on another's result, emit one call, wait for its TOOL_RESULT, then emit the next.",
         "After you emit a tool call, the system runs it and replies with a TOOL_RESULT(...) message. Then continue: call another tool with the same envelope, or answer the user directly without the envelope.",
-        "Do not use shortcuts like {\"action\":\"web_search\",...}; always use action=tool_call with tool and arguments.",
+        "Do not use shortcuts like {\"action\":\"web_search\",...}; always use action=tool_call or action=tool_calls with tool and arguments.",
         "Do not mention or narrate that you are calling a tool — just emit the JSON object.",
         "",
         "Available tools:",
@@ -862,6 +1340,138 @@ def _prompt_json_envelope_text(tool: str, args: dict) -> str:
 def _prompt_json_tool_result(tool: str, content: str) -> str:
     """Format a tool result as a user message a prompt-JSON model can read."""
     return f"TOOL_RESULT({tool}): {content}"
+
+
+def _round_reasoning_effort(
+    thinking_enabled: bool,
+    tool_round: int,
+    finalization_round: bool,
+    reasoning_distilled: bool,
+) -> str:
+    """Per-round Ollama ``reasoning_effort`` level for the orchestrator tool loop.
+
+    Keys on ``reasoning_distilled`` (model identity from the resolver), NOT
+    ``tool_call_mode`` (transport): distilled models form their tool-call
+    envelopes as reasoned output and need in-stream CoT even on continuation, so
+    they downshift ``medium``->``low`` rather than going dark. Stock models emit
+    tool calls structurally, so continuation rounds (a mechanical sufficiency
+    check) get no reasoning.
+
+    Finalization is NOT a continuation round — it turns collected evidence into
+    prose with no further tools, so reasoning is off for everyone: the reasoning
+    trace is the highest hallucination-risk surface and must not re-deliberate at
+    the point it should just write the answer. When thinking is disabled for the
+    turn, every round is ``"none"`` (preserves the opt-in behavior).
+
+    Returns one of ``"none" | "low" | "medium"``.
+    """
+    if not thinking_enabled:
+        return "none"
+    if finalization_round:
+        return "none"
+    if tool_round <= 1:
+        return "medium"
+    # Continuation round (round > 1, not finalization).
+    return "low" if reasoning_distilled else "none"
+
+
+# Tools whose results are small and deterministic — folding them through any
+# compaction is pure overhead, so they pass through unchanged.
+_PASSTHROUGH_TRIM_TOOLS = frozenset({"calculator", "get_time", "get_location"})
+
+
+def _head_truncate(content: str, budget: int) -> str:
+    if len(content) <= budget:
+        return content
+    return content[:budget] + "\n...[truncated]"
+
+
+def _trim_web_search(content: str, per_result_budget: int) -> str:
+    """Structurally trim a web_search result, preserving the sufficiency shape.
+
+    web_search returns ``{"results":[{"title","snippet","url"},...]}``. The shape
+    — all N titles + urls — is what tells the orchestrator whether it has enough,
+    so we keep every entry and budget each snippet body rather than
+    head-truncating the concatenated blob (which drops snippet #4, often the
+    relevant one). Falls back to head-truncation if the payload isn't JSON.
+    """
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _head_truncate(content, per_result_budget)
+    results = obj.get("results") if isinstance(obj, dict) else None
+    if not isinstance(results, list) or not results:
+        return _head_truncate(content, per_result_budget)
+    per_snippet = max(120, per_result_budget // len(results))
+    trimmed = []
+    for r in results:
+        if not isinstance(r, dict):
+            trimmed.append(r)
+            continue
+        nr = dict(r)
+        snip = nr.get("snippet")
+        if isinstance(snip, str) and len(snip) > per_snippet:
+            nr["snippet"] = snip[:per_snippet].rstrip() + "…"
+        trimmed.append(nr)
+    return json.dumps({"results": trimmed}, ensure_ascii=False)
+
+
+def _trim_file_read(content: str, per_result_budget: int) -> str:
+    """Head+tail trim for file_read so file structure (imports/exports) stays visible."""
+    if len(content) <= per_result_budget:
+        return content
+    head = int(per_result_budget * 0.6)
+    tail = per_result_budget - head
+    return content[:head] + "\n...[middle truncated]...\n" + content[-tail:]
+
+
+def _trim_tool_result(tool_name: str, content: str, per_result_budget: int) -> str:
+    """Per-tool structural trim. NOT a blanket head-truncation — the shape carries
+    the sufficiency information the orchestrator needs to decide whether it has
+    enough. Small deterministic tools pass through (tens of tokens — folding them
+    is pure overhead).
+    """
+    if not content or tool_name in _PASSTHROUGH_TRIM_TOOLS:
+        return content
+    if tool_name == "web_search":
+        return _trim_web_search(content, per_result_budget)
+    if tool_name == "file_read":
+        return _trim_file_read(content, per_result_budget)
+    return _head_truncate(content, per_result_budget)
+
+
+def _compact_tool_results(
+    tool_results: list[dict],
+    calls: list[dict],
+    per_result_budget: int,
+) -> tuple[int, int]:
+    """Compact each tool result's ``content`` in place before feed-back.
+
+    Single chokepoint: both the prompt_json and openai_native feed-back branches
+    (plus ``last_tool_payloads`` and the finalization fallback) read ``content``
+    from these result dicts, so mutating them here bounds context growth for
+    every path. v1 applies structural trim only — the summarizer fold is gated
+    off (see plan Step 2: wire it only if real results starve the model after
+    trimming). Never raises: on any parse failure the original content is kept.
+
+    Returns ``(raw_chars, compacted_chars)`` for trace visibility.
+    """
+    raw_chars = 0
+    compacted_chars = 0
+    for result, tc in zip(tool_results, calls):
+        if not isinstance(result, dict):
+            continue
+        tool_name = result.get("tool_name") or (
+            tc.get("function", {}).get("name", "") if isinstance(tc.get("function"), dict) else ""
+        )
+        content = result.get("content", "")
+        if not isinstance(content, str):
+            continue
+        raw_chars += len(content)
+        compacted = _trim_tool_result(tool_name, content, per_result_budget)
+        compacted_chars += len(compacted)
+        result["content"] = compacted
+    return raw_chars, compacted_chars
 
 
 def _fallback_answer_from_tool_results(
@@ -955,9 +1565,97 @@ def _is_gather_eligible(tool_name: str) -> bool:
     return True
 
 
+# ── Tool-argument validation + repair ────────────────────────────────────────
+#
+# The orchestrator (often a sub-1B distilled model on the low tiers) authors
+# tool calls itself when the deterministic router doesn't force one. It fairly
+# routinely omits required arguments — e.g. a ``web_search`` call with no
+# ``query``. That call would otherwise reach the MCP server (Rust proxy *or* the
+# in-memory Python handler) and fail with an opaque hard error mid-turn.
+#
+# This layer runs in ``handle_tool_calls`` — the transport-agnostic dispatch
+# point — so it covers every backend uniformly. For each call we validate the
+# arguments against the canonical ``inputSchema`` (single source of truth in
+# ``mcp/tools.py::TOOL_DEFS``, reached via ``tool_def_by_name``). When a required
+# argument is missing or blank we attempt a per-tool *repair strategy*; if that
+# fails we short-circuit with a structured, retryable tool result fed back into
+# the loop rather than dispatching a call we know will fail.
+
+
+def _is_arg_blank(value: Any) -> bool:
+    """A required argument is unsatisfied if absent, ``None``, or blank text."""
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _missing_required_args(name: str, args: dict) -> list[str]:
+    """Return the required arg names for ``name`` that are missing/blank in ``args``."""
+    tdef = tool_def_by_name(name)
+    if not tdef:
+        return []  # unknown tool — let the MCP backend decide
+    schema = tdef.get("inputSchema") or {}
+    required = schema.get("required") or []
+    return [r for r in required if _is_arg_blank(args.get(r))]
+
+
+def _repair_web_search_args(args: dict, context: dict[str, Any]) -> dict | None:
+    """Backfill a missing ``web_search.query`` from the turn's user message.
+
+    A repair *strategy*, not a special case in the dispatch path: registered in
+    ``_TOOL_ARG_REPAIRS`` and invoked generically by :func:`_repair_tool_args`.
+    """
+    user_message = (context.get("user_message") or "").strip()
+    if not user_message:
+        return None
+    repaired = dict(args)
+    repaired["query"] = user_message
+    return repaired
+
+
+# Per-tool repair strategies: ``(args, context) -> repaired_args | None``.
+# ``context`` carries at least ``user_message``. Return ``None`` to signal the
+# call is unrepairable, in which case dispatch is short-circuited with an error.
+_TOOL_ARG_REPAIRS: dict[str, Any] = {
+    "web_search": _repair_web_search_args,
+}
+
+
+def _repair_tool_args(
+    name: str, args: dict, context: dict[str, Any]
+) -> tuple[dict, str | None]:
+    """Validate ``args`` against the tool schema; repair missing required args.
+
+    Returns ``(args, error)``:
+      * ``error is None`` — ``args`` (possibly repaired) satisfy the schema and
+        the call may be dispatched.
+      * ``error`` is a message — the call must NOT be dispatched; feed the error
+        back into the loop as a retryable tool result.
+    """
+    missing = _missing_required_args(name, args)
+    if not missing:
+        return args, None
+
+    repair = _TOOL_ARG_REPAIRS.get(name)
+    if repair is not None:
+        repaired = repair(args, context)
+        if repaired is not None and not _missing_required_args(name, repaired):
+            return repaired, None
+
+    return args, (
+        f"Missing required argument(s) for {name}: {', '.join(missing)}. "
+        f"Call {name} again with all required arguments."
+    )
+
+
 async def handle_tool_calls(
     tool_calls: list[dict],
     mcp_client: Any,
+    *,
+    trace_context: dict[str, Any] | None = None,
+    user_message: str | None = None,
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
@@ -980,6 +1678,7 @@ async def handle_tool_calls(
     stateful / sensitive / dependent tools stay sequential.
     """
     # Pre-resolve args + gather-eligibility per call, preserving original order.
+    repair_context = {"user_message": user_message or ""}
     plan: list[dict] = []
     for idx, tc in enumerate(tool_calls):
         fn = tc.get("function", {})
@@ -990,22 +1689,65 @@ async def handle_tool_calls(
                 tool_args = json.loads(tool_args)
             except (json.JSONDecodeError, TypeError):
                 tool_args = {}
+        if not isinstance(tool_args, dict):
+            tool_args = {}
         call_id = tc.get("id", tc.get("call_id", ""))
+        # Validate against the canonical schema before dispatch. A missing
+        # required arg is repaired if a strategy exists (e.g. web_search.query
+        # backfilled from the user message); otherwise the call is marked so
+        # ``_exec`` returns a retryable error instead of hitting the MCP.
+        tool_args, arg_error = _repair_tool_args(tool_name, tool_args, repair_context)
         plan.append({
             "idx": idx,
             "name": tool_name,
             "args": tool_args,
             "call_id": call_id,
+            "arg_error": arg_error,
             "parallel": _is_gather_eligible(tool_name),
         })
+
+    trace_event("tool_plan_built", **(trace_context or {}), plan=plan)
 
     results: list[dict | None] = [None] * len(tool_calls)
 
     async def _exec(item: dict) -> dict:
         tool_name = item["name"]
+        # Schema validation failed and no repair applied — feed a structured,
+        # retryable error back into the loop rather than dispatching a call the
+        # MCP backend will reject with an opaque hard error.
+        if item.get("arg_error"):
+            trace_event(
+                "tool_call_arg_invalid",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                arguments=item["args"],
+                error=item["arg_error"],
+            )
+            return {
+                "tool_call_id": item["call_id"],
+                "tool_name": tool_name,
+                "content": json.dumps({"error": True, "message": item["arg_error"], "retryable": True}),
+            }
         try:
+            trace_event(
+                "tool_call_start",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                arguments=item["args"],
+                parallel=item["parallel"],
+            )
             result = await mcp_client.call_tool(tool_name, item["args"])
             content = result if isinstance(result, str) else json.dumps(result)
+            trace_event(
+                "tool_call_result",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                arguments=item["args"],
+                result=content,
+            )
             return {
                 "tool_call_id": item["call_id"],
                 "tool_name": tool_name,
@@ -1013,6 +1755,14 @@ async def handle_tool_calls(
             }
         except Exception as exc:
             logger.warning("MCP tool call '%s' failed: %s", tool_name, exc)
+            trace_event(
+                "tool_call_error",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                arguments=item["args"],
+                error=str(exc),
+            )
             return {
                 "tool_call_id": item["call_id"],
                 "tool_name": tool_name,

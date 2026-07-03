@@ -207,13 +207,18 @@ class MemoryContext:
             parts.append(f"**Context Summary (from previous turns):**\n{self.rolling_summary}")
 
         # Recency-only mode uses assistant turns directly and intentionally skips
-        # vector/archive retrieval for small local orchestrators.
+        # vector/archive retrieval for small local orchestrators. Labelled as
+        # non-authoritative reference: a small orchestrator must never treat an
+        # earlier reply as the task to redo.
         if self.recency:
             recent_lines = "\n".join(
                 f"- {m.get('role', 'assistant')}: {m.get('text', '')}"
                 for m in self.recency
             )
-            parts.append(f"**Recent conversation context:**\n{recent_lines}")
+            parts.append(
+                "**Earlier assistant replies (reference only — do not repeat; "
+                "always answer the latest user message):**\n" + recent_lines
+            )
 
         # 2. Account/local facts
         if self.facts:
@@ -331,8 +336,15 @@ def assemble_context(
     recent_count: int = 6,
     memory_mode: str = "default",
     max_context_chars: int | None = None,
+    include_recency: bool = True,
 ) -> MemoryContext:
     """Build memory context for a chat turn.
+
+    ``include_recency=False`` drops the recency band (recent assistant
+    replies). Callers that already place real conversation turns in the
+    message sequence (the runtime passes ``previous_messages``) must disable
+    it: injecting the previous assistant answer a second time as system
+    context biased small orchestrators toward replaying it as the new answer.
 
     Precedence: recency buffer → rolling summary → facts → archive turns.
 
@@ -361,6 +373,8 @@ def assemble_context(
 
     # EXP0 lightweight path: recency only, never cached (no version counters).
     if memory_mode == "exp0_recency_only":
+        if not include_recency:
+            return MemoryContext()
         recency = _build_recency(db, chat_id, recent_count)
         return _cap_recency_context(MemoryContext(recency=recency), max_context_chars or 4000)
 
@@ -377,7 +391,7 @@ def assemble_context(
     )
     cached = memory_cache.get_context(cache_key)
     if cached is not None:
-        return cached
+        return cached if include_recency else _without_recency(cached)
 
     # ── Full retrieval (cache miss) ─────────────────────────────────────────
     recency = _build_recency(db, chat_id, recent_count)
@@ -415,7 +429,8 @@ def assemble_context(
     # excluded via exclude_deleted (deletion also sets user_locked=True as a
     # tombstone marker, but deleted_at is the authoritative deletion flag).
     facts = search_facts(db, user_message, top_k=facts_top_k, exclude_locked=False)
-    facts_out = [{"id": f[0], "text": f[2]} for f in facts]
+    # search_facts returns (similarity, fact_id, fact_text) — f[1] is the id.
+    facts_out = [{"id": f[1], "text": f[2]} for f in facts]
 
     archive_scores = search_turns(db, chat_id, user_message, top_k=archive_top_k * 2)
     archive_out: list[dict] = []
@@ -453,7 +468,26 @@ def assemble_context(
         summary_version=summary_version,
     )
     memory_cache.set_context(cache_key, ctx)
-    return ctx
+    return ctx if include_recency else _without_recency(ctx)
+
+
+def _without_recency(ctx: MemoryContext) -> MemoryContext:
+    """Copy of a MemoryContext with the recency band dropped.
+
+    The cache always stores the full context (recency included) under the same
+    key regardless of ``include_recency``; this strips it per-caller so the
+    flag never fragments or stales the cache.
+    """
+    return MemoryContext(
+        recency=[],
+        rolling_summary=ctx.rolling_summary,
+        facts=ctx.facts,
+        archive_turns=ctx.archive_turns,
+        knowledge_cards=ctx.knowledge_cards,
+        account_version=ctx.account_version,
+        chat_version=ctx.chat_version,
+        summary_version=ctx.summary_version,
+    )
 
 
 def _cap_recency_context(context: MemoryContext, max_chars: int) -> MemoryContext:

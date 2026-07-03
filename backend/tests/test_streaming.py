@@ -384,6 +384,60 @@ async def test_prompt_json_direct_action_web_search_synthesizes_tool_call(monkey
 
 
 @pytest.mark.asyncio
+async def test_prompt_json_plural_envelope_synthesizes_multiple_calls(monkeypatch):
+    # The plural envelope batches independent calls into one tool_calls_done
+    # event so the runtime's gather-eligible path runs them concurrently. The
+    # singular form stays supported; _done still stops after the one envelope.
+    envelope = (
+        '{"action":"tool_calls","calls":['
+        '{"tool":"get_time","arguments":{}},'
+        '{"tool":"web_search","arguments":{"query":"weather today","max_results":3}}'
+        ']}'
+    )
+    lines = _sse({"choices": [{"delta": {"content": "Checking. " + envelope}, "finish_reason": "stop"}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "time then weather"}],
+        model="qwen3:8b", tool_call_mode="prompt_json",
+    )]
+
+    # Preamble streams; the envelope is suppressed (no JSON leaks to chat).
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "Checking. " in tokens
+    assert "tool_calls" not in tokens
+    # One tool_calls_done carrying BOTH calls — the core Step 6 assertion.
+    tc = [e for e in events if e["type"] == "tool_calls_done"]
+    assert len(tc) == 1
+    calls = tc[0]["calls"]
+    assert len(calls) == 2
+    assert calls[0]["function"]["name"] == "get_time"
+    assert calls[0]["function"]["arguments"] == {}
+    assert calls[1]["function"]["name"] == "web_search"
+    assert calls[1]["function"]["arguments"] == {"query": "weather today", "max_results": 3}
+    # Distinct call ids, OpenAI-shaped.
+    assert all(c["id"].startswith("call_") for c in calls)
+    assert len({c["id"] for c in calls}) == 2
+
+
+@pytest.mark.asyncio
+async def test_prompt_json_plural_envelope_malformed_falls_through_to_text(monkeypatch):
+    # A plural envelope with an empty/non-list calls field is NOT a tool call —
+    # it must fall through to text (not synthesize an empty tool_calls_done).
+    envelope = '{"action":"tool_calls","calls":[]}'
+    lines = _sse({"choices": [{"delta": {"content": envelope}, "finish_reason": "stop"}]})
+    monkeypatch.setattr(httpx, "AsyncClient", _make_fake_client(lines, {}))
+
+    events = [e async for e in chat_completion_stream(
+        _ollama_config(), [{"role": "user", "content": "hi"}],
+        model="qwen3:8b", tool_call_mode="prompt_json",
+    )]
+    assert not any(e["type"] == "tool_calls_done" for e in events)
+    tokens = "".join(e["content"] for e in events if e["type"] == "token")
+    assert "tool_calls" in tokens  # emitted as plain text, kept scanning
+
+
+@pytest.mark.asyncio
 async def test_prompt_json_envelope_split_across_chunks(monkeypatch):
     # The envelope arrives fragmented across chunks (incl. mid-marker). The
     # scanner must hold back the partial marker, accumulate, and synthesize once

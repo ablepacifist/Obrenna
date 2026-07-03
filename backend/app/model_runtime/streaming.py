@@ -52,6 +52,58 @@ def _is_tool_call_chunk(chunk: dict[str, Any]) -> bool:
 # the native path's shape) when a complete envelope arrives — suppressing the
 # envelope itself from the token stream so it never reaches the UI as text.
 
+# ── Literal <think> tag stream filter ────────────────────────────────────────
+#
+# Distilled orchestrators may emit literal <think>…</think> blocks in
+# delta.content (separate from Ollama's structured reasoning fields, which are
+# handled below). These must NEVER reach the user-visible answer: the filter
+# splits streamed content into (visible, thinking) so think spans are emitted
+# as thinking_delta events and stripped from token events.
+
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+# Hold back a possible partial tag forming at the buffer tail.
+_THINK_HOLDBACK = max(len(_THINK_OPEN), len(_THINK_CLOSE)) - 1
+
+
+class ThinkTagStreamFilter:
+    """Split literal ``<think>…</think>`` spans out of streamed text."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, content: str) -> tuple[str, str]:
+        """Accept new content; return (visible_text, thinking_text)."""
+        self._buf += content
+        return self._drain(hold_tail=True)
+
+    def flush(self) -> tuple[str, str]:
+        """At stream end, release everything (an unclosed tag stays thinking)."""
+        return self._drain(hold_tail=False)
+
+    def _drain(self, *, hold_tail: bool) -> tuple[str, str]:
+        visible: list[str] = []
+        thinking: list[str] = []
+        while True:
+            tag = _THINK_CLOSE if self._in_think else _THINK_OPEN
+            idx = self._buf.find(tag)
+            if idx == -1:
+                keep = _THINK_HOLDBACK if hold_tail else 0
+                emit_to = max(0, len(self._buf) - keep)
+                # Never split mid-partial-tag: only emit up to the last char
+                # that cannot begin a tag prefix still forming at the tail.
+                chunk = self._buf[:emit_to]
+                self._buf = self._buf[emit_to:]
+                (thinking if self._in_think else visible).append(chunk)
+                break
+            span = self._buf[:idx]
+            (thinking if self._in_think else visible).append(span)
+            self._buf = self._buf[idx + len(tag):]
+            self._in_think = not self._in_think
+        return ("".join(visible), "".join(thinking))
+
+
 _ENVELOPE_MARKER = '{"action"'
 _DIRECT_ACTION_TOOL_NAMES = {"get_time", "calculator", "file_read", "web_search", "get_location"}
 # Characters held back while a marker may be forming at the tail of the buffer.
@@ -60,6 +112,36 @@ _PROMPT_JSON_HOLDACK = 24
 # A leading markdown code fence (```json / ```) immediately before the envelope.
 # Small models often wrap the JSON in a fence; suppress it so it never streams.
 _LEADING_FENCE_RE = re.compile(r"\s*```[a-zA-Z0-9.+\-]*\s*\n?\s*$")
+
+
+def _coerce_args(args: Any) -> dict:
+    """Normalize a tool-call ``arguments`` value to a dict.
+
+    Some models emit arguments as a JSON string instead of an object; parse it
+    when possible, else fall back to ``{}``. Shared by the singular and plural
+    envelope parse paths so they coerce identically.
+    """
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _make_call(tool: str, args: Any) -> dict | None:
+    """Build one OpenAI-shaped tool-call dict from a tool name + arguments.
+
+    Returns ``None`` when the tool name is empty (caller skips it). Used by both
+    the singular (``tool_call``) and plural (``tool_calls``) envelope branches.
+    """
+    if not tool:
+        return None
+    return {
+        "id": "call_" + uuid.uuid4().hex[:12],
+        "type": "function",
+        "function": {"name": tool, "arguments": _coerce_args(args)},
+    }
 
 
 def _find_json_object_end(buffer: str, start: int) -> int | None:
@@ -157,6 +239,28 @@ class PromptJsonToolScanner:
             return (pre + slice_, None)
 
         action = obj.get("action")
+        if action == "tool_calls":
+            # Plural envelope: {"action":"tool_calls","calls":[{tool,arguments}, ...]}
+            # Parse all entries into one multi-call tool_calls_done event, then stop.
+            # Malformed (non-list / empty / no valid entries) falls through to text.
+            calls_raw = obj.get("calls", [])
+            if isinstance(calls_raw, list) and calls_raw:
+                calls: list[dict] = []
+                for entry in calls_raw:
+                    if not isinstance(entry, dict):
+                        continue
+                    tool = entry.get("tool") or entry.get("name") or ""
+                    call = _make_call(tool, entry.get("arguments", {}))
+                    if call is not None:
+                        calls.append(call)
+                if calls:
+                    self._flushed = end
+                    self._done = True
+                    return (pre, {"type": "tool_calls_done", "calls": calls})
+            # Malformed plural envelope — emit as text, keep scanning.
+            self._flushed = end
+            return (pre + slice_, None)
+
         if action == "tool_call":
             tool = obj.get("tool", "")
             args = obj.get("arguments", {})
@@ -170,21 +274,30 @@ class PromptJsonToolScanner:
             self._flushed = end
             return (pre + slice_, None)
 
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                args = {}
-        if not isinstance(args, dict):
-            args = {}
-        call = {
-            "id": "call_" + uuid.uuid4().hex[:12],
-            "type": "function",
-            "function": {"name": tool, "arguments": args},
-        }
+        call = _make_call(tool, args)
+        if call is None:
+            # Empty tool name — emit as text, keep scanning.
+            self._flushed = end
+            return (pre + slice_, None)
         self._flushed = end
         self._done = True
         return (pre, {"type": "tool_calls_done", "calls": [call]})
+
+
+_VALID_REASONING_EFFORTS = ("none", "low", "medium")
+
+
+def _resolve_reasoning_effort(think: bool | str) -> str:
+    """Normalize the ``think`` arg to an Ollama ``reasoning_effort`` level.
+
+    Accepts a bool (True -> "medium", False -> "none") for backward compatibility,
+    or an explicit level string ("none" | "low" | "medium") so callers can
+    downshift reasoning on cheap continuation rounds without fully disabling it.
+    Any unrecognized value falls back to "none" (safe — no reasoning requested).
+    """
+    if isinstance(think, str):
+        return think if think in _VALID_REASONING_EFFORTS else "none"
+    return "medium" if think else "none"
 
 
 async def chat_completion_stream(
@@ -197,7 +310,7 @@ async def chat_completion_stream(
     timeout: float = DEFAULT_STREAM_TIMEOUT,
     stop: list[str] | None = None,
     tools: list[dict] | None = None,
-    think: bool = False,
+    think: bool | str = False,
     tool_call_mode: str = "openai_native",
     keep_alive: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
@@ -211,10 +324,13 @@ async def chat_completion_stream(
     When `tools` is provided, includes tools/tool_choice in the request and
     parses delta.tool_calls from SSE chunks.
 
-    When `think` is True and the runtime is Ollama, sends ``reasoning_effort`` to
-    request a reasoning trace; reasoning chunks (``delta.reasoning_content`` /
-    ``delta.reasoning`` / ``delta.thinking``) are yielded as ``thinking_delta``
-    events. Non-Ollama runtimes send no reasoning controls.
+    ``think`` controls the Ollama ``reasoning_effort`` field: a bool (True ->
+    "medium", False -> "none", kept for backward compatibility) or an explicit
+    level string ("none" | "low" | "medium") so callers can downshift reasoning
+    on cheap continuation rounds without disabling it. Reasoning chunks
+    (``delta.reasoning_content`` / ``delta.reasoning`` / ``delta.thinking``) are
+    yielded as ``thinking_delta`` events whenever present. Non-Ollama runtimes
+    send no reasoning controls.
 
     When `tools` is None, yields only token events (backward-compatible behavior).
 
@@ -249,7 +365,7 @@ async def chat_completion_stream(
     # Ollama OpenAI-compatible reasoning control. Never send native `think`/
     # `options.think` to /v1/chat/completions — only the OpenAI-style field.
     if config.runtime_kind == "ollama":
-        payload["reasoning_effort"] = "medium" if think else "none"
+        payload["reasoning_effort"] = _resolve_reasoning_effort(think)
         # Ask Ollama's OpenAI-compatible endpoint to emit a ``usage`` object (and
         # the non-standard top-level eval counters) in the final stream chunk so
         # the runtime can record prefill/decode telemetry. Harmless on non-Ollama
@@ -286,6 +402,23 @@ async def chat_completion_stream(
         tool_calls_buffer: dict[int, dict[str, Any]] = {}
         # Prompt-JSON envelope scanner (only active for non-native models).
         prompt_json_scanner = PromptJsonToolScanner() if tool_call_mode == "prompt_json" else None
+        # Literal <think> tags in content must never reach the visible answer.
+        think_filter = ThinkTagStreamFilter()
+
+        def _content_events(text: str) -> list[dict[str, Any]]:
+            """Route filtered content through the prompt-JSON scanner to events."""
+            events: list[dict[str, Any]] = []
+            if not text:
+                return events
+            if prompt_json_scanner is not None:
+                token_text, tool_event = prompt_json_scanner.feed(text)
+                if token_text:
+                    events.append({"type": "token", "content": token_text})
+                if tool_event is not None:
+                    events.append(tool_event)
+            else:
+                events.append({"type": "token", "content": text})
+            return events
 
         async for line in resp.aiter_lines():
             if not line or line == "data: [DONE]":
@@ -325,17 +458,16 @@ async def chat_completion_stream(
                         yield {"type": "thinking_delta", "content": thinking}
                         continue
 
-                    # Text content
+                    # Text content — strip literal <think> spans first (they
+                    # stream as thinking_delta, never as answer tokens), then
+                    # scan what remains for prompt-JSON tool envelopes.
                     content = delta.get("content")
                     if content:
-                        if prompt_json_scanner is not None:
-                            text, tool_event = prompt_json_scanner.feed(content)
-                            if text:
-                                yield {"type": "token", "content": text}
-                            if tool_event is not None:
-                                yield tool_event
-                        else:
-                            yield {"type": "token", "content": content}
+                        visible, think_text = think_filter.feed(content)
+                        if think_text:
+                            yield {"type": "thinking_delta", "content": think_text}
+                        for ev in _content_events(visible):
+                            yield ev
 
                     # Tool calls
                     tool_calls = delta.get("tool_calls")
@@ -389,6 +521,11 @@ async def chat_completion_stream(
                         # must accumulate across chunks until finish_reason
                         # "tool_calls" flushes them.
                         tool_calls_buffer.clear()
+                        visible, think_text = think_filter.flush()
+                        if think_text:
+                            yield {"type": "thinking_delta", "content": think_text}
+                        for ev in _content_events(visible):
+                            yield ev
                         if prompt_json_scanner is not None:
                             tail = prompt_json_scanner.flush()
                             if tail:
@@ -399,7 +536,13 @@ async def chat_completion_stream(
                 continue
 
         # Defensive final flush: some streams end with [DONE] and no explicit
-        # finish_reason. Emit any text the prompt-JSON scanner is still holding.
+        # finish_reason. Emit anything the think filter and prompt-JSON scanner
+        # are still holding.
+        visible, think_text = think_filter.flush()
+        if think_text:
+            yield {"type": "thinking_delta", "content": think_text}
+        for ev in _content_events(visible):
+            yield ev
         if prompt_json_scanner is not None:
             tail = prompt_json_scanner.flush()
             if tail:

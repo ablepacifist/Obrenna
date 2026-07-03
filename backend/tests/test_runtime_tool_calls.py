@@ -47,6 +47,100 @@ class TestToolCallHandling:
         assert results[0]["tool_call_id"] == "call_001"
 
     @pytest.mark.asyncio
+    async def test_web_search_missing_query_repaired_from_user_message(self):
+        """A web_search call missing `query` is backfilled from the user message."""
+        captured: dict = {}
+
+        def handler(p):
+            captured["args"] = p["arguments"]
+            return {"results": [], "query": p["arguments"].get("query"), "count": 0}
+
+        transport = InMemoryTransport()
+        transport.register_handler("tools/call", handler)
+        client = MCPClient(transport)
+        await client.initialize()
+
+        tool_calls = [{
+            "id": "call_ws",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": {}},
+        }]
+        results = await handle_tool_calls(
+            tool_calls, client, user_message="best pizza in winnipeg",
+        )
+        # Repaired query reached the MCP; no error result.
+        assert captured["args"]["query"] == "best pizza in winnipeg"
+        assert "error" not in results[0]["content"] or '"error": true' not in results[0]["content"].lower()
+
+    @pytest.mark.asyncio
+    async def test_web_search_blank_query_treated_as_missing(self):
+        """A whitespace-only query is treated as missing and repaired."""
+        captured: dict = {}
+        transport = InMemoryTransport()
+        transport.register_handler(
+            "tools/call", lambda p: captured.update(args=p["arguments"]) or {"results": []},
+        )
+        client = MCPClient(transport)
+        await client.initialize()
+
+        tool_calls = [{
+            "id": "call_ws",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": {"query": "   "}},
+        }]
+        await handle_tool_calls(tool_calls, client, user_message="tacos near me")
+        assert captured["args"]["query"] == "tacos near me"
+
+    @pytest.mark.asyncio
+    async def test_web_search_unrepairable_short_circuits(self):
+        """No user text to backfill from → structured error, MCP never called."""
+        called = {"n": 0}
+
+        def handler(p):
+            called["n"] += 1
+            return {"results": []}
+
+        transport = InMemoryTransport()
+        transport.register_handler("tools/call", handler)
+        client = MCPClient(transport)
+        await client.initialize()
+
+        tool_calls = [{
+            "id": "call_ws",
+            "type": "function",
+            "function": {"name": "web_search", "arguments": {}},
+        }]
+        results = await handle_tool_calls(tool_calls, client, user_message="")
+        assert called["n"] == 0  # dispatch short-circuited
+        payload = json.loads(results[0]["content"])
+        assert payload["error"] is True
+        assert payload["retryable"] is True
+        assert "query" in payload["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_required_arg_no_repair_short_circuits(self):
+        """A tool with no repair strategy short-circuits on a missing required arg."""
+        called = {"n": 0}
+        transport = InMemoryTransport()
+        transport.register_handler(
+            "tools/call", lambda p: called.update(n=called["n"] + 1) or {"result": 0},
+        )
+        client = MCPClient(transport)
+        await client.initialize()
+
+        # calculator requires `expression`; no repair registered for it.
+        tool_calls = [{
+            "id": "call_calc",
+            "type": "function",
+            "function": {"name": "calculator", "arguments": {}},
+        }]
+        results = await handle_tool_calls(tool_calls, client, user_message="2+2")
+        assert called["n"] == 0
+        payload = json.loads(results[0]["content"])
+        assert payload["error"] is True
+        assert "expression" in payload["message"].lower()
+
+    @pytest.mark.asyncio
     async def test_multiple_tool_calls(self):
         transport = InMemoryTransport()
         transport.register_handler("tools/call", lambda p: {"output": f"result for {p['name']}"})
@@ -597,6 +691,149 @@ class TestOrchestrateTurnNativeToolCalling:
         tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
         assert "42" in tokens
 
+    @pytest.mark.asyncio
+    async def test_tool_call_emits_helper_narration_between_call_and_result(self, monkeypatch):
+        """A helper-model narration `tool_progress` event (stage="narrating",
+        carrying call_id) is emitted between `tool_call` and `tool_result` so
+        the card headline describes what the tool is doing while still running."""
+        from app.agent import runtime as rt
+        import app.mcp.tools as mcp_tools
+
+        rounds = iter([
+            [{"type": "tool_calls_done", "calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "calculator", "arguments": {"expression": "6*7"}}}]}],
+            [{"type": "token", "content": "The answer is 42."}],
+        ])
+
+        async def fake_stream(config, messages, **kwargs):
+            for ev in next(rounds):
+                yield ev
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        class _StubMemory:
+            def to_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: _StubMemory())
+
+        async def fake_acall(name, args):
+            return {"result": 42.0, "expression": "6*7"}
+
+        monkeypatch.setattr(mcp_tools, "acall_tool", fake_acall)
+
+        # Deterministic narration — no real model round-trip.
+        async def fake_gather_narrations(config, calls):
+            return ["Crunching the calculation 6 * 7"]
+
+        monkeypatch.setattr(rt, "gather_narrations", fake_gather_narrations)
+
+        config = RuntimeConfig(
+            provider="openai_compatible",
+            base_url="http://localhost:11434/v1",
+            models={"orchestrator": "qwen3.5:27b"},
+        )
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:27b", "tool_call_mode": "openai_native"},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "what is 6*7", "chat-narr", db=None, config=config, resolved_plan=plan,
+            workers_enabled=False,
+        )]
+
+        types = [e.type for e in events]
+        call_idx = types.index("tool_call")
+        result_idx = types.index("tool_result")
+        assert call_idx < result_idx
+
+        narrating = [
+            e for e in events
+            if e.type == "tool_progress"
+            and e.payload.get("stage") == "narrating"
+            and e.payload.get("call_id") == "call_1"
+        ]
+        assert narrating, "expected a narrating tool_progress event with call_id='call_1'"
+        assert "Crunching" in narrating[0].payload.get("summary", "")
+
+        # The narration lands between tool_call and tool_result.
+        narr_idx = types.index(narrating[0].type)  # first tool_progress narrating
+        # Find the index of THIS narrating event precisely (there may be other
+        # tool_progress events; match by call_id payload).
+        narr_pos = next(i for i, e in enumerate(events) if e is narrating[0])
+        assert call_idx < narr_pos < result_idx
+
+    @pytest.mark.asyncio
+    async def test_native_continuation_round_keeps_tools_available(self, monkeypatch):
+        """Step 5 guard: a native orchestrator must be offered tools on a
+        continuation round so it can CHAIN — say something, call a tool, reason,
+        call another tool. Previously ``model_tools`` was nulled after the first
+        tool round, capping native models at one tool call per turn. With
+        compaction + tier-aware caps + cheap continuation rounds in place, the
+        disarm is gone; this test proves the model gets a second tool call and
+        that finalization (not continuation) is what drops tools.
+        """
+        from app.agent import runtime as rt
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"worker_timeout_seconds": 1})
+
+        rounds = iter([
+            [{"type": "tool_calls_done", "calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "calculator", "arguments": {"expression": "1+1"}}}]}],
+            [{"type": "tool_calls_done", "calls": [
+                {"id": "call_2", "type": "function",
+                 "function": {"name": "calculator", "arguments": {"expression": "2+2"}}}]}],
+            [{"type": "token", "content": "chained answer"}],
+        ])
+        captured = []
+
+        async def fake_stream(config, messages, **kwargs):
+            captured.append(kwargs)
+            for ev in next(rounds):
+                yield ev
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        async def fake_handle_tool_calls(tool_calls, mcp_client):
+            return [{"tool_call_id": tc["id"], "tool_name": "calculator", "content": "2"}
+                    for tc in tool_calls]
+
+        monkeypatch.setattr(rt, "handle_tool_calls", fake_handle_tool_calls)
+
+        config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:27b", "tool_call_mode": "openai_native", "max_tool_rounds": 2},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "add then add again", "chat-chain", None, config, plan, workers_enabled=False)]
+
+        # Three model passes: round 1 tool, round 2 tool (the chain), round 3 finalization.
+        assert len(captured) == 3, f"expected 3 model passes, got {len(captured)}"
+        # Round 1: tools offered (native sends OpenAI tool definitions).
+        assert captured[0].get("tools") is not None
+        # Round 2 — the continuation/chaining round — must STILL be offered tools.
+        # This is the core Step 5 assertion; it was None before the fix.
+        assert captured[1].get("tools") is not None, (
+            "continuation round must keep tools available so a native model can chain"
+        )
+        # Round 3 — finalization (round 2's tool call hit max_tool_rounds=2) — drops tools.
+        assert captured[2].get("tools") is None, (
+            "finalization round must drop tools so the model writes the answer"
+        )
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        assert "chained answer" in tokens
+
 
 class TestRuntimeContextInjection:
     """Runtime clock grounding should be injected per turn and remain dynamic."""
@@ -726,7 +963,7 @@ class TestToolLoopFinalization:
                 return []
 
         monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
-        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"max_tool_rounds": 1, "worker_timeout_seconds": 1})
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"worker_timeout_seconds": 1})
 
         calls = {"model": 0}
 
@@ -758,7 +995,7 @@ class TestToolLoopFinalization:
 
         config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
         plan = ResolvedPlan({
-            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json"},
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json", "max_tool_rounds": 1},
         })
 
         events = [e async for e in orchestrate_turn(
@@ -787,7 +1024,7 @@ class TestToolLoopFinalization:
                 return []
 
         monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
-        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"max_tool_rounds": 1, "worker_timeout_seconds": 1})
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"worker_timeout_seconds": 1})
 
         async def fake_stream(*args, **kwargs):
             yield {
@@ -818,7 +1055,7 @@ class TestToolLoopFinalization:
 
         config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
         plan = ResolvedPlan({
-            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json"},
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json", "max_tool_rounds": 1},
         })
 
         events = [e async for e in orchestrate_turn(

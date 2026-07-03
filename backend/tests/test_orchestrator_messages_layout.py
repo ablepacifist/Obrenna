@@ -7,7 +7,7 @@ prefix/KV cache reuses them on turns 2+.
 """
 from __future__ import annotations
 
-from app.agent.runtime import _build_orchestrator_messages
+from app.agent.runtime import _build_orchestrator_messages, WEB_SEARCH_HINT
 from app.services.memory import (
     ORCHESTRATOR_STATIC_SYSTEM_PROMPT,
     MemoryContext,
@@ -18,7 +18,7 @@ _PERSONA = canonicalise_system_content(ORCHESTRATOR_STATIC_SYSTEM_PROMPT)
 _ALLOWED_TOOLS = [{"name": "get_time", "description": "Get the current time", "inputSchema": {}}]
 
 
-def _msgs(dynamic_parts, *, tool_call_mode="openai_native", allowed_tools=None):
+def _msgs(dynamic_parts, *, tool_call_mode="openai_native", allowed_tools=None, web_search_enabled=False):
     return _build_orchestrator_messages(
         user_message="Hello",
         static_parts=MemoryContext().to_static_messages(),
@@ -27,6 +27,7 @@ def _msgs(dynamic_parts, *, tool_call_mode="openai_native", allowed_tools=None):
         previous_messages=[],
         tool_call_mode=tool_call_mode,
         allowed_tools=allowed_tools,
+        web_search_enabled=web_search_enabled,
     )
 
 
@@ -62,6 +63,42 @@ class TestBandAPrimeToolContract:
         msgs = _msgs([], tool_call_mode="openai_native", allowed_tools=_ALLOWED_TOOLS)
         assert msgs[0]["content"] == _PERSONA
         assert not any("Available tools:" in m.get("content", "") for m in msgs)
+
+
+class TestBandADoublePrimeWebSearchHint:
+    def test_hint_present_when_web_enabled_native_mode(self):
+        # Native mode has no Band A′, so the hint is the second system message.
+        msgs = _msgs([], tool_call_mode="openai_native", web_search_enabled=True)
+        assert msgs[0]["content"] == _PERSONA
+        assert msgs[1]["content"] == canonicalise_system_content(WEB_SEARCH_HINT)
+
+    def test_hint_present_when_web_enabled_prompt_json_mode(self):
+        # In prompt-json mode the hint follows the tool contract (Band A′).
+        msgs = _msgs(
+            [],
+            tool_call_mode="prompt_json",
+            allowed_tools=_ALLOWED_TOOLS,
+            web_search_enabled=True,
+        )
+        assert msgs[0]["content"] == _PERSONA
+        assert "Available tools:" in msgs[1]["content"]
+        assert msgs[2]["content"] == canonicalise_system_content(WEB_SEARCH_HINT)
+
+    def test_hint_absent_when_web_disabled(self):
+        msgs = _msgs([], tool_call_mode="openai_native", web_search_enabled=False)
+        assert not any(m.get("content") == canonicalise_system_content(WEB_SEARCH_HINT) for m in msgs)
+
+    def test_hint_is_byte_stable_across_different_memory(self):
+        # The toggle is stable within a chat, so the hint must be prefix-cacheable.
+        d1 = MemoryContext(facts=[{"id": "f1", "text": "User prefers Python"}]).to_dynamic_messages()
+        d2 = MemoryContext(facts=[{"id": "f2", "text": "User lives in Seattle"}]).to_dynamic_messages()
+        m1 = _msgs(d1, tool_call_mode="prompt_json", allowed_tools=_ALLOWED_TOOLS, web_search_enabled=True)
+        m2 = _msgs(d2, tool_call_mode="prompt_json", allowed_tools=_ALLOWED_TOOLS, web_search_enabled=True)
+        # Bands A, A′, A″ all byte-identical; Band B differs.
+        assert m1[0]["content"] == m2[0]["content"]
+        assert m1[1]["content"] == m2[1]["content"]
+        assert m1[2]["content"] == m2[2]["content"]
+        assert m1[3]["content"] != m2[3]["content"]
 
 
 class TestByteStablePrefix:

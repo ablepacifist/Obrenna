@@ -15,6 +15,7 @@ from typing import Any
 
 from ..model_runtime.config import RuntimeConfig
 from ..model_runtime.streaming import chat_completion_stream
+from ..services.trace_logging import trace_event
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ async def dispatch_workers(
     timeout_seconds: int = 12,
     workers_enabled: bool = True,
     keep_alive: Any = None,
+    trace_context: dict[str, Any] | None = None,
 ) -> list[WorkerResult]:
     """Dispatch utility worker tasks with concurrency control.
 
@@ -105,7 +107,18 @@ async def dispatch_workers(
     """
     if not workers_enabled:
         logger.info("Workers disabled — skipping worker dispatch")
+        trace_event("workers_disabled", **(trace_context or {}))
         return []
+
+    trace_event(
+        "worker_dispatch_start",
+        **(trace_context or {}),
+        utility_model=utility_model,
+        helper_count=helper_count,
+        timeout_seconds=timeout_seconds,
+        system_prompt=system_prompt,
+        tasks=tasks,
+    )
     
     semaphore = asyncio.Semaphore(helper_count)
     results: list[WorkerResult] = []
@@ -116,6 +129,13 @@ async def dispatch_workers(
 
         async with semaphore:
             try:
+                trace_event(
+                    "worker_call_start",
+                    **(trace_context or {}),
+                    worker_id=wid,
+                    utility_model=utility_model,
+                    user_prompt=user_prompt,
+                )
                 result = await asyncio.wait_for(
                     _execute_worker(
                         config, utility_model, system_prompt, user_prompt,
@@ -124,6 +144,12 @@ async def dispatch_workers(
                     timeout=timeout_seconds,
                 )
                 if result is None:
+                    trace_event(
+                        "worker_call_invalid_output",
+                        **(trace_context or {}),
+                        worker_id=wid,
+                        utility_model=utility_model,
+                    )
                     return WorkerResult(
                         worker_id=wid,
                         status=WorkerStatus.INVALID_OUTPUT,
@@ -133,17 +159,44 @@ async def dispatch_workers(
                 if isinstance(result, str):
                     try:
                         parsed = json.loads(result)
+                        trace_event(
+                            "worker_call_result",
+                            **(trace_context or {}),
+                            worker_id=wid,
+                            status="success",
+                            raw_output=result,
+                            parsed_output=parsed,
+                        )
                         return WorkerResult(worker_id=wid, status=WorkerStatus.SUCCESS, output=parsed)
                     except json.JSONDecodeError:
                         pass
+                trace_event(
+                    "worker_call_result",
+                    **(trace_context or {}),
+                    worker_id=wid,
+                    status="success",
+                    output=result,
+                )
                 return WorkerResult(worker_id=wid, status=WorkerStatus.SUCCESS, output=result)
             except asyncio.TimeoutError:
+                trace_event(
+                    "worker_call_timeout",
+                    **(trace_context or {}),
+                    worker_id=wid,
+                    timeout_seconds=timeout_seconds,
+                )
                 return WorkerResult(
                     worker_id=wid,
                     status=WorkerStatus.TIMEOUT,
                     error_message=f"Worker timed out after {timeout_seconds}s",
                 )
             except Exception as exc:
+                trace_event(
+                    "worker_call_error",
+                    **(trace_context or {}),
+                    worker_id=wid,
+                    error=str(exc),
+                )
                 return WorkerResult(
                     worker_id=wid,
                     status=WorkerStatus.ERROR,
@@ -165,6 +218,11 @@ async def dispatch_workers(
         else:
             final_results.append(r)
 
+    trace_event(
+        "worker_dispatch_complete",
+        **(trace_context or {}),
+        results=[r.to_evidence_entry() for r in final_results],
+    )
     return final_results
 
 
@@ -210,6 +268,7 @@ async def summarize_into_evidence_pack(
     *,
     summarizer_prompt: str | None = None,
     keep_alive: Any = None,
+    trace_context: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """Fold worker results through the summarizer.
 
@@ -238,15 +297,35 @@ async def summarize_into_evidence_pack(
         {"role": "user", "content": f"Worker results:\n{evidence_str}"},
     ]
 
+    trace_event(
+        "summarizer_call_start",
+        **(trace_context or {}),
+        summarizer_model=summarizer_model,
+        evidence_pack=evidence_pack.entries,
+        messages=messages,
+    )
+
     try:
         summary = await _collect_from_stream(
             config, messages, model=summarizer_model, role="summarizer",
             temperature=0.1, timeout=30.0,
             keep_alive=keep_alive,
         )
+        trace_event(
+            "summarizer_call_result",
+            **(trace_context or {}),
+            summarizer_model=summarizer_model,
+            summary=summary.strip(),
+        )
         return summary.strip(), True
     except Exception as exc:
         logger.error("Summarizer failed: %s", exc)
+        trace_event(
+            "summarizer_call_error",
+            **(trace_context or {}),
+            summarizer_model=summarizer_model,
+            error=str(exc),
+        )
         return "", False
 
 

@@ -66,6 +66,13 @@ def validate_catalog_for_runtime(catalog: dict, runtime_kind: str = "ollama") ->
                     f"Model '{model_slug}' has invalid tool_call_mode '{mode}'. "
                     f"Must be one of {sorted(_VALID_TOOL_CALL_MODES)} (or omitted for the default)."
                 )
+            rd = row.get("reasoning_distilled")
+            if rd is not None and not isinstance(rd, bool):
+                errors.append(f"Model '{model_slug}' has invalid reasoning_distilled (must be bool)")
+            for field in ("max_tool_rounds", "tool_result_budget"):
+                v = row.get(field)
+                if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
+                    errors.append(f"Model '{model_slug}' has invalid {field} (must be a positive int)")
         if runtime_kind == "ollama":
             explicit = row.get("ollama_ref") if isinstance(row, dict) else None
             if not isinstance(explicit, str) or not explicit.strip():
@@ -100,6 +107,54 @@ def tool_call_mode_for(catalog: dict, model_slug: str) -> str:
         if mode in _VALID_TOOL_CALL_MODES:
             return mode
     return "openai_native"
+
+
+def reasoning_distilled_for(catalog: dict, model_slug: str) -> bool:
+    """Return whether a model is a reasoning-distilled (always-CoT) variant.
+
+    Defaults to False. This is the discriminator for the thinking-effort lever
+    on tool-continuation rounds: distilled models need in-stream CoT to form
+    their tool-call envelopes, stock models emit tool calls structurally. Keyed
+    on model identity (read from the catalog) rather than ``tool_call_mode``
+    because the two only correlate — mode is transport, distilled is capability,
+    and a future distilled model could carry native transport.
+    """
+    defs = catalog.get("model_definitions", {})
+    row = defs.get(model_slug, {}) if isinstance(defs, dict) else {}
+    if isinstance(row, dict):
+        return bool(row.get("reasoning_distilled", False))
+    return False
+
+
+def max_tool_rounds_for(catalog: dict, model_slug: str) -> int:
+    """Per-orchestrator-model cap on chained tool calls in a single turn.
+
+    Sourced from the catalog model_definition (mirrors tool_call_mode placement,
+    since the round budget tracks model capability, not VRAM — which is already
+    governed per-tier by ctx_max). Defaults to 3, a safe mid-tier value, when the
+    field is absent.
+    """
+    defs = catalog.get("model_definitions", {})
+    row = defs.get(model_slug, {}) if isinstance(defs, dict) else {}
+    if isinstance(row, dict):
+        val = row.get("max_tool_rounds")
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+    return 3
+
+
+def tool_result_budget_for(catalog: dict, model_slug: str) -> int:
+    """Per-orchestrator-model char budget for compacting a single tool result.
+
+    Sourced from the catalog model_definition. Defaults to 4000 chars when absent.
+    """
+    defs = catalog.get("model_definitions", {})
+    row = defs.get(model_slug, {}) if isinstance(defs, dict) else {}
+    if isinstance(row, dict):
+        val = row.get("tool_result_budget")
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            return val
+    return 4000
 
 
 def load_catalog(path: str | Path | None = None) -> dict:

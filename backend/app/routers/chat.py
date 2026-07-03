@@ -53,6 +53,7 @@ from ..services.memory import (
     record_turn_after_response,
 )
 from ..services.storage import artifact_pdf_path
+from ..services.trace_logging import trace_event
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,16 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     # DEBUG, not INFO: message content is private local content and must not
     # land in default-level logs on a local-first/private-by-default product.
     logger.debug("=== CHAT REQUEST === chat_id=%s message=%r file_ids=%s", payload.chat_id, payload.message, payload.file_ids)
+    trace_event(
+        "chat_request_received",
+        chat_id=payload.chat_id,
+        assistant_message_id=payload.assistant_message_id,
+        user_message=payload.message,
+        file_ids=payload.file_ids,
+        workers_enabled=payload.workers_enabled,
+        web_search=payload.web_search,
+        thinking_enabled=payload.thinking_enabled,
+    )
     ep = db.get(ModelEndpoint, 1)
     logger.info("MODEL ENDPOINT: provider=%s base_url=%s api_key_set=%s models=%s", ep.provider if ep else None, ep.base_url if ep else None, bool(ep.api_key) if ep else None, ep.models if ep else None)
 
@@ -289,9 +300,17 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     )
     db.add(user_msg)
     db.flush()
+    trace_event(
+        "user_message_persisted",
+        chat_id=chat.id,
+        user_message_id=user_msg.id,
+        user_message=user_msg.text,
+        files=user_msg.files,
+    )
 
     intent = _detect_intent(payload.message)
     logger.info("INTENT DETECTED: %s", intent)
+    trace_event("chat_intent_detected", chat_id=chat.id, user_message_id=user_msg.id, intent=intent)
     artifact_ids: list[str] = []
     reply_text = ""
     msg_id: str = payload.assistant_message_id or new_message_id()
@@ -329,6 +348,16 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
 
     # DEBUG, not INFO: reply text is private local content.
     logger.debug("CHAT RESPONSE: reply=%r artifact_ids=%s msg_id=%s", reply_text, artifact_ids, msg_id)
+    trace_event(
+        "chat_response_ready",
+        chat_id=chat.id,
+        user_message_id=user_msg.id,
+        assistant_message_id=msg_id,
+        used_runtime=used_runtime,
+        is_exp0=is_exp0,
+        reply_text=reply_text,
+        artifact_ids=artifact_ids,
+    )
 
     # Persist assistant message
     asst_msg = ChatMessage(
@@ -360,6 +389,15 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
 
     _commit_or_http_error(db, phase="assistant response")
     db.refresh(asst_msg)
+    trace_event(
+        "assistant_message_persisted",
+        chat_id=chat.id,
+        user_message_id=user_msg.id,
+        assistant_message_id=asst_msg.id,
+        assistant_text=asst_msg.text,
+        artifact_ids=asst_msg.artifacts or [],
+        memory_events=memory_events,
+    )
 
     # Dispatch fact extraction in background. Pass only IDs — the request's
     # SQLAlchemy Session is not thread-safe and must never be shared with a
@@ -541,11 +579,16 @@ def _handle_normal_chat(
     logger.info("RUNTIME CONFIG: provider=%s base_url=%s models=%s", config.provider, config.base_url, config.models)
     logger.info("RESOLVED PLAN: orchestrator_model=%s summarizer_model=%s utility_model=%s ctx=%s", resolved_plan.orchestrator_model, resolved_plan.summarizer_model, resolved_plan.utility_model, resolved_plan.ctx)
 
-    # Collect previous messages for context
+    # Collect previous messages for context. The current user message was
+    # already persisted above, so exclude it here — the runtime appends the
+    # active user message itself, and including it in history duplicated the
+    # active task (two identical trailing user turns), which biased small
+    # orchestrators toward replaying the previous assistant answer.
     from ..models import ChatMessage as CM
     prev_msgs = (
         db.query(CM)
         .filter_by(chat_id=chat.id)
+        .filter(CM.id != user_msg.id)
         .order_by(CM.created_at.desc())
         .limit(10)
         .all()

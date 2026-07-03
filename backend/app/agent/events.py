@@ -280,8 +280,14 @@ def tool_progress_event(
     stage: str | None = None,
     current: int | None = None,
     total: int | None = None,
+    call_id: str | None = None,
 ) -> StreamEvent:
-    """Create a tool progress stream event."""
+    """Create a tool progress stream event.
+
+    ``call_id`` is set only for per-call progress (e.g. helper-model narration,
+    stage="narrating") so the frontend can target a specific tool card.
+    Aggregate progress events leave it unset and feed the transient strip only.
+    """
     payload: dict[str, Any] = {
         "tool_name": tool_name,
         "status": status,
@@ -290,6 +296,8 @@ def tool_progress_event(
         payload["summary"] = summary
     if stage is not None:
         payload["stage"] = stage
+    if call_id:
+        payload["call_id"] = call_id
     if current is not None:
         payload["current"] = current
     if total is not None:

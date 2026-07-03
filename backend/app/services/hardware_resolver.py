@@ -12,7 +12,13 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .hardware_catalog import load_catalog, tool_call_mode_for
+from .hardware_catalog import (
+    load_catalog,
+    max_tool_rounds_for,
+    reasoning_distilled_for,
+    tool_call_mode_for,
+    tool_result_budget_for,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +345,9 @@ def choose_and_validate(
                 "ctx_min": plan["orchestrator"].get("ctx_min"),
                 "ctx_max": plan["orchestrator"].get("ctx_max"),
                 "tool_call_mode": tool_call_mode_for(catalog, plan["orchestrator"]["model"]),
+                "reasoning_distilled": reasoning_distilled_for(catalog, plan["orchestrator"]["model"]),
+                "max_tool_rounds": max_tool_rounds_for(catalog, plan["orchestrator"]["model"]),
+                "tool_result_budget": tool_result_budget_for(catalog, plan["orchestrator"]["model"]),
                 "keep_alive": _keep_alive_for(plan["orchestrator"], -1),
             },
             "summarizer": None,
