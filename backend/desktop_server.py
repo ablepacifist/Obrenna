@@ -5,6 +5,7 @@ Must be run with OBRENNA_DATA_DIR and OBRENNA_PORT set.
 """
 import os
 import sys
+import logging
 
 # Support old GREBGLOB_* env vars as fallback for backwards compatibility
 for old, new in [
@@ -28,6 +29,21 @@ if "OBRENNA_DATA_DIR" not in os.environ:
 
 import uvicorn
 
+
+def _configure_logging() -> str:
+    level_name = os.getenv("OBRENNA_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    if os.getenv("OBRENNA_TRACE_LOGS") == "1":
+        logging.getLogger("app.trace").setLevel(logging.INFO)
+    return level_name.lower()
+
+
+_LOG_LEVEL = _configure_logging()
+
 from main import app  # noqa: E402
 
 if __name__ == "__main__":
@@ -38,5 +54,5 @@ if __name__ == "__main__":
         "main:app",
         host=host,
         port=port,
-        log_level="info",
+        log_level=_LOG_LEVEL,
     )

@@ -50,5 +50,9 @@ src-tauri/target/
 src-tauri/resources/mcp/obrenna-mcp.exe
 src-tauri/test_output.log
 
+# --- Bundled Ollama engine (large binaries, fetched at packaging time) ---
+src-tauri/resources/ollama/*
+!src-tauri/resources/ollama/README.md
+
 # --- Kilo agent plans (auto-generated) ---
 .kilo/plans/
