@@ -1,8 +1,8 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 
-export type WordAnimationStyle = 'claude' | 'clean' | 'none'
+export type WordAnimationStyle = 'claude' | 'clean' | 'scramble' | 'none'
 
-const VALID_STYLES: WordAnimationStyle[] = ['claude', 'clean', 'none']
+const VALID_STYLES: WordAnimationStyle[] = ['claude', 'clean', 'scramble', 'none']
 const STORAGE_KEY = 'wordAnimationStyle'
 const DEFAULT_STYLE: WordAnimationStyle = 'claude'
 

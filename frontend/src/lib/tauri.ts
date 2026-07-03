@@ -66,3 +66,16 @@ export async function getLogsDir(): Promise<string> {
   if (!api) return ''
   return await api.invoke('get_logs_dir')
 }
+
+export interface OllamaStatus {
+  status: 'running' | 'started' | 'not_found' | 'error'
+  message: string
+}
+
+export async function startOllama(): Promise<OllamaStatus> {
+  const api = await ensureTauri()
+  if (!api) {
+    return { status: 'error', message: 'Desktop mode required' }
+  }
+  return await api.invoke('start_ollama')
+}

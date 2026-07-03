@@ -9,6 +9,7 @@ import { PrivacySettings } from './PrivacySettings'
 import { UpdateSettings } from './UpdateSettings'
 import { MemorySettings } from './MemorySettings'
 import { WorkersSettings } from './WorkersSettings'
+import { OllamaSettings } from './OllamaSettings'
 
 interface SettingsViewProps {
   onClose: () => void
@@ -17,6 +18,7 @@ interface SettingsViewProps {
 
 const TABS = [
   { id: 'models', label: 'Models' },
+  { id: 'ollama', label: 'Ollama' },
   { id: 'setup', label: 'Setup' },
   { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' },
@@ -52,6 +54,7 @@ export function SettingsView({ onClose, onRerunSetup }: SettingsViewProps) {
         </div>
         <div className="flex-1 overflow-y-auto p-6">
           {tab === 'models' && <ModelsSettings />}
+          {tab === 'ollama' && <OllamaSettings />}
           {tab === 'setup' && <SetupSettings onRerunSetup={onRerunSetup} />}
           {tab === 'updates' && <UpdateSettings />}
           {tab === 'appearance' && <AppearanceSettings />}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { ChatDetailDTO, ChatResponse } from '../../lib/api'
+import type { ChatDetailDTO, ChatResponse, MessageBlock } from '../../lib/api'
 import { getChat, sendMessage, uploadFile } from '../../lib/api'
 import { useAgentEvent } from '../../hooks/useAgentEvent'
 import { Composer } from './Composer'
@@ -7,11 +7,13 @@ import { EmptyState } from './EmptyState'
 import { MessageBubble } from './MessageBubble'
 import { useToast } from '../ui/Toast'
 import { useTheme } from '../../theme/ThemeProvider'
+import { useAnimationPreference } from '../../context/AnimationPreferenceContext'
 import ObrennaMono from '../../assets/logos/ObrennaMono.png'
 import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
 import { MarkdownContent } from './MarkdownContent'
 import { ThinkingPane } from './ThinkingPane'
 import { ActivityStrip, type ActivityStep } from './ActivityStrip'
+import { ToolCallCard } from './ToolCallCard'
 
 interface ChatThreadProps {
   chatId: string | null
@@ -35,6 +37,7 @@ function createClientId() {
 export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThreadProps) {
   const { addToast } = useToast()
   const { resolvedTheme } = useTheme()
+  const { style } = useAnimationPreference()
   const [chat, setChat] = useState<ChatDetailDTO | null>(null)
   const [sending, setSending] = useState(false)
   const [pendingUserText, setPendingUserText] = useState<string | null>(null)
@@ -49,13 +52,27 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   const [pendingStatus, setPendingStatus] = useState<AssistantMessageStatus>('pending')
   const [pendingPhaseLabel, setPendingPhaseLabel] = useState('Starting')
   const [pendingText, setPendingText] = useState<string>('')
+  // Ordered content blocks for the in-flight message: text runs + tool-call
+  // cards interleaved (the cadence). Tokens append to the last text block (or
+  // start a new one), tool_call pushes a tool card, tool_result marks it done.
+  // Survives the done-transition via locallyRenderedRef; cleared on reload.
+  const [pendingBlocks, setPendingBlocks] = useState<MessageBlock[]>([])
   // Ephemeral reasoning trace (not persisted)
   const [pendingThinking, setPendingThinking] = useState<string>('')
   const [thinkingExpanded, setThinkingExpanded] = useState(true)
   const hasContentTokenRef = useRef(false)
+  // The assistant message id generated for the in-flight send. Stream events
+  // carrying a different message_id belong to an earlier turn and are dropped,
+  // so late tokens/done from a previous turn can never bleed into (or close)
+  // the current bubble.
+  const activeAssistantIdRef = useRef<string | null>(null)
   const [activitySteps, setActivitySteps] = useState<ActivityStep[]>([])
   const [pendingArtifacts, setPendingArtifacts] = useState<PendingArtifactSkeleton[]>([])
   const [sources, setSources] = useState<Map<string, Array<{ title: string; url: string; snippet: string }>>>(new Map())
+  // In-memory block rendering for messages just completed in this session.
+  // Keyed by assistant message id; the refetched flat `text` must not clobber
+  // these until the chat is reloaded (Step 7 will persist blocks server-side).
+  const locallyRenderedRef = useRef<Map<string, { blocks: MessageBlock[]; sources?: Array<{ title: string; url: string; snippet: string }> }>>(new Map())
 
   useEffect(() => {
     if (!chatId) { setChat(null); setChatLoading(false); return }
@@ -67,7 +84,13 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [chat?.messages.length, pendingText, pendingThinking, activitySteps.length, pendingArtifacts.length])
+  }, [chat?.messages.length, pendingText, pendingBlocks.length, pendingThinking, activitySteps.length, pendingArtifacts.length])
+
+  useEffect(() => {
+    if (!activitySteps.length) return
+    const timer = setTimeout(() => setActivitySteps([]), 1000)
+    return () => clearTimeout(timer)
+  }, [activitySteps])
 
   const upsertActivityStep = useCallback((step: ActivityStep) => {
     setActivitySteps(prev => {
@@ -80,10 +103,12 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   }, [])
 
   const clearPendingAssistant = useCallback(() => {
+    activeAssistantIdRef.current = null
     setPendingMessageId(null)
     setPendingStatus('complete')
     setPendingPhaseLabel('')
     setPendingText('')
+    setPendingBlocks([])
     setPendingThinking('')
     setThinkingExpanded(false)
     hasContentTokenRef.current = false
@@ -99,6 +124,15 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
     payload: Record<string, unknown>
   }) => {
     if (event.chat_id !== chatId && !(chatId === null && sending)) return
+    // Scope stream events to the active turn: if a send is in flight and the
+    // event names a different assistant message, it is a stale event from a
+    // previous turn — ignore it. Events without a message_id (e.g. errors)
+    // pass through.
+    if (
+      activeAssistantIdRef.current &&
+      event.message_id &&
+      event.message_id !== activeAssistantIdRef.current
+    ) return
 
     if (event.type === 'phase') {
       const phase = typeof event.payload.phase === 'string' ? event.payload.phase : 'phase'
@@ -126,25 +160,74 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
         setPendingStatus('streaming')
         setPendingText(prev => prev + text)
+        // Append to the last block if it's text, else start a new text block —
+        // so text after a tool call begins a fresh run (the interleaved cadence).
+        setPendingBlocks(prev => {
+          const last = prev[prev.length - 1]
+          if (last && last.kind === 'text') {
+            const next = [...prev]
+            next[next.length - 1] = { kind: 'text', text: last.text + text }
+            return next
+          }
+          return [...prev, { kind: 'text', text }]
+        })
         if (!hasContentTokenRef.current) {
           hasContentTokenRef.current = true
           setThinkingExpanded(false)
         }
       }
     } else if (event.type === 'done') {
-      if (pendingMessageId && sources.has(pendingMessageId)) {
+      const finishedId = pendingMessageId
+      if (finishedId && sources.has(finishedId)) {
         setChat(prev => prev ? {
           ...prev,
           messages: prev.messages.map(m =>
-            m.id === pendingMessageId
-              ? { ...m, sources: sources.get(pendingMessageId) }
+            m.id === finishedId
+              ? { ...m, sources: sources.get(finishedId) }
               : m,
           ),
         } : prev)
       }
+      // Preserve the block-based cadence for the just-completed message within
+      // this session: stash the blocks, inject a synthetic assistant message
+      // carrying them, and skip overwriting that id when the refetch lands.
+      // On reload the refetch/empty cache returns flat text (Step 7 not done).
+      if (finishedId && pendingBlocks.length > 0) {
+        locallyRenderedRef.current.set(finishedId, { blocks: pendingBlocks, sources: sources.get(finishedId) })
+        const flatText = pendingBlocks
+          .filter(b => b.kind === 'text')
+          .map(b => (b as Extract<MessageBlock, { kind: 'text' }>).text)
+          .join('')
+          .trim()
+        const synthetic = {
+          id: finishedId,
+          role: 'assistant' as const,
+          text: flatText,
+          artifacts: [] as string[],
+          files: [] as { name: string; size: number }[],
+          created_at: new Date().toISOString(),
+          sources: sources.get(finishedId),
+          blocks: pendingBlocks,
+        }
+        setChat(prev => prev ? {
+          ...prev,
+          messages: [
+            ...prev.messages.filter(m => m.id !== finishedId),
+            synthetic,
+          ],
+        } : prev)
+      }
       clearPendingAssistant()
       if (chatId) {
-        getChat(chatId).then(setChat).catch(() => {})
+        getChat(chatId).then(data => {
+          setChat(prev => {
+            const localKeys = locallyRenderedRef.current
+            if (localKeys.size === 0 || !prev) return data
+            const localById = new Map(prev.messages.map(m => [m.id, m] as const))
+            const merged = data.messages.map(m => localKeys.has(m.id) ? (localById.get(m.id) ?? m) : m)
+            return { ...data, messages: merged }
+          })
+        }).catch(() => {})
       }
     } else if (event.type === 'error') {
       const msg = (event.payload.message as string) || 'An error occurred'
@@ -152,14 +235,45 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       upsertActivityStep({ key: 'error', label: msg, status: 'error' })
       clearPendingAssistant()
       addToast(msg, 'error', 4000)
+    } else if (event.type === 'tool_call') {
+      // Push a tool-call card into the ordered block list. Keyed by call_id so
+      // a later tool_result can flip it to done. ActivityStrip still gets the
+      // transient progress hint (auto-clears); the card itself persists.
+      const payload = event.payload as Record<string, unknown>
+      const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'tool'
+      const callId = typeof payload.call_id === 'string' ? payload.call_id : ''
+      const args = payload.arguments && typeof payload.arguments === 'object'
+        ? payload.arguments as Record<string, unknown>
+        : {}
+      setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+      setPendingBlocks(prev => {
+        if (callId && prev.some(b => b.kind === 'tool' && b.callId === callId)) {
+          return prev.map(b => b.kind === 'tool' && b.callId === callId
+            ? { ...b, toolName, args }
+            : b)
+        }
+        return [...prev, { kind: 'tool', callId, toolName, args, status: 'running' }]
+      })
     } else if (event.type === 'tool_progress') {
       const payload = event.payload as Record<string, unknown>
       const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'tool'
       const status = typeof payload.status === 'string' ? payload.status : 'running'
       const summary = typeof payload.summary === 'string' ? payload.summary : toolName
       const stage = typeof payload.stage === 'string' ? payload.stage : undefined
+      const callId = typeof payload.call_id === 'string' ? payload.call_id : ''
       const progress = typeof payload.progress_pct === 'number' ? `${payload.progress_pct}%` : undefined
       const messageId = event.message_id || pendingMessageId
+      // Helper-model narration (stage="narrating") carries a call_id and a
+      // human-readable summary; attach it to the matching tool card so the
+      // headline describes what the tool is doing. Aggregate/done progress
+      // events have no call_id and feed only the transient ActivityStrip.
+      if (stage === 'narrating' && callId && typeof summary === 'string') {
+        setPendingBlocks(prev => prev.map(b =>
+          b.kind === 'tool' && b.callId === callId
+            ? { ...b, description: summary }
+            : b,
+        ))
+      }
       if (messageId) {
         setPendingMessageId(prev => prev ?? messageId)
         upsertActivityStep({
@@ -214,7 +328,16 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
     } else if (event.type === 'tool_result') {
       const payload = event.payload as Record<string, unknown>
       const resultStr = payload.result as string
+      const callId = typeof payload.call_id === 'string' ? payload.call_id : ''
       const messageId = event.message_id || pendingMessageId
+      // Flip the matching tool card to done with a short result preview.
+      if (callId) {
+        setPendingBlocks(prev => prev.map(b =>
+          b.kind === 'tool' && b.callId === callId
+            ? { ...b, status: 'done', summary: (resultStr || '').slice(0, 140) }
+            : b,
+        ))
+      }
       if (messageId && resultStr) {
         try {
           const result = JSON.parse(resultStr)
@@ -232,19 +355,21 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         }
       }
     }
-  }, [chatId, sending, addToast, pendingMessageId, sources, clearPendingAssistant, upsertActivityStep])
+  }, [chatId, sending, addToast, pendingMessageId, pendingBlocks, sources, clearPendingAssistant, upsertActivityStep])
 
   useAgentEvent(handleAgentEvent)
 
   const handleSend = async (text: string, files: File[]) => {
     if (!text.trim() && files.length === 0) return
     const assistantMessageId = createClientId()
+    activeAssistantIdRef.current = assistantMessageId
     setSending(true)
     if (!chatId) setPendingUserText(text)
     setPendingMessageId(assistantMessageId)
     setPendingStatus('pending')
     setPendingPhaseLabel('Starting')
     setPendingText('')
+    setPendingBlocks([])
     setPendingThinking('')
     setActivitySteps([{ key: 'phase:accepted', label: 'Starting', status: 'running' }])
     setPendingArtifacts([])
@@ -348,9 +473,21 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
           onExpandedChange={setThinkingExpanded}
         />
         <div className="text-[14px] text-(--ink)">
-          {pendingText
-            ? <MarkdownContent>{pendingText}</MarkdownContent>
-            : <span className="text-(--ink-muted)">{pendingPhaseLabel || 'Starting'}</span>}
+          {pendingBlocks.length > 0 ? (
+            <div className="space-y-2">
+              {pendingBlocks.map((b, i) =>
+                b.kind === 'text' ? (
+                  <MarkdownContent key={i} streaming={style === 'scramble'}>{b.text}</MarkdownContent>
+                ) : (
+                  <ToolCallCard key={i} block={b} />
+                ),
+              )}
+            </div>
+          ) : pendingText ? (
+            <MarkdownContent streaming={style === 'scramble'}>{pendingText}</MarkdownContent>
+          ) : (
+            <span className="text-(--ink-muted)">{pendingPhaseLabel || 'Starting'}</span>
+          )}
         </div>
         <ActivityStrip steps={activitySteps} />
         {pendingArtifacts.length > 0 && (

@@ -6,6 +6,7 @@ import { getArtifact } from '../../lib/api'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { MarkdownContent } from './MarkdownContent'
 import { ThinkingPane } from './ThinkingPane'
+import { ToolCallCard } from './ToolCallCard'
 import { useTheme } from '../../theme/ThemeProvider'
 import ObrennaMono from '../../assets/logos/ObrennaMono.png'
 import ObrennaMonoWhite from '../../assets/logos/ObrennaMonoWhite.png'
@@ -80,7 +81,19 @@ export function MessageBubble({ msg, onOpenArtifact }: MessageBubbleProps) {
           />
         ) : null}
         <div className="text-[14px] text-(--ink)">
-          <MarkdownContent>{msg.text ?? ''}</MarkdownContent>
+          {msg.blocks && msg.blocks.length > 0 ? (
+            <div className="space-y-2">
+              {msg.blocks.map((b, i) =>
+                b.kind === 'text' ? (
+                  <MarkdownContent key={i}>{b.text}</MarkdownContent>
+                ) : (
+                  <ToolCallCard key={i} block={b} />
+                ),
+              )}
+            </div>
+          ) : (
+            <MarkdownContent>{msg.text ?? ''}</MarkdownContent>
+          )}
         </div>
         {/* Source citations */}
         {msg.sources && msg.sources.length > 0 && (

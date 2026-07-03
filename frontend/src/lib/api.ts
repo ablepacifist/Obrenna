@@ -203,6 +203,27 @@ export async function downloadPdfUrl(id: string): Promise<string> {
 }
 
 // ── chat ──────────────────────────────────────────────────────────────────────
+
+// Ordered content blocks for an assistant message. The backend streams these
+// as discrete events (token / tool_call / tool_result) so the UI can render an
+// interleaved cadence — prose → tool card → prose → tool card — instead of one
+// flat string. `blocks` is UI-only: the backend still persists flat `text`
+// (Step 7 will persist blocks server-side); the frontend attaches blocks
+// in-memory for the in-flight and just-completed message so the cadence
+// survives the done-transition within a session, then falls back to flat text
+// on reload.
+export type MessageBlock =
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'tool'
+      callId: string
+      toolName: string
+      args: Record<string, unknown>
+      status: 'running' | 'done' | 'error'
+      summary?: string
+      description?: string
+    }
+
 export type ChatMessageDTO = {
   id: string
   role: 'user' | 'assistant'
@@ -211,6 +232,9 @@ export type ChatMessageDTO = {
   files: { name: string; size: number }[]
   created_at: string
   sources?: { title: string; url: string; snippet: string }[]
+  // UI-only (not persisted by the backend yet). Present on the in-flight and
+  // just-completed assistant message so the cadence renders after `done`.
+  blocks?: MessageBlock[]
 }
 export type ChatResponse = { chat_id: string; message: ChatMessageDTO; memory_events?: MemoryEvent[] }
 export type ChatDTO = { id: string; title: string; folder_id?: string; created_at: string; updated_at: string }

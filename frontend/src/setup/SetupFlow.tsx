@@ -357,7 +357,7 @@ export function SetupFlow({ onFinish }: SetupFlowProps) {
 
         {isDesktop && step === 0 && ollamaFound === true && (
           <div className="mb-4 text-[12px] text-(--ok) bg-(--ok)/5 border border-(--ok)/20 rounded-lg px-3 py-2">
-            Local Ollama server detected at localhost:11434
+            Local AI engine ready on localhost:11434
           </div>
         )}
 

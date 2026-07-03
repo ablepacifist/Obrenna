@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { ThemeProvider } from './theme/ThemeProvider'
 import { ToastProvider } from './components/ui/Toast'
 import { AnimationPreferenceProvider } from './context/AnimationPreferenceContext'
+import { MetricsPreferenceProvider } from './context/MetricsPreferenceContext'
+import { TokenRateProvider } from './context/TokenRateContext'
 import { getAppSettings } from './lib/api'
 import { getConfig } from './lib/config'
 import { SetupFlow } from './setup/SetupFlow'
@@ -9,6 +11,7 @@ import { Sidebar } from './components/Sidebar'
 import { ChatThread } from './components/chat/ChatThread'
 import { ArtifactPanel } from './components/artifacts/ArtifactPanel'
 import { SettingsView } from './components/settings/SettingsView'
+import { TokenRateIndicator } from './components/chat/TokenRateIndicator'
 
 export default function App() {
   const [setupDone, setSetupDone] = useState<boolean | null>(null)
@@ -72,9 +75,11 @@ export default function App() {
      return (
         <ThemeProvider>
           <AnimationPreferenceProvider>
+          <MetricsPreferenceProvider>
           <ToastProvider>
             <SetupFlow onFinish={() => setSetupDone(true)} />
           </ToastProvider>
+          </MetricsPreferenceProvider>
           </AnimationPreferenceProvider>
         </ThemeProvider>
       )
@@ -83,6 +88,8 @@ export default function App() {
  return (
       <ThemeProvider>
         <AnimationPreferenceProvider>
+        <MetricsPreferenceProvider>
+        <TokenRateProvider>
         <ToastProvider>
         <div className="h-screen w-screen flex bg-(--bg) text-(--ink) antialiased">
         <Sidebar
@@ -121,8 +128,12 @@ export default function App() {
             onRerunSetup={() => { setSettingsOpen(false); setSetupDone(false) }}
           />
         )}
+
+        <TokenRateIndicator />
        </div>
         </ToastProvider>
+        </TokenRateProvider>
+        </MetricsPreferenceProvider>
         </AnimationPreferenceProvider>
       </ThemeProvider>
     )
