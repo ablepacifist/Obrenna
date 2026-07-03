@@ -93,19 +93,12 @@ impl ExprParser {
                     i += 1;
                 }
                 '-' => {
+                    // Always a Minus token. Lexing "-2" as a negative-number
+                    // literal made "10-2" tokenize as [10, -2] and fail with a
+                    // trailing-token error; unary minus is handled by
+                    // parse_primary, which covers "-5" and "3*-2" correctly.
+                    tokens.push(Token::Minus);
                     i += 1;
-                    if i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                        let start = i;
-                        while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                            i += 1;
-                        }
-                        let num_str: String = chars[start..i].iter().collect();
-                        if let Ok(num) = format!("-{}", num_str).parse::<f64>() {
-                            tokens.push(Token::Number(num));
-                        }
-                    } else {
-                        tokens.push(Token::Minus);
-                    }
                 }
                 '*' => {
                     tokens.push(Token::Star);
@@ -262,5 +255,20 @@ mod tests {
     #[test]
     fn nested_parens_work() {
         assert_eq!(evaluate_expression("((2+3)*2)").unwrap(), 10.0);
+    }
+
+    #[test]
+    fn unspaced_subtraction_works() {
+        // Regression: "-2" used to lex as a negative literal, making "10-2"
+        // fail as [10, -2] with a trailing-token error.
+        assert_eq!(evaluate_expression("10-2").unwrap(), 8.0);
+        assert_eq!(evaluate_expression("10 - 2").unwrap(), 8.0);
+    }
+
+    #[test]
+    fn unary_minus_still_works() {
+        assert_eq!(evaluate_expression("-5").unwrap(), -5.0);
+        assert_eq!(evaluate_expression("3*-2").unwrap(), -6.0);
+        assert_eq!(evaluate_expression("(6*25+90)/4").unwrap(), 60.0);
     }
 }
