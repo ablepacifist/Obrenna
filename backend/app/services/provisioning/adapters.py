@@ -146,6 +146,10 @@ class OllamaAdapter(RuntimeAdapter):
                         event = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    error = event.get("error")
+                    if error:
+                        yield PullProgress(status="failed", error=str(error), done=True)
+                        return
                     status = str(event.get("status") or "downloading")
                     completed = int(event.get("completed") or 0)
                     total = int(event.get("total") or 0)
