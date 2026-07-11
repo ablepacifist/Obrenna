@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+
 from ...db import SessionLocal
 from ...model_runtime.config import RuntimeConfig
 from ...models import AppSettings, ModelEndpoint, ProvisionEventLog, ProvisionJob, ProvisionJobItem
@@ -99,7 +101,14 @@ class ProvisioningManager:
                 .all()
             )
             catalog = load_catalog()
-            installed = adapter.list_installed_models()
+            try:
+                installed = adapter.list_installed_models()
+            except httpx.ConnectError as exc:
+                runtime_name = "Ollama" if cfg.runtime_kind == "ollama" else "the model runtime"
+                raise RuntimeError(
+                    f"Could not reach {runtime_name} at {cfg.base_url} — "
+                    f"is it installed and running?"
+                ) from exc
 
             all_ready = True
             for item in items:
