@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STREAM_TIMEOUT = 60.0
 
+# Ollama models that reject the `think` param ("<model> does not support
+# thinking", HTTP 400) — learned at runtime the first time it happens, then
+# never sent `think` again. Lets non-reasoning models (e.g. qwen2.5-coder) be
+# used as the orchestrator without per-model configuration.
+_NO_THINK_MODELS: set[str] = set()
+
 
 def _first_non_empty_str(*values: object) -> str:
     """Return the first non-empty string among ``values`` (else ``""``)."""
@@ -105,10 +111,19 @@ class ThinkTagStreamFilter:
 
 
 _ENVELOPE_MARKER = '{"action"'
+# The envelope-start detector, tolerant of the whitespace/newlines a model puts
+# between `{` and `"action"` when it PRETTY-PRINTS the JSON. A literal
+# `{"action"` substring search missed `{\n    "action"` entirely, so a
+# pretty-printed tool call leaked into the chat as text and never executed
+# (qwen2.5-coder does this — the "agent can't make files" bug). `\s*` matches
+# any indentation. Anchored variants below for the flush/startswith checks.
+_ENVELOPE_START_RE = re.compile(r'\{\s*"action"')
+_ENVELOPE_START_ANCHORED_RE = re.compile(r'\{\s*"action"')
 _DIRECT_ACTION_TOOL_NAMES = {"get_time", "calculator", "file_read", "web_search", "get_location"}
 # Characters held back while a marker may be forming at the tail of the buffer.
-# Must exceed len('{"action":"tool_call"') so a partial marker is never flushed.
-_PROMPT_JSON_HOLDACK = 24
+# Must exceed the longest partial marker, INCLUDING pretty-print whitespace —
+# `{\n<indent>"action":"tool_call"` can run ~30+ chars, so this is generous.
+_PROMPT_JSON_HOLDACK = 48
 # A leading markdown code fence (```json / ```) immediately before the envelope.
 # Small models often wrap the JSON in a fence; suppress it so it never streams.
 _LEADING_FENCE_RE = re.compile(r"\s*```[a-zA-Z0-9.+\-]*\s*\n?\s*$")
@@ -177,6 +192,37 @@ def _find_json_object_end(buffer: str, start: int) -> int | None:
     return None
 
 
+def _loads_prompt_json_lenient(text: str) -> dict | list | None:
+    """json.loads, with repairs for the escaping errors models make when they
+    stuff a whole code file into a JSON string argument. Returns the parsed
+    object, or None if it still can't be parsed.
+
+    Repairs, applied only if strict parsing fails:
+      * ``\\'`` → ``'`` — models escape single quotes (`print(\\'x\\')`), but
+        ``\\'`` is not a valid JSON escape and blows up the whole tool call.
+      * a raw newline/tab/CR inside a JSON string → its escaped form, for models
+        that emit a literal newline in ``content`` instead of ``\\n``.
+    Both are extremely common when writing code and would otherwise force the
+    write into the malformed→skeleton fallback.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    repaired = text.replace("\\'", "'")
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+    # Escape raw control chars that appear inside strings (json is strict about
+    # literal newlines/tabs in string values). strict=False permits control
+    # characters in strings — a targeted, safe relaxation.
+    try:
+        return json.loads(repaired, strict=False)
+    except json.JSONDecodeError:
+        return None
+
+
 class PromptJsonToolScanner:
     """Scan a streaming text buffer for a prompt-JSON tool-call envelope."""
 
@@ -193,16 +239,30 @@ class PromptJsonToolScanner:
             self._buffer += content
         return self._scan()
 
-    def flush(self) -> str:
-        """At stream end, emit any held-back text (no envelope pending)."""
+    def flush(self) -> tuple[str, dict[str, Any] | None]:
+        """At stream end, emit any held-back text.
+
+        A tool-call envelope that was opened (marker seen) but never closed
+        by the time the stream ends -- e.g. the model was cut off mid
+        ``new_string`` on a large edit -- is never leaked to the user as a
+        raw JSON fragment: it surfaces as a ``tool_call_malformed`` event
+        instead so the runtime can feed the model a retryable failure rather
+        than silently ending the turn with broken JSON as the "answer".
+        """
         if self._done:
-            return ""
+            return ("", None)
         remaining = self._buffer[self._flushed:]
         self._flushed = len(self._buffer)
-        return remaining
+        # An opened-but-unclosed envelope (marker seen, JSON never closed) — match
+        # at the very start, tolerant of pretty-print whitespace after `{`.
+        if _ENVELOPE_START_ANCHORED_RE.match(remaining):
+            self._done = True
+            return ("", {"type": "tool_call_malformed", "raw": remaining})
+        return (remaining, None)
 
     def _scan(self) -> tuple[str, dict[str, Any] | None]:
-        marker = self._buffer.find(_ENVELOPE_MARKER, self._flushed)
+        _m = _ENVELOPE_START_RE.search(self._buffer, self._flushed)
+        marker = _m.start() if _m else -1
         if marker == -1:
             # No envelope yet — emit everything except a holdback tail in case a
             # marker is still forming at the end of the buffer.
@@ -225,13 +285,16 @@ class PromptJsonToolScanner:
             return (pre, None)
 
         slice_ = self._buffer[marker:end]
-        try:
-            obj = json.loads(slice_)
-        except json.JSONDecodeError:
-            # Looked like a marker but isn't valid JSON — treat as plain text and
-            # continue scanning after it.
+        obj = _loads_prompt_json_lenient(slice_)
+        if obj is None:
+            # Marker seen and braces balanced, but the content isn't valid JSON
+            # even after lenient repair -- almost always a genuinely malformed
+            # tool call (e.g. a badly-truncated new_string), not coincidental
+            # prose. Never leak it as text; surface as a failed tool call so the
+            # runtime can prompt a retry.
             self._flushed = end
-            return (pre + slice_, None)
+            self._done = True
+            return (pre, {"type": "tool_call_malformed", "raw": slice_})
 
         if not isinstance(obj, dict):
             # Valid JSON but not a tool call — emit as text, keep scanning.
@@ -300,6 +363,259 @@ def _resolve_reasoning_effort(think: bool | str) -> str:
     return "medium" if think else "none"
 
 
+class _ContentProcessor:
+    """Shared content→events routing for the Ollama native streaming path.
+
+    Strips literal ``<think>`` spans to ``thinking_delta`` events and, in
+    ``prompt_json`` mode, scans the remaining text for a tool-call envelope
+    (suppressing it from token output and synthesizing ``tool_calls_done`` /
+    ``tool_call_malformed``). Mirrors the inline handling the OpenAI-compat
+    path uses, so both transports emit identical downstream event shapes.
+    """
+
+    def __init__(self, tool_call_mode: str) -> None:
+        self._scanner = PromptJsonToolScanner() if tool_call_mode == "prompt_json" else None
+        self._think = ThinkTagStreamFilter()
+
+    def feed(self, content: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        if not content:
+            return events
+        visible, think_text = self._think.feed(content)
+        if think_text:
+            events.append({"type": "thinking_delta", "content": think_text})
+        events.extend(self._route(visible))
+        return events
+
+    def _route(self, visible: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        if not visible:
+            return events
+        if self._scanner is not None:
+            token_text, tool_event = self._scanner.feed(visible)
+            if token_text:
+                events.append({"type": "token", "content": token_text})
+            if tool_event is not None:
+                events.append(tool_event)
+        else:
+            events.append({"type": "token", "content": visible})
+        return events
+
+    def flush(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        visible, think_text = self._think.flush()
+        if think_text:
+            events.append({"type": "thinking_delta", "content": think_text})
+        events.extend(self._route(visible))
+        if self._scanner is not None:
+            tail_text, tail_event = self._scanner.flush()
+            if tail_text:
+                events.append({"type": "token", "content": tail_text})
+            if tail_event is not None:
+                events.append(tail_event)
+        return events
+
+
+def _ollama_native_url(config: RuntimeConfig) -> str:
+    """Derive Ollama's native ``/api/chat`` URL from the configured base_url.
+
+    The base_url points at the OpenAI-compat surface (``.../v1``); the native
+    endpoint is a sibling (``.../api/chat``). We must use native because the
+    OpenAI-compat ``/v1/chat/completions`` endpoint SILENTLY IGNORES
+    ``options.num_ctx`` and caps context at Ollama's 4096 default — which
+    truncates long prompts and the model's tool-call JSON mid-emit. The native
+    endpoint honours ``options.num_ctx`` per request. (Verified against live
+    Ollama: a 5485-token prompt 400s on /v1/ but fits and completes on native
+    with num_ctx=8192.)
+    """
+    base = (config.base_url or "").rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")].rstrip("/")
+    return base + "/api/chat"
+
+
+def _normalize_ollama_messages(messages: list[dict]) -> list[dict]:
+    """Translate OpenAI-style tool history to Ollama's native /api/chat shape.
+
+    The runtime builds tool-call history in OpenAI form: assistant ``tool_calls``
+    with ``arguments`` as a JSON *string* and ``content: None``, and tool results
+    keyed by ``tool_call_id``. Ollama's native endpoint rejects that
+    (``arguments`` must be an object, not a string → 400) and expects tool
+    results keyed by ``tool_name``. Convert here so native tool-calling round
+    trips work; non-tool messages pass through untouched.
+    """
+    out: list[dict] = []
+    id_to_name: dict[str, str] = {}
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            native_calls = []
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                name = fn.get("name", "")
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                if tc.get("id"):
+                    id_to_name[tc["id"]] = name
+                native_calls.append({"function": {"name": name, "arguments": args if isinstance(args, dict) else {}}})
+            nm = dict(m)
+            nm["content"] = m.get("content") or ""
+            nm["tool_calls"] = native_calls
+            out.append(nm)
+        elif role == "tool":
+            nm = {"role": "tool", "content": m.get("content", "")}
+            tool_name = m.get("tool_name") or id_to_name.get(m.get("tool_call_id", ""))
+            if tool_name:
+                nm["tool_name"] = tool_name
+            out.append(nm)
+        else:
+            out.append(m)
+    return out
+
+
+async def _ollama_native_stream(
+    config: RuntimeConfig,
+    messages: list[dict],
+    *,
+    model: str,
+    temperature: float,
+    timeout: float,
+    stop: list[str] | None,
+    tools: list[dict] | None,
+    think: bool | str,
+    tool_call_mode: str,
+    keep_alive: Any,
+    num_ctx: int | None,
+) -> AsyncIterator[dict[str, Any]]:
+    """Stream from Ollama's native ``/api/chat`` endpoint (NDJSON).
+
+    Used for all Ollama requests so ``num_ctx`` is actually applied. Yields the
+    same event shapes as the OpenAI-compat path (token / thinking_delta /
+    tool_calls_done / tool_call_malformed / stream_stats).
+    """
+    options: dict[str, Any] = {"temperature": temperature}
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
+    if stop:
+        options["stop"] = stop
+
+    effort = _resolve_reasoning_effort(think)
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _normalize_ollama_messages(messages),
+        "stream": True,
+        "options": options,
+        # Native accepts think as bool or level; a bool is honoured across all
+        # Ollama versions, so map effort→bool to avoid version-specific 400s.
+        # (Reasoning-distilled models emit their <think> block regardless; this
+        # governs separation, and message.thinking is routed to thinking_delta.)
+        "think": effort != "none",
+    }
+    # Non-reasoning models (e.g. qwen2.5-coder) return 400 "<model> does not
+    # support thinking" if `think` is sent. We learn which models those are the
+    # first time and never send `think` to them again — so the whole app works
+    # with any mix of thinking / non-thinking models without per-model config.
+    if model in _NO_THINK_MODELS:
+        payload.pop("think", None)
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    if tools:
+        payload["tools"] = tools
+
+    url = _ollama_native_url(config)
+    logger.info("STREAMING REQUEST (native): model=%s url=%s messages_count=%d num_ctx=%s tools=%s",
+                model, url, len(messages), num_ctx, "yes" if tools else "no")
+
+    processor = _ContentProcessor(tool_call_mode)
+    stats: dict[str, Any] = {}
+    client = get_model_client()
+
+    for _attempt in range(2):
+        async with client.stream(
+            "POST", url, headers=config.headers, json=payload, timeout=timeout,
+        ) as resp:
+            if resp.status_code == 400 and payload.get("think") is not None:
+                body = (await resp.aread()).decode("utf-8", "replace")
+                if "does not support thinking" in body.lower():
+                    _NO_THINK_MODELS.add(model)
+                    payload.pop("think", None)
+                    logger.info("Model %s does not support thinking; retrying without it.", model)
+                    continue  # retry once, without `think`
+            resp.raise_for_status()
+            logger.info("STREAMING RESPONSE (native): status=%d", resp.status_code)
+            async for ev in _consume_native_stream(resp, processor, stats):
+                yield ev
+        break
+    if stats:
+        yield {"type": "stream_stats", "stats": stats}
+    return
+
+
+async def _consume_native_stream(resp, processor, stats: dict[str, Any]):
+    """Parse the NDJSON body of a native /api/chat stream into events."""
+    async for line in resp.aiter_lines():
+            if not line or not line.strip():
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse native NDJSON chunk: %s", line[:100])
+                continue
+
+            msg = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
+            thinking = msg.get("thinking")
+            if thinking:
+                yield {"type": "thinking_delta", "content": thinking}
+            content = msg.get("content")
+            if content:
+                for ev in processor.feed(content):
+                    yield ev
+
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                calls = []
+                for tc in tool_calls:
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    name = fn.get("name", "")
+                    if not name:
+                        continue
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, TypeError):
+                            args = {}
+                    calls.append({
+                        "id": "call_" + uuid.uuid4().hex[:12],
+                        "type": "function",
+                        "function": {"name": name, "arguments": args if isinstance(args, dict) else {}},
+                    })
+                if calls:
+                    yield {"type": "tool_calls_done", "calls": calls}
+
+            if chunk.get("done"):
+                for key in _OLLAMA_STAT_KEYS_NATIVE:
+                    if key in chunk:
+                        stats[key] = chunk[key]
+                for ev in processor.flush():
+                    yield ev
+    # NOTE: stream_stats is yielded by the caller (after any think-retry), not
+    # here — `stats` is mutated in place so the caller sees the terminal counters.
+
+
+# Native /api/chat terminal-chunk counter keys (same names as the OpenAI-compat
+# top-level extension keys, minus the OpenAI ``usage`` object which native omits).
+_OLLAMA_STAT_KEYS_NATIVE = (
+    "prompt_eval_count", "prompt_eval_duration",
+    "eval_count", "eval_duration",
+    "total_duration", "load_duration",
+)
+
+
 async def chat_completion_stream(
     config: RuntimeConfig,
     messages: list[dict],
@@ -313,6 +629,7 @@ async def chat_completion_stream(
     think: bool | str = False,
     tool_call_mode: str = "openai_native",
     keep_alive: Any = None,
+    num_ctx: int | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream tokens from an OpenAI-compatible endpoint.
 
@@ -320,6 +637,17 @@ async def chat_completion_stream(
       {"type": "token", "content": "..."}  — for text tokens
       {"type": "thinking_delta", "content": "..."}  — for reasoning/thinking tokens
       {"type": "tool_calls_done", "calls": [...]}  — when model requests tool calls
+      {"type": "tool_call_malformed", "raw": "..."}  — prompt-JSON envelope that
+        never closed or failed to parse; never leaked to the user as raw text
+
+    ``num_ctx``, when given on an Ollama runtime, is sent as Ollama's
+    ``options.num_ctx`` so the context window actually matches what the
+    hardware resolver fitted to this machine's VRAM/RAM budget. Without it,
+    Ollama silently falls back to its own small built-in default regardless
+    of what the resolver computed — starving reasoning-distilled models
+    (which spend real token budget on an invisible ``<think>`` block before
+    the visible answer) and truncating the answer, including tool-call JSON,
+    well before the model is actually done.
 
     When `tools` is provided, includes tools/tool_choice in the request and
     parses delta.tool_calls from SSE chunks.
@@ -343,6 +671,21 @@ async def chat_completion_stream(
     if not chosen:
         raise ValueError("No model configured for this request.")
 
+    # Ollama requests go through the NATIVE /api/chat endpoint, not the
+    # OpenAI-compat /v1/chat/completions surface: only native honours
+    # options.num_ctx. Using /v1/ silently caps context at 4096, truncating
+    # long prompts and the model's tool-call JSON. Everything downstream (the
+    # prompt-JSON scanner, tool loop, event shapes) is identical.
+    if config.runtime_kind == "ollama":
+        async for event in _ollama_native_stream(
+            config, messages,
+            model=chosen, temperature=temperature, timeout=timeout, stop=stop,
+            tools=tools, think=think, tool_call_mode=tool_call_mode,
+            keep_alive=keep_alive, num_ctx=num_ctx,
+        ):
+            yield event
+        return
+
     payload: dict = {
         "model": chosen,
         "messages": messages,
@@ -362,15 +705,10 @@ async def chat_completion_stream(
     # in the runtime.
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
-    # Ollama OpenAI-compatible reasoning control. Never send native `think`/
-    # `options.think` to /v1/chat/completions — only the OpenAI-style field.
-    if config.runtime_kind == "ollama":
-        payload["reasoning_effort"] = _resolve_reasoning_effort(think)
-        # Ask Ollama's OpenAI-compatible endpoint to emit a ``usage`` object (and
-        # the non-standard top-level eval counters) in the final stream chunk so
-        # the runtime can record prefill/decode telemetry. Harmless on non-Ollama
-        # runtimes that ignore unknown fields; Ollama honours it.
-        payload["stream_options"] = {"include_usage": True}
+    # NOTE: Ollama never reaches this OpenAI-compat path — it is routed to the
+    # native /api/chat endpoint above (the only place options.num_ctx is
+    # honoured). This branch serves other OpenAI-compatible runtimes (LM Studio,
+    # vLLM, etc.), which get no Ollama-specific reasoning/context fields.
 
     logger.info("STREAMING REQUEST: model=%s url=%s messages_count=%d temperature=%.1f tools=%s",
                 chosen, config.url("chat/completions"), len(messages), temperature,
@@ -527,9 +865,11 @@ async def chat_completion_stream(
                         for ev in _content_events(visible):
                             yield ev
                         if prompt_json_scanner is not None:
-                            tail = prompt_json_scanner.flush()
-                            if tail:
-                                yield {"type": "token", "content": tail}
+                            tail_text, tail_event = prompt_json_scanner.flush()
+                            if tail_text:
+                                yield {"type": "token", "content": tail_text}
+                            if tail_event is not None:
+                                yield tail_event
 
             except json.JSONDecodeError:
                 logger.warning("Failed to parse SSE chunk: %s", data_str[:100])
@@ -544,9 +884,11 @@ async def chat_completion_stream(
         for ev in _content_events(visible):
             yield ev
         if prompt_json_scanner is not None:
-            tail = prompt_json_scanner.flush()
-            if tail:
-                yield {"type": "token", "content": tail}
+            tail_text, tail_event = prompt_json_scanner.flush()
+            if tail_text:
+                yield {"type": "token", "content": tail_text}
+            if tail_event is not None:
+                yield tail_event
 
         # Yield the captured Ollama eval/usage counters as a single terminal
         # event. Empty on non-Ollama runtimes or when no counters were present.

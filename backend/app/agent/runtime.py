@@ -24,6 +24,16 @@ from sqlalchemy.orm import Session
 
 from ..mcp.client import InMemoryTransport
 from ..mcp.tools import list_tools, call_tool, tool_def_by_name
+from ..mcp.custom_tool_dispatch import (
+    call_custom_tool,
+    get_custom_tool_by_name,
+    list_enabled_custom_tool_defs,
+)
+from ..mcp.codebase_tool_dispatch import (
+    call_codebase_tool,
+    get_active_codebase_project,
+    list_enabled_codebase_tool_defs,
+)
 from ..model_runtime.config import RuntimeConfig
 from .tool_narration import gather_narrations, narration_desc
 from ..model_runtime.streaming import chat_completion_stream
@@ -149,6 +159,21 @@ class ResolvedPlan:
         repeated cold-loads. ``None`` means the resolver didn't populate it.
         """
         return self.orchestrator.get("keep_alive")
+
+    @property
+    def orchestrator_stream_timeout(self) -> int | None:
+        """Optional per-orchestrator stream read-timeout (seconds).
+
+        A large model on constrained hardware (e.g. a 27B spilling past VRAM
+        into RAM) can take far longer than the default to cold-load and to
+        generate. When the plan/override sets this, it overrides the default
+        ``worker_timeout_seconds * 10`` so the request isn't killed mid-answer.
+        ``None`` = use the default.
+        """
+        val = self.orchestrator.get("stream_timeout_seconds")
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            return int(val)
+        return None
 
     @property
     def utility_keep_alive(self):
@@ -318,6 +343,44 @@ WEB_DISABLED_NEWS_ANSWER = (
 # web access for this chat, so prefer `web_search` for anything that benefits
 # from fresh or external information. Kept out of the deterministic router so it
 # still applies to general factual/recent queries, not just obvious news asks.
+CODEBASE_PROJECT_HINT_TEMPLATE = (
+    "A codebase project named '{name}' is connected for this chat. You have real, "
+    "live codebase_* tools available (codebase_list_directory, codebase_read_file, "
+    "codebase_search, and possibly codebase_edit_file, codebase_write_file, "
+    "codebase_delete_file, codebase_move_file, codebase_run_command) that act on "
+    "actual files — and run real shell commands — in that project right now. This is "
+    "not a placeholder or a description of a capability, it is a live connection. "
+    "When the user refers to 'the project', 'the codebase', "
+    "'the workspace', 'this repo', asks what you can see or access, or says they have "
+    "'attached' something, they mean this connected project. Call a codebase_* tool "
+    "to check before answering — never assume you lack access without having tried a "
+    "tool call first.\n"
+    "\n"
+    "RULES FOR FILE ACTIONS — these prevent you from misleading the user:\n"
+    "1. NEVER claim you created, edited, moved, or deleted a file unless a tool "
+    "result in THIS turn confirmed it succeeded. If you have not called the tool "
+    "yet, call it now — do not say 'Done!' first.\n"
+    "2. Report file paths EXACTLY as they appear in the tool result's 'path' field, "
+    "never from memory or assumption. If unsure where a file is, call "
+    "codebase_list_directory or codebase_search to find it before naming a path.\n"
+    "3. To MOVE or RENAME a file, use codebase_move_file — do not write a copy and "
+    "leave the original. To DELETE a file, use codebase_delete_file — do not try to "
+    "blank it with codebase_edit_file. To create a new file at the project root, use "
+    "codebase_write_file with a bare filename like 'README.md' (no leading folder).\n"
+    "4. Do not end your reply by promising to do something ('let me check…', 'I'll "
+    "create it now'). Either call the tool in this same turn, or give the finished "
+    "answer. A promise with no tool call is a failure.\n"
+    "4b. When asked to BUILD or RUN something, write the files with "
+    "codebase_write_file/codebase_edit_file, THEN actually run it with "
+    "codebase_run_command and read the output. If exit_code is non-zero or stderr "
+    "has an error, fix the code and run it again — iterate until it works before you "
+    "report success. Never claim code runs without having run it.\n"
+    "5. You DO have memory of your earlier actions this conversation: assistant "
+    "turns are annotated with an '[Actions you actually performed this turn: …]' log "
+    "of the real files you changed. Trust that log — never tell the user you have no "
+    "record of files you created earlier."
+)
+
 WEB_SEARCH_HINT = (
     "The user has explicitly enabled web search for this chat, which signals "
     "they want answers grounded in fresh, external information rather than from "
@@ -506,7 +569,7 @@ async def orchestrate_turn(
     ) -> list[dict]:
         try:
             return await handle_tool_calls(
-                calls, mcp_client, trace_context=ctx, user_message=user_message,
+                calls, mcp_client, trace_context=ctx, user_message=user_message, chat_id=chat_id,
             )
         except TypeError as exc:
             if "trace_context" not in str(exc):
@@ -685,7 +748,11 @@ async def orchestrate_turn(
     # Step 3: Resolve allowed tools + tool-call mode, then build orchestrator
     # messages. The prompt-JSON tool contract (if needed) is injected here so the
     # model knows the envelope format before it sees the user request.
-    allowed_tools = _get_allowed_tools_for_request(allowed_mcp_tools_config(), web_search)
+    allowed_tools = (
+        _get_allowed_tools_for_request(allowed_mcp_tools_config(), web_search)
+        + list_enabled_custom_tool_defs()
+        + list_enabled_codebase_tool_defs(chat_id)
+    )
     tool_call_mode = resolved_plan.orchestrator_tool_call_mode
     trace_event(
         "tools_resolved",
@@ -722,10 +789,12 @@ async def orchestrate_turn(
 
     yield tracked(phase_event(chat_id, msg_id, "runtime_context", "Checking local date and time"))
 
+    active_codebase_project = get_active_codebase_project(chat_id)
     orchestrator_messages = _build_orchestrator_messages(
         user_message, static_parts, dynamic_parts, evidence_summary, previous_messages or [],
         tool_call_mode=tool_call_mode, allowed_tools=allowed_tools,
         web_search_enabled=web_search,
+        codebase_project_name=active_codebase_project.name if active_codebase_project else None,
     )
     # DEBUG, not INFO: message content is private local content.
     logger.debug("ORCHESTRATOR MESSAGES: %d messages, first_user=%r last_user=%r", len(orchestrator_messages), orchestrator_messages[0]["content"] if orchestrator_messages and len(orchestrator_messages) > 0 else "", orchestrator_messages[-1]["content"] if orchestrator_messages else "")
@@ -783,11 +852,17 @@ async def orchestrate_turn(
         model_tools = _format_tools_for_model(allowed_tools) if allowed_tools else None
 
     # Step 5: Stream orchestrator response with tool support
-    stream_timeout = orchestration_cfg.get("worker_timeout_seconds", 12) * 10
+    stream_timeout = resolved_plan.orchestrator_stream_timeout or orchestration_cfg.get("worker_timeout_seconds", 12) * 10
     tool_round = 0
     finalization_round = False
     last_tool_payloads: list[tuple[str, str]] = []
     all_tokens = []
+    had_malformed_tool_call = False
+    narration_nudge_used = False
+    # Anti-loop state for repeated identical failing run_command calls.
+    last_failed_run_cmd: str | None = None
+    repeated_run_fail_count = 0
+    run_fix_nudge_used = False
 
     # Step 4½: Execute a deterministically-routed tool BEFORE the first model
     # pass and feed its result in as tool evidence. The model still writes the
@@ -872,6 +947,7 @@ async def orchestrate_turn(
         tool_round += 1
         telemetry.tool_round_count = tool_round
         detected_tool_calls = []
+        malformed_retry = False
 
         try:
             logger.info("CALLING MODEL: model=%s temperature=%.1f round=%d tools=%s",
@@ -905,6 +981,7 @@ async def orchestrate_turn(
                 think=reasoning_effort,
                 tool_call_mode=tool_call_mode,
                 keep_alive=resolved_plan.orchestrator_keep_alive,
+                num_ctx=resolved_plan.ctx,
             ):
                 if event.get("type") == "thinking_delta":
                     text = event.get("content", "") or event.get("text", "")
@@ -1091,24 +1168,142 @@ async def orchestrate_turn(
                                     "content": content,
                                 })
 
+                        # Anti-loop: a model that runs the SAME command, watches
+                        # it fail the same way, and just runs it again (seen in
+                        # the wild re-running a crashing script ~10x until the
+                        # round cap) is stuck. Track repeated identical failing
+                        # run_command calls and, once it repeats, tell it plainly
+                        # to fix the file instead of re-running unchanged.
+                        edited_this_round = any(
+                            (tc.get("function", {}).get("name", "")) in
+                            ("codebase_edit_file", "codebase_write_file")
+                            for tc in calls
+                        )
+                        if edited_this_round:
+                            last_failed_run_cmd = None
+                            repeated_run_fail_count = 0
+                        for tc, _call_id, content in executed:
+                            if tc.get("function", {}).get("name", "") != "codebase_run_command":
+                                continue
+                            cmd = str(tc.get("function", {}).get("arguments", {}).get("command", ""))
+                            if _run_command_failed(content):
+                                if cmd and cmd == last_failed_run_cmd:
+                                    repeated_run_fail_count += 1
+                                else:
+                                    last_failed_run_cmd = cmd
+                                    repeated_run_fail_count = 1
+                            elif cmd == last_failed_run_cmd:
+                                last_failed_run_cmd = None
+                                repeated_run_fail_count = 0
+                        if repeated_run_fail_count >= 2:
+                            orchestrator_messages.append({
+                                "role": "user",
+                                "content": (
+                                    f"STOP re-running the same command — you have run "
+                                    f"`{last_failed_run_cmd}` {repeated_run_fail_count} times and it "
+                                    "fails the same way every time. Running it again will not help. "
+                                    "Read the error output above, open the file with codebase_read_file "
+                                    "if needed, then use codebase_edit_file to FIX the specific line "
+                                    "that caused the error. Only after editing the file should you run "
+                                    "the command again."
+                                ),
+                            })
+                            repeated_run_fail_count = 0  # one nudge per stuck streak
+
                         # If tools were executed, break inner loop to re-call model
                         if tool_round_results > 0:
                             break
                     break
+                elif event.get("type") == "tool_call_malformed":
+                    # The model attempted a tool call whose JSON envelope
+                    # never closed or failed to parse (typically a large
+                    # codebase_edit_file new_string that got cut off or
+                    # mis-escaped). streaming.py already suppressed the raw
+                    # fragment from the visible answer; feed back an
+                    # actionable retry hint instead of silently ending the
+                    # turn with nothing (or looping the same failure blind).
+                    had_malformed_tool_call = True
+                    raw_preview = (event.get("raw") or "")[:500]
+                    logger.warning(
+                        "Malformed tool-call envelope from orchestrator (round %d): %r",
+                        tool_round, raw_preview,
+                    )
+                    trace_event(
+                        "orchestrator_tool_call_malformed",
+                        **trace_context, round=tool_round, raw_preview=raw_preview,
+                    )
+                    if finalization_round:
+                        logger.warning(
+                            "Malformed tool call during forced finalization; using tool-result fallback."
+                        )
+                        # Only fall back to the generic tool-results summary if
+                        # some earlier round actually succeeded. With zero real
+                        # results, leave all_tokens empty and let the terminal
+                        # had_malformed_tool_call branch below give the user an
+                        # accurate explanation instead of a misleading "I
+                        # gathered tool results" message.
+                        if last_tool_payloads:
+                            fallback = _fallback_answer_from_tool_results(user_message, last_tool_payloads)
+                            if fallback:
+                                all_tokens.append(fallback)
+                                telemetry.mark_token()
+                                yield tracked(token_event(chat_id, text=fallback, message_id=msg_id))
+                        break
+                    malformed_retry = True
+                    orchestrator_messages.append({
+                        "role": "user",
+                        "content": _malformed_tool_call_guidance(raw_preview),
+                    })
+                    break
 
         except Exception as exc:
-            logger.error("Orchestrator streaming failed: %s", exc)
-            trace_event("orchestrator_call_error", **trace_context, round=tool_round, error=str(exc))
+            # Never surface an empty error. asyncio.TimeoutError (the common
+            # case when a large generation exceeds stream_timeout) stringifies
+            # to "" — which reached the UI as a blank/invisible toast and left
+            # the turn ending on a dangling narration fragment. Build a
+            # human-readable message from the exception type when str() is empty
+            # and name the timeout case explicitly.
+            import asyncio as _asyncio
+            exc_text = str(exc).strip()
+            if isinstance(exc, _asyncio.TimeoutError):
+                friendly = (
+                    f"The model took longer than {int(stream_timeout)}s to respond and timed out. "
+                    "This usually means the request was too large — try a smaller or simpler ask."
+                )
+            elif exc_text:
+                friendly = f"Model generation failed: {exc_text}"
+            else:
+                friendly = f"Model generation failed ({type(exc).__name__})."
+            logger.error("Orchestrator streaming failed (%s): %s", type(exc).__name__, exc_text or "<no message>")
+            trace_event(
+                "orchestrator_call_error", **trace_context, round=tool_round,
+                error=exc_text, error_type=type(exc).__name__,
+            )
             yield tracked(error_event(
                 chat_id,
                 error_code="orchestrator_error",
-                message=f"Orchestrator generation failed: {exc}",
+                message=friendly,
                 recoverable=True,
             ))
+            # If nothing substantive streamed this turn, surface the reason as
+            # visible reply text too, so the persisted message isn't an empty
+            # or half-finished fragment the user has to guess about.
+            if not "".join(all_tokens).strip():
+                if last_tool_payloads:
+                    fb = _fallback_answer_from_tool_results(user_message, last_tool_payloads)
+                    if fb:
+                        all_tokens.append(fb)
+                        telemetry.mark_token()
+                        yield tracked(token_event(chat_id, text=fb, message_id=msg_id))
+                if not "".join(all_tokens).strip():
+                    all_tokens.append(friendly)
+                    telemetry.mark_token()
+                    yield tracked(token_event(chat_id, text=friendly, message_id=msg_id))
             break
 
-        # If we detected tool calls, continue loop to feed results back to model
-        if detected_tool_calls:
+        # If we detected tool calls (or a malformed attempt worth retrying),
+        # continue the loop to feed results/guidance back to the model.
+        if detected_tool_calls or malformed_retry:
             if tool_round >= max_tool_rounds:
                 logger.warning("Max tool rounds (%d) reached — forcing final answer from tool results", max_tool_rounds)
                 finalization_round = True
@@ -1133,6 +1328,78 @@ async def orchestrate_turn(
             all_tokens = []  # Reset for final answer tokens
             continue
 
+        # No tool calls this round. Before accepting it as the final answer,
+        # guard the specific failure seen in the wild: the model writes a
+        # preamble that PROMISES an action ("You're right — let me check that
+        # directory:", "I'll read the file now:") and then stops, having called
+        # no tool. That dangling fragment gets persisted as the whole reply.
+        # Nudge exactly once — either call the tool or actually answer — while
+        # rounds and tools remain. Bounded to one retry so a model that just
+        # writes colon-ended prose can't loop.
+        if (
+            not finalization_round
+            and not narration_nudge_used
+            and tool_round <= max_tool_rounds
+            and (allowed_tools or model_tools)
+            and _looks_like_unfinished_narration("".join(all_tokens))
+        ):
+            narration_nudge_used = True
+            logger.warning(
+                "Orchestrator ended on an action-promising fragment with no tool call; nudging once."
+            )
+            trace_event(
+                "orchestrator_narration_nudge", **trace_context, round=tool_round,
+                fragment="".join(all_tokens)[:200],
+            )
+            orchestrator_messages.append({
+                "role": "user",
+                "content": (
+                    "You said you would take an action (e.g. read, list, edit, or create a file) "
+                    "but you did not actually call any tool — you stopped after the preamble. "
+                    "Either call the tool now, or, if you already have what you need, give the "
+                    "complete final answer in plain language. Do not narrate an intention "
+                    "without following through."
+                ),
+            })
+            all_tokens = []  # Reset; the nudge response becomes the real answer.
+            # Boundary marker so the collector drops the discarded preamble from
+            # the PERSISTED reply (there's no tool_call between the fragment and
+            # the retried answer to signal it otherwise).
+            yield tracked(phase_event(chat_id, msg_id, "model", "Writing response"))
+            continue
+
+        # Guard the opposite failure: the model ran a command, it FAILED, and now
+        # it's ending the turn without fixing it (seen: ran a crashing script once
+        # then gave up, or worse claimed success). If the most recent run_command
+        # failed and nothing edited the file since, push once to fix-or-be-honest
+        # while rounds/tools remain. One-shot, so a genuinely unfixable error
+        # still terminates.
+        if (
+            not finalization_round
+            and not run_fix_nudge_used
+            and last_failed_run_cmd is not None
+            and tool_round <= max_tool_rounds
+            and (allowed_tools or model_tools)
+        ):
+            run_fix_nudge_used = True
+            logger.warning("Turn ending after a failed run_command with no fix; nudging once.")
+            trace_event("orchestrator_run_fix_nudge", **trace_context, round=tool_round,
+                        failed_cmd=last_failed_run_cmd)
+            orchestrator_messages.append({
+                "role": "user",
+                "content": (
+                    f"The last command you ran (`{last_failed_run_cmd}`) FAILED — see the error "
+                    "output above. Do NOT tell the user it works or that you are done. Read the "
+                    "error, use codebase_read_file / codebase_edit_file to fix the specific line "
+                    "that caused it, then run the command again to confirm. If after trying you "
+                    "truly cannot fix it, explain honestly what is still broken and why — never "
+                    "claim success for code that does not run."
+                ),
+            })
+            all_tokens = []
+            yield tracked(phase_event(chat_id, msg_id, "model", "Writing response"))
+            continue
+
         # No tool calls — this is the final answer stream
         break
 
@@ -1152,6 +1419,19 @@ async def orchestrate_turn(
             all_tokens.append(fallback)
             telemetry.mark_token()
             yield tracked(token_event(chat_id, text=fallback, message_id=msg_id))
+    elif not all_tokens and had_malformed_tool_call:
+        # Every attempt this turn was a tool call whose JSON never parsed, and
+        # none produced a usable result to fall back on — say so plainly
+        # instead of ending the turn with an empty reply.
+        fallback = (
+            "I wasn't able to complete that — the change was too large or complex "
+            "for me to format correctly in one step. Could you ask for a smaller, "
+            "more targeted edit (e.g. one section at a time) instead of a full "
+            "rewrite?"
+        )
+        all_tokens.append(fallback)
+        telemetry.mark_token()
+        yield tracked(token_event(chat_id, text=fallback, message_id=msg_id))
     telemetry.model_done_at = time.perf_counter()
     yield tracked(phase_event(chat_id, msg_id, "finalizing", "Finalizing"))
     telemetry.done_at = time.perf_counter()
@@ -1211,6 +1491,7 @@ def _build_orchestrator_messages(
     tool_call_mode: str = "openai_native",
     allowed_tools: list[dict] | None = None,
     web_search_enabled: bool = False,
+    codebase_project_name: str | None = None,
 ) -> list[dict]:
     """Build the full message sequence for the orchestrator.
 
@@ -1254,6 +1535,20 @@ def _build_orchestrator_messages(
         messages.append({
             "role": "system",
             "content": canonicalise_system_content(WEB_SEARCH_HINT),
+        })
+
+    # Band A‴: codebase-project usage hint, same rationale as the web-search
+    # hint above — the model is told the tools exist via allowed_tools/the
+    # contract, but tends to reason its way out of using them for indirect
+    # phrasing ("can you see the attached project?") rather than just calling
+    # a tool to check. Stable within a chat while the binding doesn't change,
+    # so still prefix-cacheable.
+    if codebase_project_name:
+        messages.append({
+            "role": "system",
+            "content": canonicalise_system_content(
+                CODEBASE_PROJECT_HINT_TEMPLATE.format(name=codebase_project_name)
+            ),
         })
 
     # Band B: per-turn memory block (version-stamped, dynamic).
@@ -1326,7 +1621,7 @@ def _build_prompt_json_tool_contract(allowed_tools: list[dict]) -> str:
         name = t.get("name", "")
         canonical = tool_def_by_name(name) or {}
         desc = canonical.get("description") or t.get("description", "")
-        schema = canonical.get("inputSchema", {})
+        schema = canonical.get("inputSchema") or t.get("inputSchema", {})
         lines.append(f"- {name}: {desc}")
         lines.append(f"    arguments: {_format_tool_arg_spec(schema)}")
     return "\n".join(lines)
@@ -1472,6 +1767,111 @@ def _compact_tool_results(
         compacted_chars += len(compacted)
         result["content"] = compacted
     return raw_chars, compacted_chars
+
+
+# Cues that a reply is a promise-to-act preamble rather than a real answer:
+# it ends mid-thought on a colon, or is a short line built around a first-person
+# intention verb ("let me read...", "I'll check..."). Kept deliberately narrow
+# so a genuine short answer ("Yes, that file exists.") is never misclassified.
+_NARRATION_INTENT_RE = re.compile(
+    r"\b("
+    r"let me|i'?ll|i will|i'?m going to|i am going to|let'?s|"
+    r"first,? (?:i|let)|now (?:i|let)|checking|reading|listing|"
+    r"looking (?:at|into)|let me check|let me look|let me read|let me see"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+_MALFORMED_TOOL_RE = re.compile(r'"tool"\s*:\s*"([a-zA-Z0-9_]+)"')
+_MALFORMED_PATH_RE = re.compile(r'"path"\s*:\s*"([^"]{1,200})"')
+
+
+def _malformed_tool_call_guidance(raw_preview: str) -> str:
+    """Craft a recovery message tuned to WHICH tool's envelope broke.
+
+    A cut-off ``codebase_write_file`` (the common failure when the model tries to
+    dump a whole file in one call and the JSON never closes) needs different
+    advice than a broken ``edit_file`` — 'write a tiny file first, then grow it
+    with edits' vs 'make the old_string/new_string smaller'. Generic advice made
+    the model retry the same oversized write and fail again.
+    """
+    tool_match = _MALFORMED_TOOL_RE.search(raw_preview or "")
+    path_match = _MALFORMED_PATH_RE.search(raw_preview or "")
+    tool = tool_match.group(1) if tool_match else ""
+    path = path_match.group(1) if path_match else "that file"
+
+    if tool == "codebase_write_file":
+        return (
+            f"Your codebase_write_file for '{path}' was too long to send in one message "
+            "and got cut off, so nothing was written. Do NOT resend the whole file. "
+            f"Instead: FIRST create '{path}' with codebase_write_file containing only a "
+            "SHORT minimal skeleton (a few lines that already run — e.g. the imports and "
+            "one function stub or a `pass`). THEN add the rest incrementally with several "
+            "small codebase_edit_file calls, one function or section at a time. Keep every "
+            "single tool call's content short."
+        )
+    if tool == "codebase_edit_file":
+        return (
+            f"Your codebase_edit_file for '{path}' could not be parsed — the JSON was "
+            "incomplete or invalid, most likely because new_string was too long or had an "
+            "unescaped quote or newline. Retry with a SMALLER edit: keep old_string and "
+            "new_string just long enough to be unique, and if you need to change most of "
+            "the file, make several separate small codebase_edit_file calls instead of one "
+            "big one."
+        )
+    return (
+        "Your last tool call could not be parsed — the JSON was incomplete or invalid, "
+        "most likely because an argument was too long or contained an unescaped quote or "
+        "newline. Retry with a smaller, more targeted call, and split large content into "
+        "several small calls instead of one big one."
+    )
+
+
+def _run_command_failed(result_content: str) -> bool:
+    """True if a codebase_run_command result represents a failure — a non-zero
+    exit_code, a timeout, or a dispatch error. Used to detect a model stuck
+    re-running the same broken command instead of fixing the code."""
+    if not result_content:
+        return False
+    try:
+        data = json.loads(result_content)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("error") or data.get("timed_out"):
+        return True
+    exit_code = data.get("exit_code")
+    return exit_code is not None and exit_code != 0
+
+
+def _looks_like_unfinished_narration(text: str) -> bool:
+    """True when ``text`` reads as an action-promise preamble, not an answer.
+
+    Targets the observed failure where the model writes "…let me check that
+    directory:" and stops without calling any tool. Two independent signals,
+    both scoped to short outputs (a long substantive answer is never a
+    dangling preamble even if it happens to contain "let me"):
+
+      1. Ends on a colon (the classic "here's what I'll do:" cut-off), OR
+      2. Is short AND contains a first-person intention verb.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        # Genuinely empty output is handled by the tool-result / empty-reply
+        # fallbacks, not here — don't claim it as narration.
+        return False
+    # Long answers are real answers, not preambles.
+    if len(stripped) > 320:
+        return False
+    ends_on_colon = stripped.endswith(":") or stripped.endswith(":**") or stripped.endswith(":”")
+    has_intent = bool(_NARRATION_INTENT_RE.search(stripped))
+    # A trailing colon alone is enough (it's the strongest signal); otherwise
+    # require an intention verb in a short line.
+    if ends_on_colon:
+        return True
+    return has_intent and len(stripped) <= 200
 
 
 def _fallback_answer_from_tool_results(
@@ -1656,6 +2056,7 @@ async def handle_tool_calls(
     *,
     trace_context: dict[str, Any] | None = None,
     user_message: str | None = None,
+    chat_id: str | None = None,
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
@@ -1738,7 +2139,18 @@ async def handle_tool_calls(
                 arguments=item["args"],
                 parallel=item["parallel"],
             )
-            result = await mcp_client.call_tool(tool_name, item["args"])
+            if tool_name.startswith("codebase_") and chat_id is not None:
+                codebase_project = get_active_codebase_project(chat_id)
+                if codebase_project is not None:
+                    result = await call_codebase_tool(chat_id, codebase_project, tool_name, item["args"])
+                else:
+                    result = {"error": True, "message": "No active codebase project is bound to this chat."}
+            else:
+                custom_tool = get_custom_tool_by_name(tool_name)
+                if custom_tool is not None:
+                    result = await call_custom_tool(custom_tool, item["args"])
+                else:
+                    result = await mcp_client.call_tool(tool_name, item["args"])
             content = result if isinstance(result, str) else json.dumps(result)
             trace_event(
                 "tool_call_result",
@@ -1833,13 +2245,16 @@ def _format_tools_for_model(allowed_tools: list[dict]) -> list[dict]:
         if not name:
             raise ValueError("architecture_config allowed tool entry has no 'name'")
         canonical = tool_def_by_name(name)
-        if canonical is None:
+        if canonical is None and not t.get("inputSchema"):
             raise ValueError(
-                f"Allowed tool '{name}' is not defined in mcp/tools.py::TOOL_DEFS. "
-                f"Either add the tool to TOOL_DEFS or remove it from the allowlist."
+                f"Allowed tool '{name}' is not defined in mcp/tools.py::TOOL_DEFS and "
+                f"carries no inline schema. Either add the tool to TOOL_DEFS, register "
+                f"it as a custom tool, or remove it from the allowlist."
             )
-        # Prefer the canonical TOOL_DEFS schema; fall back to any inline schema
-        # on the allowlist entry (defensive — allowlist should not carry one).
+        canonical = canonical or {}
+        # Prefer the canonical TOOL_DEFS schema; fall back to the entry's own
+        # inline schema — this is how custom (DB-backed) tools are described,
+        # since they have no TOOL_DEFS entry at all.
         input_schema = canonical.get("inputSchema") or t.get("inputSchema", {})
         formatted.append({
             "type": "function",

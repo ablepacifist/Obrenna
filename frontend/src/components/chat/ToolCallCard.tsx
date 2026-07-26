@@ -18,6 +18,20 @@ interface ToolCallCardProps {
  * (`block.description`); the raw args JSON is collapsed behind a disclosure so
  * power users can still inspect it. A `Running <tool>…` placeholder fills the
  * headline until narration lands. */
+function CodebaseEditDiff({ path, oldString, newString }: { path: string; oldString: string; newString: string }) {
+  return (
+    <div className="mt-1.5 rounded-md border border-(--border) overflow-hidden text-[11px] font-mono">
+      <div className="px-2 py-1 bg-(--surface) text-(--ink-faint) border-b border-(--border) truncate">{path}</div>
+      <div className="bg-red-500/10 text-red-600 dark:text-red-400 px-2 py-1 whitespace-pre-wrap break-all">
+        {oldString.split('\n').map((line, i) => <div key={i}>- {line}</div>)}
+      </div>
+      <div className="bg-green-500/10 text-green-700 dark:text-green-400 px-2 py-1 whitespace-pre-wrap break-all">
+        {newString.split('\n').map((line, i) => <div key={i}>+ {line}</div>)}
+      </div>
+    </div>
+  )
+}
+
 export function ToolCallCard({ block }: ToolCallCardProps) {
   let argStr = ''
   try {
@@ -27,6 +41,9 @@ export function ToolCallCard({ block }: ToolCallCardProps) {
     argStr = ''
   }
   const headline = block.description || (block.status === 'running' ? `Running ${block.toolName || 'tool'}…` : '')
+  const isCodebaseEdit = block.toolName === 'codebase_edit_file'
+    && typeof block.args.old_string === 'string'
+    && typeof block.args.new_string === 'string'
   return (
     <div className="rounded-lg border border-(--border) bg-(--surface-2) px-3 py-2 text-[12px]">
       <div className="flex items-center gap-2 text-(--ink-muted)">
@@ -41,13 +58,21 @@ export function ToolCallCard({ block }: ToolCallCardProps) {
       {headline && (
         <div className="mt-1 text-(--ink-muted) line-clamp-2 break-words">{headline}</div>
       )}
-      {argStr && (
-        <details className="mt-1 group">
-          <summary className="cursor-pointer text-(--ink-faint) text-[11px] hover:text-(--ink-muted) select-none">
-            Show inputs
-          </summary>
-          <div className="mt-1 text-(--ink-faint) break-all font-mono text-[11px]">{argStr}</div>
-        </details>
+      {isCodebaseEdit ? (
+        <CodebaseEditDiff
+          path={String(block.args.path ?? '')}
+          oldString={block.args.old_string as string}
+          newString={block.args.new_string as string}
+        />
+      ) : (
+        argStr && (
+          <details className="mt-1 group">
+            <summary className="cursor-pointer text-(--ink-faint) text-[11px] hover:text-(--ink-muted) select-none">
+              Show inputs
+            </summary>
+            <div className="mt-1 text-(--ink-faint) break-all font-mono text-[11px]">{argStr}</div>
+          </details>
+        )
       )}
       {block.summary && block.status === 'done' && (
         <div className="mt-1 text-(--ink-muted) line-clamp-2 break-words">{block.summary}</div>

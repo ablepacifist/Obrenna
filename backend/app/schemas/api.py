@@ -37,6 +37,9 @@ class AppSettingsDTO(BaseModel):
     active_models: list[str] = []
     managed_plan: dict[str, Any] = {}
     workers_enabled: bool = True  # NEW: Worker models toggle
+    # Catalog slug that forces the orchestrator model (e.g. "qwen3.5-27b").
+    # None/"" = let the hardware resolver pick.
+    orchestrator_override: Optional[str] = None
 
 
 # --- system / hardware ------------------------------------------------------
@@ -138,6 +141,12 @@ class ChatRequest(BaseModel):
     workers_enabled: Optional[bool] = None  # NEW: Per-chat override
     web_search: bool = False
     thinking_enabled: bool = False
+    # Codebase project to attach when this request CREATES the chat. Without
+    # this, a codebase picked before the first message had nowhere to go (the
+    # PATCH /api/chats/{id} route needs a chat that already exists), so the
+    # first turn always ran with no codebase access. Ignored when chat_id is
+    # given -- an existing chat's codebase is changed via PATCH.
+    active_codebase_project_id: Optional[str] = None
 
 
 class ChatMessageDTO(BaseModel):
@@ -146,6 +155,7 @@ class ChatMessageDTO(BaseModel):
     text: str
     artifacts: list[str] = []
     files: list[dict[str, Any]] = []
+    tool_events: list[dict[str, Any]] = []
     created_at: str
 
 
@@ -159,6 +169,7 @@ class ChatDTO(BaseModel):
     id: str
     title: str
     folder_id: Optional[str] = None
+    active_codebase_project_id: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -190,6 +201,8 @@ class UpdateChatRequest(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None
     unfile: bool = False
+    active_codebase_project_id: Optional[str] = None
+    clear_codebase_project: bool = False
 
 
 # --- memory -------------------------------------------------------------------
@@ -209,3 +222,83 @@ class MemoryFactCreateRequest(BaseModel):
 
 class MemoryFactUpdateRequest(BaseModel):
     fact_text: str = Field(..., min_length=1, max_length=1000)
+
+
+# --- custom tools --------------------------------------------------------------
+
+class CustomToolParam(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    description: str = ""
+    required: bool = False
+    location: Literal["query", "body"] = "query"
+    type: Literal["string", "number", "boolean"] = "string"
+
+
+class CustomToolDTO(BaseModel):
+    id: str
+    name: str
+    description: str
+    base_url: str
+    http_method: str
+    headers: dict[str, str]
+    params: list[CustomToolParam]
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+
+class CustomToolCreateRequest(BaseModel):
+    name: str = Field(..., pattern=r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
+    description: str = Field(..., min_length=1, max_length=1000)
+    base_url: str = Field(..., min_length=1)
+    http_method: str = "GET"
+    headers: dict[str, str] = Field(default_factory=dict)
+    params: list[CustomToolParam] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class CustomToolUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, pattern=r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
+    description: Optional[str] = Field(None, min_length=1, max_length=1000)
+    base_url: Optional[str] = Field(None, min_length=1)
+    http_method: Optional[str] = None
+    headers: Optional[dict[str, str]] = None
+    params: Optional[list[CustomToolParam]] = None
+    enabled: Optional[bool] = None
+
+
+# --- codebase projects ----------------------------------------------------------
+
+class CodebaseAgentDeviceDTO(BaseModel):
+    id: str
+    device_id: str
+    name: str
+    approved: bool
+    enabled: bool
+    connected: bool
+    created_at: str
+    last_seen_at: str
+
+
+class CodebaseProjectDTO(BaseModel):
+    id: str
+    name: str
+    device_id: str
+    root_path: str
+    write_enabled: bool
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+
+class CodebaseProjectCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    device_id: str = Field(..., min_length=1)
+    root_path: str = Field(..., min_length=1)
+    write_enabled: bool = False
+
+
+class CodebaseProjectUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    write_enabled: Optional[bool] = None
+    enabled: Optional[bool] = None

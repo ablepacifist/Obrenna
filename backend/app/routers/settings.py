@@ -95,6 +95,7 @@ def get_app_settings(db: Session = Depends(get_db)):
         active_models=row.active_models or [],
         managed_plan=row.managed_plan or {},
         workers_enabled=row.workers_enabled,
+        orchestrator_override=row.orchestrator_override or None,
     )
 
 
@@ -107,6 +108,7 @@ def save_app_settings(payload: AppSettingsDTO, db: Session = Depends(get_db)):
     row.active_models = payload.active_models or []
     row.managed_plan = payload.managed_plan or {}
     row.workers_enabled = payload.workers_enabled
+    row.orchestrator_override = (payload.orchestrator_override or "").strip() or None
     db.commit()
     db.refresh(row)
     return AppSettingsDTO(
@@ -116,4 +118,5 @@ def save_app_settings(payload: AppSettingsDTO, db: Session = Depends(get_db)):
         active_models=row.active_models or [],
         managed_plan=row.managed_plan or {},
         workers_enabled=row.workers_enabled,
+        orchestrator_override=row.orchestrator_override or None,
     )

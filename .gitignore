@@ -25,6 +25,10 @@ backend/data/
 *.sqlite
 *.sqlite3
 
+# --- Codebase agent: per-project backups + own venv, never committed ---
+.codebase-agent-backups/
+codebase-agent/.venv/
+
 # --- Generated codegen artifacts (regenerate with `npm run codegen`) ---
 # (kept out of ignore intentionally: generated TS/Pydantic ARE committed so apps build without codegen)
 frontend/src/lib/types/openapi.json
@@ -56,3 +60,4 @@ src-tauri/resources/ollama/*
 
 # --- Kilo agent plans (auto-generated) ---
 .kilo/plans/
+.run/

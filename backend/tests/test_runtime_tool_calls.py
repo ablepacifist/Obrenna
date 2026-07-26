@@ -586,6 +586,11 @@ class TestOrchestrateTurnPromptJson:
         assert contract, "prompt-JSON tool contract should be injected as a system message"
         assert round1_kwargs.get("tool_call_mode") == "prompt_json"
         assert round1_kwargs.get("tools") is None  # prompt-json never sends OpenAI tools
+        # The hardware-resolver-fitted context size must reach the model call
+        # (defaults to 8192 here since the stub plan doesn't set "ctx") --
+        # without this, Ollama silently falls back to its own small default
+        # and starves reasoning-distilled models mid-answer.
+        assert round1_kwargs.get("num_ctx") == 8192
 
         # Round 2: result fed back as prompt-JSON history, NOT OpenAI role:"tool".
         round2_msgs, _ = captured[1]
@@ -599,6 +604,102 @@ class TestOrchestrateTurnPromptJson:
                    and "TOOL_RESULT(get_time)" in m.get("content", "")
                    for m in round2_msgs)
         assert not any(m.get("role") == "tool" for m in round2_msgs)
+
+
+class TestMalformedToolCallHandling:
+    """A prompt-JSON envelope that never parses (streaming.py's
+    ``tool_call_malformed`` event) must never leak the raw JSON as the
+    visible answer, and must give the model an actionable retry instead of
+    silently ending the turn.
+    """
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_call_retries_with_guidance_then_succeeds(self, monkeypatch):
+        from app.agent import runtime as rt
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"worker_timeout_seconds": 1})
+
+        calls = {"model": 0}
+
+        async def fake_stream(*args, **kwargs):
+            calls["model"] += 1
+            if calls["model"] == 1:
+                yield {"type": "token", "content": "Let me fix this: "}
+                yield {"type": "tool_call_malformed", "raw": '{"action":"tool_call","tool":"codebase_edit_file"'}
+            else:
+                messages = args[1]
+                assert any(
+                    "could not be parsed" in (m.get("content") or "") for m in messages
+                ), "retry round should carry the malformed-envelope guidance message"
+                yield {"type": "token", "content": "Done — fixed the setup doc."}
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json", "max_tool_rounds": 3},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "can you fix the setup document?", "chat-malformed", None, config, plan,
+            workers_enabled=False,
+        )]
+
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        # Round-1 preamble text legitimately stays visible (same streaming
+        # pattern as a normal tool-call round); what must never appear is the
+        # broken JSON envelope itself, and the retry must reach a real answer.
+        assert "Done — fixed the setup doc." in tokens
+        assert "action" not in tokens
+        assert calls["model"] == 2
+        assert any(e.type == "error" for e in events) is False
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_call_exhausts_rounds_emits_friendly_fallback(self, monkeypatch):
+        from app.agent import runtime as rt
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"worker_timeout_seconds": 1})
+
+        calls = {"model": 0}
+
+        async def fake_stream(*args, **kwargs):
+            calls["model"] += 1
+            # Every round breaks the same way — the model never recovers.
+            yield {"type": "tool_call_malformed", "raw": '{"action":"tool_call","tool":"codebase_edit_file"'}
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json", "max_tool_rounds": 1},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "can you fix the setup document?", "chat-malformed-2", None, config, plan,
+            workers_enabled=False,
+        )]
+
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        assert tokens  # never empty — the user always gets an explanation
+        assert "action" not in tokens
+        assert "too large or complex" in tokens
+        assert calls["model"] == 2  # round 1 + one forced finalization attempt
 
 
 class TestOrchestrateTurnNativeToolCalling:

@@ -6,17 +6,21 @@ artifact generation paths (dashboard, report, chart, table, summary).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
 import uuid
 from datetime import datetime, timezone
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from ..agent.events import (
+    StreamEvent,
     artifact_plan_event,
     artifact_skeleton_event,
     artifact_update_event,
@@ -33,7 +37,7 @@ from ..agent.runtime import (
     orchestrate_turn,
 )
 from ..db import get_db
-from ..models import AppSettings, Artifact, Chat, ChatMessage, File, ModelEndpoint
+from ..models import AppSettings, Artifact, Chat, ChatMessage, CodebaseProject, File, ModelEndpoint
 from ..model_runtime.client import chat_completion_sync
 from ..model_runtime.config import RuntimeConfig
 from ..schemas.api import ChatMessageDTO, ChatRequest, ChatResponse
@@ -68,6 +72,78 @@ def _commit_or_http_error(db: Session, *, phase: str) -> None:
         db.rollback()
         logger.error("Chat DB commit failed during %s: %s", phase, exc)
         raise HTTPException(status_code=503, detail=f"Could not persist chat state: {exc}") from exc
+
+
+# ── Tool-event capture (grounds the model's memory of its own file actions) ──
+
+# Codebase tools that touch the filesystem. Only these are worth replaying into
+# later turns' history — read-only calls (list/read/search) don't need grounding
+# and would just bloat the context.
+_MUTATING_TOOLS = {
+    "codebase_write_file", "codebase_edit_file",
+    "codebase_delete_file", "codebase_move_file",
+}
+_MUTATING_VERB = {
+    "codebase_write_file": "created",
+    "codebase_edit_file": "edited",
+    "codebase_delete_file": "deleted",
+    "codebase_move_file": "moved",
+}
+
+
+def _summarize_tool_event(tool: str, arguments: dict, result: str) -> dict:
+    """Reduce a call→result pair to a compact, JSON-serialisable record.
+
+    ``ok`` is derived from the result payload: dispatch returns
+    ``{"error": true, ...}`` on failure, otherwise a success dict. The summary
+    is a short human string used both in the UI and in the history trailer.
+    """
+    ok = True
+    detail = ""
+    if isinstance(result, str) and result:
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict):
+                ok = not parsed.get("error", False)
+                if not ok:
+                    detail = str(parsed.get("message", ""))[:200]
+        except (json.JSONDecodeError, ValueError):
+            # Non-JSON result (rare) — treat presence as success, no detail.
+            pass
+    path = arguments.get("path") if isinstance(arguments, dict) else None
+    new_path = arguments.get("new_path") if isinstance(arguments, dict) else None
+    return {
+        "tool": tool,
+        "path": path,
+        "new_path": new_path,
+        "ok": ok,
+        "detail": detail,
+    }
+
+
+def _tool_events_history_trailer(events: list[dict]) -> str:
+    """One-line factual log of the mutating file actions an assistant turn took.
+
+    Appended to that assistant message's content in later turns' history so the
+    model cannot truthfully claim it "never created/edited/deleted any file" —
+    the single most damaging failure in the reviewed transcript, where amnesia
+    about its own actions made it gaslight the user.
+    """
+    parts: list[str] = []
+    for ev in events:
+        if ev.get("tool") not in _MUTATING_TOOLS:
+            continue
+        verb = _MUTATING_VERB.get(ev.get("tool", ""), "changed")
+        path = ev.get("path") or "?"
+        if ev.get("tool") == "codebase_move_file" and ev.get("new_path"):
+            target = f"{path} → {ev['new_path']}"
+        else:
+            target = path
+        status = "ok" if ev.get("ok") else f"FAILED: {ev.get('detail') or 'error'}"
+        parts.append(f"{verb} {target} ({status})")
+    if not parts:
+        return ""
+    return "[Actions you actually performed this turn: " + "; ".join(parts) + "]"
 
 # ── Intent keywords ──────────────────────────────────────────────────────────
 
@@ -171,6 +247,47 @@ def _get_hardware_plan(db: Session, workers_enabled: bool = True) -> dict:
     }
 
 
+def _apply_orchestrator_override(db: Session, plan: dict) -> dict:
+    """If AppSettings.orchestrator_override is set, force that catalog slug as the
+    orchestrator, pulling its capabilities (tool_call_mode / reasoning_distilled /
+    max_tool_rounds / tool_result_budget) from the catalog. Lets the user run a
+    bigger model than the hardware resolver would auto-pick — they accept the
+    slower inference. Summarizer/utility stay as resolved."""
+    override = ""
+    try:
+        row = db.get(AppSettings, 1)
+        override = (getattr(row, "orchestrator_override", None) or "").strip()
+    except Exception:
+        return plan
+    if not override:
+        return plan
+    try:
+        from ..services.hardware_catalog import (
+            load_catalog, tool_call_mode_for, reasoning_distilled_for,
+            max_tool_rounds_for, tool_result_budget_for,
+        )
+        cat = load_catalog()
+        plan = dict(plan)
+        plan["orchestrator"] = {
+            "model": override,  # catalog slug; _apply_runtime_model_refs → ollama ref
+            "tool_call_mode": tool_call_mode_for(cat, override),
+            "reasoning_distilled": reasoning_distilled_for(cat, override),
+            "max_tool_rounds": max_tool_rounds_for(cat, override),
+            "tool_result_budget": tool_result_budget_for(cat, override),
+            # A forced-bigger model is usually running past its hardware tier
+            # (e.g. a 27B spilling to RAM). Pin it resident so the ~1min cold-load
+            # is paid once, and give it a long stream timeout so slow generation
+            # isn't killed mid-answer (the user opted into "slow but bigger").
+            "keep_alive": -1,
+            "stream_timeout_seconds": 900,
+        }
+        plan["orchestrator_override_applied"] = override
+        logger.info("ORCHESTRATOR OVERRIDE active: %s", override)
+    except Exception as exc:
+        logger.warning("Could not apply orchestrator override %r: %s", override, exc)
+    return plan
+
+
 def _lookup_tool_call_mode(model_slug: str) -> str:
     """Look up a model's tool_call_mode from the catalog for the fallback plan.
 
@@ -245,6 +362,64 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     a CSV file, generates the artifact and returns immediately.
 
     For normal chat, delegates to the agent runtime.
+
+    Thin wrapper around ``_process_chat_message`` — kept as its own function
+    (rather than inlined) because ``router.add_api_route("/artifact", ...)``
+    below aliases this exact function object to a second route.
+    """
+    return _process_chat_message(payload, db)
+
+
+# One turn at a time per chat. Ollama serializes generations anyway, so two
+# concurrent turns in one chat (a user double-sending into a slow reply) just
+# meant the second request sat silent until it timed out, interleaving two
+# half-finished answers into the history. Serializing here keeps turn order
+# and lets the second turn see the first one's completed exchange. Threading
+# (not asyncio) locks because both routes execute this in worker threads.
+_chat_turn_locks: dict[str, threading.Lock] = {}
+_chat_turn_locks_guard = threading.Lock()
+
+
+def _turn_lock_for_chat(chat_id: str) -> threading.Lock:
+    with _chat_turn_locks_guard:
+        lock = _chat_turn_locks.get(chat_id)
+        if lock is None:
+            lock = _chat_turn_locks[chat_id] = threading.Lock()
+        return lock
+
+
+def _process_chat_message(
+    payload: ChatRequest,
+    db: Session,
+    *,
+    event_sink: Callable[[StreamEvent], None] | None = None,
+) -> ChatResponse:
+    """Serialized entry point: waits for any in-flight turn on the same chat."""
+    if not payload.chat_id:
+        # Brand-new chat gets a fresh id inside — no contention possible.
+        return _process_chat_message_inner(payload, db, event_sink=event_sink)
+    lock = _turn_lock_for_chat(payload.chat_id)
+    if not lock.acquire(timeout=600):
+        raise HTTPException(
+            status_code=409,
+            detail="Still working on the previous message in this chat — try again in a moment.",
+        )
+    try:
+        return _process_chat_message_inner(payload, db, event_sink=event_sink)
+    finally:
+        lock.release()
+
+
+def _process_chat_message_inner(
+    payload: ChatRequest,
+    db: Session,
+    *,
+    event_sink: Callable[[StreamEvent], None] | None = None,
+) -> ChatResponse:
+    """Shared implementation behind both ``POST /api/chat`` and
+    ``POST /api/chat/stream``. ``event_sink``, when provided, receives every
+    orchestrator ``StreamEvent`` live (in addition to — not instead of — the
+    stdout/Tauri emitter path) so a caller can relay them over HTTP.
     """
     # DEBUG, not INFO: message content is private local content and must not
     # land in default-level logs on a local-first/private-by-default product.
@@ -268,9 +443,22 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         if not chat:
             raise HTTPException(status_code=404, detail="Chat not found.")
     else:
+        # Attach the codebase chosen in the composer before the chat existed.
+        # Validated against the table so a stale/bogus id can't be persisted
+        # (the tool dispatch would then silently find no project).
+        new_project_id: Optional[str] = None
+        if payload.active_codebase_project_id:
+            if db.get(CodebaseProject, payload.active_codebase_project_id):
+                new_project_id = payload.active_codebase_project_id
+            else:
+                logger.warning(
+                    "Ignoring unknown active_codebase_project_id=%s on new chat",
+                    payload.active_codebase_project_id,
+                )
         chat = Chat(
             id=uuid.uuid4().hex,
             title=payload.message[:60] or "New chat",
+            active_codebase_project_id=new_project_id,
         )
         db.add(chat)
         db.flush()
@@ -312,6 +500,7 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
     logger.info("INTENT DETECTED: %s", intent)
     trace_event("chat_intent_detected", chat_id=chat.id, user_message_id=user_msg.id, intent=intent)
     artifact_ids: list[str] = []
+    tool_events: list[dict] = []
     reply_text = ""
     msg_id: str = payload.assistant_message_id or new_message_id()
     used_runtime = False
@@ -340,11 +529,12 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         # requests/new chats fail with `database is locked`.
         _commit_or_http_error(db, phase="initial user message")
         # Normal chat — use agent runtime
-        reply_text, msg_id, is_exp0 = _handle_normal_chat(db, chat, user_msg, payload,
+        reply_text, msg_id, is_exp0, tool_events = _handle_normal_chat(db, chat, user_msg, payload,
                                                   assistant_message_id=msg_id,
                                                   web_search=payload.web_search,
                                                   workers_enabled=effective_workers_enabled,
-                                                  thinking_enabled=payload.thinking_enabled)
+                                                  thinking_enabled=payload.thinking_enabled,
+                                                  event_sink=event_sink)
 
     # DEBUG, not INFO: reply text is private local content.
     logger.debug("CHAT RESPONSE: reply=%r artifact_ids=%s msg_id=%s", reply_text, artifact_ids, msg_id)
@@ -366,6 +556,7 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
         role="assistant",
         text=reply_text,
         artifacts=artifact_ids,
+        tool_events=tool_events,
     )
     db.add(asst_msg)
 
@@ -434,6 +625,7 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
             text=asst_msg.text,
             artifacts=asst_msg.artifacts or [],
             files=asst_msg.files or [],
+            tool_events=asst_msg.tool_events or [],
             created_at=asst_msg.created_at.isoformat(),
         ),
         memory_events=memory_events,
@@ -441,6 +633,91 @@ def send_message(payload: ChatRequest, db: Session = Depends(get_db)):
 
 
 router.add_api_route("/artifact", send_message, methods=["POST"], response_model=ChatResponse)
+
+
+class _StreamDone:
+    """Terminal sentinel: the chat turn finished successfully."""
+
+    def __init__(self, response: ChatResponse) -> None:
+        self.response = response
+
+
+class _StreamError:
+    """Terminal sentinel: the chat turn failed."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
+@router.post("/stream")
+async def send_message_stream(payload: ChatRequest):
+    """SSE variant of ``POST /api/chat`` for browser clients.
+
+    Plain HTTP clients (unlike the Tauri desktop app, which gets live
+    progress via stdout -> Rust IPC, see ``agent/emitter.py``) otherwise see
+    nothing until the whole turn completes — which routinely exceeds
+    Cloudflare's ~100s idle timeout over the public tunnel, producing a 524.
+    This streams the same orchestrator events as Server-Sent Events so bytes
+    keep flowing and the browser can render progress live via the same
+    ``handleAgentEvent`` reducer the desktop app already uses.
+
+    Deliberately does not take ``db: Session = Depends(get_db)`` — the
+    worker thread below opens its own session, decoupled from the request
+    lifecycle. A client disconnect mid-stream unwinds FastAPI's dependency
+    stack through an exception path that closes a ``Depends()``-injected
+    session immediately, which would race the worker thread still using it.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _push(item) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:
+            pass  # event loop already gone (server shutdown)
+
+    def _worker() -> None:
+        from ..db import SessionLocal
+
+        db = SessionLocal()
+        try:
+            response = _process_chat_message(payload, db, event_sink=_push)
+            _push(_StreamDone(response))
+        except Exception as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            logger.error("Streaming chat orchestration failed: %s", exc)
+            _push(_StreamError(str(detail)))
+        finally:
+            db.close()
+
+    future = loop.run_in_executor(None, _worker)
+
+    async def _event_gen():
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if isinstance(item, _StreamDone):
+                    yield f"event: response\ndata: {item.response.model_dump_json()}\n\n"
+                    break
+                if isinstance(item, _StreamError):
+                    yield f"event: error\ndata: {json.dumps({'message': item.message})}\n\n"
+                    break
+                yield f"event: agent_event\ndata: {json.dumps(item.to_envelope())}\n\n"
+        finally:
+            # Join the worker thread before returning so Depends()-free db
+            # usage above is fully done, and any unhandled exception in the
+            # executor future surfaces (rather than being silently dropped).
+            await future
+
+    return StreamingResponse(
+        _event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def _handle_artifact_intent(
@@ -555,13 +832,16 @@ def _handle_normal_chat(
     web_search: bool = False,
     workers_enabled: bool = True,
     thinking_enabled: bool = False,
-) -> tuple[str, str, bool]:
+    event_sink: Callable[[StreamEvent], None] | None = None,
+) -> tuple[str, str, bool, list[dict]]:
     """Handle normal chat via the agent runtime.
 
-    Returns (reply_text, message_id, is_exp0_plan) — the exp0 flag lets the
-    caller skip work the EXP0 tier explicitly forbids (background fact
+    Returns (reply_text, message_id, is_exp0_plan, tool_events) — the exp0 flag
+    lets the caller skip work the EXP0 tier explicitly forbids (background fact
     extraction / embeddings), matching
     experimental_opt_in_tiers.EXP0.memory_subsystem_override in the catalog.
+    ``tool_events`` is the compact per-turn record of tools the model actually
+    ran, persisted on the assistant message and fed back into future history.
     """
     msg_id = assistant_message_id or new_message_id()
 
@@ -570,7 +850,8 @@ def _handle_normal_chat(
 
     # Get hardware plan and runtime config
     plan_result = _get_hardware_plan(db, workers_enabled=workers_enabled)
-    logger.info("HARDWARE PLAN: workers_enabled=%s helper_count=%s", workers_enabled, plan_result.get("helper_count"))
+    plan_result = _apply_orchestrator_override(db, plan_result)
+    logger.info("HARDWARE PLAN: workers_enabled=%s helper_count=%s orchestrator=%s", workers_enabled, plan_result.get("helper_count"), plan_result.get("orchestrator", {}).get("model"))
     config = _get_runtime_config(db)
     # Translate catalog slugs to the runtime's actual pull refs before resolving.
     _apply_runtime_model_refs(plan_result, config)
@@ -593,13 +874,27 @@ def _handle_normal_chat(
         .limit(10)
         .all()
     )
-    previous_messages = [
-        {"role": m.role, "content": m.text}
-        for m in reversed(prev_msgs)
-    ]
+    previous_messages = []
+    for m in reversed(prev_msgs):
+        content = m.text
+        # Ground assistant turns in what they factually did: append a compact
+        # action log so the model can't lose the memory of files it created,
+        # edited, deleted, or moved on earlier turns.
+        if m.role == "assistant" and getattr(m, "tool_events", None):
+            trailer = _tool_events_history_trailer(m.tool_events)
+            if trailer:
+                content = f"{content}\n\n{trailer}" if content else trailer
+        previous_messages.append({"role": m.role, "content": content})
 
     # Run agent orchestration synchronously (collect stream)
     from ..model_runtime.client import _run
+
+    # Captured live from the stream: a compact record of every tool the model
+    # actually ran this turn (paired call→result). Persisted on the assistant
+    # message and fed back into later turns' history so the model doesn't lose
+    # the memory of its own file actions (the "I never created any file" bug).
+    captured_tool_events: list[dict] = []
+    _pending_calls: dict[str, dict] = {}
 
     try:
         async def _collect():
@@ -612,6 +907,16 @@ def _handle_normal_chat(
             # unchanged. ``tokens`` still accumulates EVERY token (from the
             # original per-token events) so the persisted reply text is whole.
             coalescer = TokenCoalescer(emitter, chat_id=chat.id, message_id=msg_id)
+            # A second coalescer fans the same events out to event_sink (the
+            # HTTP-streaming route's queue), when present. TokenCoalescer only
+            # depends on a duck-typed .emit(StreamEvent), so a tiny adapter
+            # around event_sink lets us reuse it without any new batching logic.
+            sse_coalescer = None
+            if event_sink is not None:
+                class _SinkEmitter:
+                    def emit(self, ev: "StreamEvent") -> None:
+                        event_sink(ev)
+                sse_coalescer = TokenCoalescer(_SinkEmitter(), chat_id=chat.id, message_id=msg_id)
             try:
                 async for event in orchestrate_turn(
                     payload.message,
@@ -632,8 +937,36 @@ def _handle_normal_chat(
                     # ephemeral reasoning pane. Token events are coalesced;
                     # all others pass straight through.
                     coalescer.feed(event)
-                    if event.type == "token":
+                    if sse_coalescer is not None:
+                        sse_coalescer.feed(event)
+                    if event.type == "phase" and event.payload.get("phase") == "model":
+                        # Round boundary: the runtime discards prior-round answer
+                        # tokens here (tool round or narration retry). Mirror that
+                        # so the persisted reply is only the final round's text.
+                        tokens.clear()
+                    elif event.type == "token":
                         tokens.append(event.payload.get("text", ""))
+                    elif event.type == "tool_call":
+                        # Any prose the model streamed before calling a tool is a
+                        # preamble ("You're right — let me check that directory:"),
+                        # not the final answer. The runtime resets its own
+                        # all_tokens at each round boundary and treats only the
+                        # last round as the answer; mirror that here so the
+                        # PERSISTED reply isn't the preamble glued to the answer
+                        # ("…correctly:Done! The README…" in the wild). The live
+                        # UI still saw every token via the coalescer above.
+                        tokens.clear()
+                        _pending_calls[event.payload.get("call_id", "")] = {
+                            "tool": event.payload.get("tool_name", ""),
+                            "arguments": event.payload.get("arguments", {}) or {},
+                        }
+                    elif event.type == "tool_result":
+                        call = _pending_calls.pop(event.payload.get("call_id", ""), None)
+                        captured_tool_events.append(_summarize_tool_event(
+                            (call or {}).get("tool", event.payload.get("tool_name", "")),
+                            (call or {}).get("arguments", {}),
+                            event.payload.get("result", ""),
+                        ))
                     elif event.type == "error":
                         # Per failure_modes.orchestrator_error =
                         # "emit_typed_error_persist_clean_message": the typed
@@ -650,6 +983,8 @@ def _handle_normal_chat(
                 # Flush any tail tokens that didn't reach the batch threshold
                 # (done/error already flush as boundaries; this is a backstop).
                 coalescer.flush()
+                if sse_coalescer is not None:
+                    sse_coalescer.flush()
             return "".join(tokens), None
 
         reply_text, error_message = _run(_collect())
@@ -667,7 +1002,7 @@ def _handle_normal_chat(
         logger.error("Agent orchestration failed: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc))
 
-    return reply_text, msg_id, is_exp0
+    return reply_text, msg_id, is_exp0, captured_tool_events
 
 
 def _run_fact_extraction(chat_id: str, user_msg_id: str, assistant_msg_id: str):

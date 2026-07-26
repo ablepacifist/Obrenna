@@ -18,9 +18,9 @@
       "role_class": ["orchestrator"],
       "tool_call_mode": "prompt_json",
       "reasoning_distilled": true,
-      "max_tool_rounds": 3,
+      "max_tool_rounds": 6,
       "tool_result_budget": 4000,
-      "notes": "Claude-Opus reasoning distilled from Qwen3.5-4B base. Replaces stock qwen3.5-4b as the T0/T1 orchestrator. Produces<think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2."
+      "notes": "Claude-Opus reasoning distilled from Qwen3.5-4B base. Replaces stock qwen3.5-4b as the T0/T1 orchestrator. Produces<think> CoT blocks that must be filtered by the adapter layer before display. max_tool_rounds=6 gives room for build->run->fix->run coding loops (a cap, not a target: simple turns still finish in 1). Real Ollama ref: kwangsuklee/Qwen3.5-4B.Q4_K_M-Claude-4.6-Opus-Reasoning-Distilled-v2."
     },
     "qwen3.5-9b-claude-opus-reasoning-distilled": {
       "family": "qwen3.5",
@@ -29,9 +29,20 @@
       "role_class": ["orchestrator"],
       "tool_call_mode": "prompt_json",
       "reasoning_distilled": true,
-      "max_tool_rounds": 4,
+      "max_tool_rounds": 8,
       "tool_result_budget": 6000,
-      "notes": "Claude-Opus reasoning distilled from Qwen3.5-9B base. Replaces stock qwen3.5-9b as the T2-T4 orchestrator. Produces <think> CoT blocks that must be filtered by the adapter layer before display. Real Ollama ref: kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF."
+      "notes": "Claude-Opus reasoning distilled from Qwen3.5-9B base. Replaces stock qwen3.5-9b as the T2-T4 orchestrator. Produces <think> CoT blocks that must be filtered by the adapter layer before display. max_tool_rounds=8 gives room for multi-step coding (write files, run, read errors, fix, run again); it is a ceiling, not a target, so simple turns are unaffected. Real Ollama ref: kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF."
+    },
+    "qwen2.5-coder-14b": {
+      "family": "qwen2.5-coder",
+      "params_b": 14,
+      "ollama_ref": "qwen2.5-coder:14b",
+      "role_class": ["orchestrator"],
+      "tool_call_mode": "prompt_json",
+      "reasoning_distilled": false,
+      "max_tool_rounds": 8,
+      "tool_result_budget": 8000,
+      "notes": "Coding-specialized Qwen2.5-Coder 14B (Q4_K_M ~8.4GB). Chosen as a manual orchestrator override for coding on VRAM-limited hardware (e.g. a 10GB card): it fits ENTIRELY in VRAM so inference is all-GPU and fast, unlike the 27B which spills ~6GB to RAM and runs at ~2 tok/s. Native tool-calling (no prompt-JSON envelope fragility). Not part of the auto-resolved tiers — set via AppSettings.orchestrator_override."
     },
     "qwen3.5-27b": {
       "family": "qwen3.5",
@@ -40,7 +51,7 @@
       "role_class": ["orchestrator"],
       "tool_call_mode": "openai_native",
       "reasoning_distilled": false,
-      "max_tool_rounds": 5,
+      "max_tool_rounds": 8,
       "tool_result_budget": 10000,
       "notes": "STOCK Qwen3.5-27B from Ollama's official library namespace (qwen3.5:27b, Q4_K_M ~17GB). Deliberately NOT a community 'Claude-distilled' fork — that 27B space is populated with templated mass-uploaded cards and safety-stripped/abliterated variants (e.g. juilpark/...-heretic) with no traceable primary author, unlike the verified 4B/9B distills. Vendor-distributed stock is the trustworthy choice here."
     },
@@ -53,7 +64,7 @@
       "role_class": ["orchestrator"],
       "tool_call_mode": "openai_native",
       "reasoning_distilled": false,
-      "max_tool_rounds": 5,
+      "max_tool_rounds": 8,
       "tool_result_budget": 12000,
       "notes": "MoE — only ~3B active params per token. Streams far less weight per token than a dense model of equal total size, preferred orchestrator for bandwidth-bound CPU-only tiers once it fits in RAM budget with headroom. STOCK ref from Ollama's official library namespace (qwen3.6:35b-a3b, Apache 2.0, vendor-distributed) — chosen over community mirrors/APEX repackagings."
     },

@@ -78,7 +78,7 @@ class TestPartialTurnPersistsOnRecoverableError:
 
         payload = ChatRequest(chat_id=chat.id, message="hello")
 
-        reply_text, msg_id, _is_exp0 = chat_router._handle_normal_chat(
+        reply_text, msg_id, _is_exp0, _tool_events = chat_router._handle_normal_chat(
             db, chat, user_msg, payload, assistant_message_id="asst-err-1",
         )
 
@@ -115,7 +115,7 @@ class TestPartialTurnPersistsOnRecoverableError:
 
         payload = ChatRequest(chat_id=chat.id, message="hello again")
 
-        reply_text, _msg_id, _is_exp0 = chat_router._handle_normal_chat(
+        reply_text, _msg_id, _is_exp0, _tool_events = chat_router._handle_normal_chat(
             db, chat, user_msg, payload, assistant_message_id="asst-err-2",
         )
 

@@ -20,6 +20,10 @@ from app.routers import (
     memory,
     tools,
     knowledge_packs,
+    custom_tools,
+    codebase_projects,
+    codebase_agent_ws,
+    codebase_agent_devices,
 )
 
 
@@ -63,3 +67,7 @@ app.include_router(shutdown.router)
 app.include_router(memory.router)
 app.include_router(tools.router)
 app.include_router(knowledge_packs.router)
+app.include_router(custom_tools.router)
+app.include_router(codebase_projects.router)
+app.include_router(codebase_agent_ws.router)
+app.include_router(codebase_agent_devices.router)

@@ -57,6 +57,10 @@ class AppSettings(Base):
     active_models: Mapped[Any] = mapped_column(JSON, default=list)
     managed_plan: Mapped[Any] = mapped_column(JSON, default=dict)
     workers_enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # NEW: Worker models toggle
+    # Optional catalog slug that forces the orchestrator model regardless of the
+    # hardware resolver's tier pick (e.g. "qwen3.5-27b" to run a bigger model
+    # than the auto-detected hardware would choose). Empty/None = use the resolver.
+    orchestrator_override: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
 
 
 class ModelEndpoint(Base):
@@ -149,6 +153,9 @@ class Chat(Base):
     # Incremented on every summary fold so the assembled-context cache
     # invalidates when the rolling summary text changes (Fix #7).
     rolling_summary_version: Mapped[int] = mapped_column(Integer, default=1)
+    active_codebase_project_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("codebase_projects.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -171,6 +178,12 @@ class ChatMessage(Base):
     text: Mapped[str] = mapped_column(Text, default="")
     artifacts: Mapped[Any] = mapped_column(JSON, default=list)  # list[artifact_id]
     files: Mapped[Any] = mapped_column(JSON, default=list)  # list[{name,size}]
+    # Compact record of the tool calls this assistant turn made:
+    # list[{tool, arguments, ok, summary}]. Text-only history erases the
+    # model's memory of its own actions across turns (it then truthfully
+    # "remembers" never touching any file), so this is fed back into the
+    # conversation context and lets the UI show tool activity after reload.
+    tool_events: Mapped[Any] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     chat: Mapped["Chat"] = relationship(back_populates="messages")
@@ -236,6 +249,65 @@ class AccountMemoryVersion(Base):
     account_id: Mapped[str] = mapped_column(String, primary_key=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CustomTool(Base):
+    """User-defined external API the chat agent can call as a tool."""
+
+    __tablename__ = "custom_tools"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text)
+    base_url: Mapped[str] = mapped_column(String)
+    http_method: Mapped[str] = mapped_column(String, default="GET")
+    headers: Mapped[Any] = mapped_column(JSON, default=dict)
+    params: Mapped[Any] = mapped_column(JSON, default=list)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class CodebaseAgentDevice(Base):
+    """A machine that has connected a codebase-agent to this Obrenna instance.
+
+    device_id is generated and persisted by the agent itself on first run and
+    presented on every reconnect -- it is the durable identity a human
+    approves. Connections stay open before approval; approval is re-checked
+    fresh from this row on every dispatch, never cached at connect time."""
+
+    __tablename__ = "codebase_agent_devices"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    device_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String)
+    approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class CodebaseProject(Base):
+    """A registered folder on an approved CodebaseAgentDevice that the chat
+    agent can browse/read/search/edit."""
+
+    __tablename__ = "codebase_projects"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    device_id: Mapped[str] = mapped_column(
+        ForeignKey("codebase_agent_devices.device_id"), index=True
+    )
+    root_path: Mapped[str] = mapped_column(String)
+    remote_project_id: Mapped[str] = mapped_column(String)
+    write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
 
 
 class ChatMemoryVersion(Base):

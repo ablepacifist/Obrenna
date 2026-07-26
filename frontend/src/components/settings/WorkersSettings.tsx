@@ -35,6 +35,20 @@ export function WorkersSettings() {
       .finally(() => setLoading(false))
   }, [])
 
+  const updateOrchestratorOverride = async (value: string) => {
+    if (!settings) return
+    setSaving(true)
+    try {
+      const updated = { ...settings, orchestrator_override: value || null }
+      const response = await updateAppSettings(updated)
+      setSettings(response)
+    } catch (error) {
+      console.error('Failed to update reasoning model:', error)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const updateWorkersSetting = async (enabled: boolean) => {
     if (!settings) return
     
@@ -97,7 +111,31 @@ export function WorkersSettings() {
 
   return (
     <div className="space-y-4">
+      {/* Reasoning model (orchestrator) selector */}
       <div>
+        <h3 className="text-[14px] font-medium text-(--ink) mb-2">Reasoning Model</h3>
+        <p className="text-[12px] text-(--ink-muted) leading-relaxed">
+          The main model that reasons, calls tools, writes code, and answers.
+          "Auto" picks the best fit for your hardware. Override it to run a larger
+          model (slower) or a coding-specialized one.
+        </p>
+        <select
+          value={settings.orchestrator_override ?? ''}
+          onChange={e => updateOrchestratorOverride(e.target.value)}
+          disabled={saving}
+          className="mt-2 w-full text-[13px] text-(--ink) bg-(--surface-2) rounded-lg px-2 py-2 outline-none disabled:opacity-50"
+        >
+          <option value="">Auto — best fit for this hardware (recommended)</option>
+          <option value="qwen2.5-coder-14b">Qwen2.5-Coder 14B — fast, coding-specialized (fits your GPU)</option>
+          <option value="qwen3.5-27b">Qwen3.5 27B — biggest / highest quality, but slow (spills to RAM)</option>
+        </select>
+        <p className="text-[11px] text-(--ink-faint) mt-1.5">
+          Changing this takes effect on your next message. A model runs its first
+          message slowly while it loads into memory, then stays resident.
+        </p>
+      </div>
+
+      <div className="pt-2 border-t border-(--border)">
         <h3 className="text-[14px] font-medium text-(--ink) mb-2">Worker Models</h3>
         <p className="text-[12px] text-(--ink-muted) leading-relaxed">
           Worker models run separate AI instances for utility tasks (context extraction, summarization) and memory management.

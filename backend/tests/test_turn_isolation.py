@@ -428,9 +428,11 @@ class TestThinkStripping:
     @pytest.mark.asyncio
     async def test_stream_emits_think_as_thinking_delta_not_tokens(self, monkeypatch):
         captured: dict = {}
+        # Ollama config → native /api/chat NDJSON (message.content per line,
+        # terminal done chunk). The <think> stripping is transport-agnostic.
         lines = [
-            'data: ' + json.dumps({"choices": [{"delta": {"content": "<think>internal</think>Final answer"}}]}),
-            "data: [DONE]",
+            json.dumps({"message": {"content": "<think>internal</think>Final answer"}, "done": False}),
+            json.dumps({"message": {"content": ""}, "done": True}),
         ]
 
         class FakeResponse:

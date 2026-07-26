@@ -10,6 +10,8 @@ import { UpdateSettings } from './UpdateSettings'
 import { MemorySettings } from './MemorySettings'
 import { WorkersSettings } from './WorkersSettings'
 import { OllamaSettings } from './OllamaSettings'
+import { CustomApisSettings } from './CustomApisSettings'
+import { CodebaseProjectsSettings } from './CodebaseProjectsSettings'
 
 interface SettingsViewProps {
   onClose: () => void
@@ -23,6 +25,8 @@ const TABS = [
   { id: 'updates', label: 'Updates' },
   { id: 'appearance', label: 'Appearance' },
   { id: 'memory', label: 'Memory' },
+  { id: 'custom-apis', label: 'Custom APIs' },
+  { id: 'codebase-projects', label: 'Codebase Projects' },
   { id: 'workers', label: 'Workers' },
   { id: 'privacy', label: 'Privacy' },
 ] as const
@@ -59,6 +63,8 @@ export function SettingsView({ onClose, onRerunSetup }: SettingsViewProps) {
           {tab === 'updates' && <UpdateSettings />}
           {tab === 'appearance' && <AppearanceSettings />}
           {tab === 'memory' && <MemorySettings />}
+          {tab === 'custom-apis' && <CustomApisSettings />}
+          {tab === 'codebase-projects' && <CodebaseProjectsSettings />}
           {tab === 'workers' && <WorkersSettings />}
           {tab === 'privacy' && <PrivacySettings />}
         </div>

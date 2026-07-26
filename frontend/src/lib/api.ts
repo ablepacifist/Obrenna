@@ -42,6 +42,8 @@ export type AppSettings = {
   active_models: string[]
   managed_plan: Record<string, unknown>
   workers_enabled: boolean
+  // Catalog slug forcing the reasoning/orchestrator model; null = auto (hardware pick).
+  orchestrator_override?: string | null
 }
 
 export const getModelEndpoint = () => req<ModelEndpointConfig>('GET', '/api/settings/model-endpoint')
@@ -237,7 +239,14 @@ export type ChatMessageDTO = {
   blocks?: MessageBlock[]
 }
 export type ChatResponse = { chat_id: string; message: ChatMessageDTO; memory_events?: MemoryEvent[] }
-export type ChatDTO = { id: string; title: string; folder_id?: string; created_at: string; updated_at: string }
+export type ChatDTO = {
+  id: string
+  title: string
+  folder_id?: string
+  active_codebase_project_id?: string | null
+  created_at: string
+  updated_at: string
+}
 export type ChatDetailDTO = ChatDTO & { messages: ChatMessageDTO[] }
 
 export type SendMessageRequest = {
@@ -248,6 +257,9 @@ export type SendMessageRequest = {
   web_search?: boolean
   workers_enabled?: boolean
   thinking_enabled?: boolean
+  /** Codebase to attach when this send CREATES the chat (no chat_id yet).
+   *  Existing chats change codebase via updateChat() instead. */
+  active_codebase_project_id?: string
 }
 
 export const sendMessage = (payload: SendMessageRequest) =>
@@ -256,12 +268,96 @@ export const sendMessage = (payload: SendMessageRequest) =>
      thinking_enabled: payload.thinking_enabled ?? false,
    })
 
+// Shape of each live orchestrator event relayed over the stream — matches
+// the backend's StreamEvent.to_envelope() and the Tauri-side AgentEvent type
+// in hooks/useAgentEvent.ts, so the same reducer can consume either source.
+export type AgentStreamEvent = {
+  channel: string
+  chat_id: string
+  message_id: string
+  type: string
+  payload: Record<string, unknown>
+}
+
+// Browser-only counterpart to sendMessage(): consumes POST /api/chat/stream
+// (Server-Sent Events) instead of waiting for one blocking JSON response.
+// EventSource can't be used here — it's GET-only and this endpoint needs a
+// POST body — so this reads the response body directly and parses SSE
+// framing by hand. Every `data:` line is guaranteed single-line JSON (the
+// backend always json.dumps onto one line), so no multi-line data: handling
+// is needed; `:`-prefixed lines are heartbeat comments and are skipped.
+export async function sendMessageStream(
+  payload: SendMessageRequest,
+  onEvent: (event: AgentStreamEvent) => void,
+): Promise<ChatResponse> {
+  const base = await getBase()
+  const res = await fetch(`${base}/api/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload, thinking_enabled: payload.thinking_enabled ?? false }),
+  })
+  if (!res.ok || !res.body) {
+    const msg = await res.text().catch(() => res.statusText)
+    throw new Error(`POST /api/chat/stream → ${res.status}: ${msg}`)
+  }
+
+  const reader = res.body.getReader()
+  // {stream: true} buffers any incomplete multi-byte UTF-8 sequence left at
+  // a chunk boundary instead of mangling it — chat text is not ASCII-only.
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: ChatResponse | null = null
+  let streamError: string | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    let sepIndex: number
+    while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, sepIndex)
+      buffer = buffer.slice(sepIndex + 2)
+
+      let eventName = 'message'
+      let data: string | null = null
+      for (const line of block.split('\n')) {
+        if (line.startsWith(':')) continue
+        if (line.startsWith('event:')) eventName = line.slice(6).trim()
+        else if (line.startsWith('data:')) data = line.slice(5).trim()
+      }
+      if (data === null) continue
+
+      if (eventName === 'agent_event') {
+        try { onEvent(JSON.parse(data)) } catch { /* malformed frame — ignore */ }
+      } else if (eventName === 'response') {
+        result = JSON.parse(data) as ChatResponse
+      } else if (eventName === 'error') {
+        const parsed = JSON.parse(data) as { message?: string }
+        streamError = parsed.message || 'Chat stream failed'
+      }
+    }
+  }
+
+  if (streamError) throw new Error(streamError)
+  if (!result) throw new Error('Chat stream ended without a response')
+  return result
+}
+
 export const listChats = () => req<ChatDTO[]>('GET', '/api/chats')
 export const createChat = (title?: string, folder_id?: string) =>
   req<ChatDTO>('POST', '/api/chats', { title: title ?? 'New chat', folder_id })
 export const getChat = (id: string) => req<ChatDetailDTO>('GET', `/api/chats/${id}`)
-export const updateChat = (id: string, patch: { title?: string; folder_id?: string; unfile?: boolean }) =>
-  req<ChatDTO>('PATCH', `/api/chats/${id}`, patch)
+export const updateChat = (
+  id: string,
+  patch: {
+    title?: string
+    folder_id?: string
+    unfile?: boolean
+    active_codebase_project_id?: string
+    clear_codebase_project?: boolean
+  },
+) => req<ChatDTO>('PATCH', `/api/chats/${id}`, patch)
 export const deleteChat = (id: string) => req<void>('DELETE', `/api/chats/${id}`)
 
 // ── folders ───────────────────────────────────────────────────────────────────
@@ -296,3 +392,90 @@ export const updateMemoryFact = (id: string, fact_text: string) =>
   req<MemoryFactDTO>('PATCH', `/api/memory/facts/${id}`, { fact_text })
 export const deleteMemoryFact = (id: string) =>
   req<{ deleted: boolean; fact_id: string }>('DELETE', `/api/memory/facts/${id}`)
+
+// ── custom tools ─────────────────────────────────────────────────────────────
+export type CustomToolParamDTO = {
+  name: string
+  description: string
+  required: boolean
+  location: 'query' | 'body'
+  type: 'string' | 'number' | 'boolean'
+}
+
+export type CustomToolDTO = {
+  id: string
+  name: string
+  description: string
+  base_url: string
+  http_method: string
+  headers: Record<string, string>
+  params: CustomToolParamDTO[]
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type CustomToolInput = {
+  name: string
+  description: string
+  base_url: string
+  http_method: string
+  headers: Record<string, string>
+  params: CustomToolParamDTO[]
+  enabled?: boolean
+}
+
+export const getCustomTools = () => req<CustomToolDTO[]>('GET', '/api/custom-tools')
+export const createCustomTool = (input: CustomToolInput) =>
+  req<CustomToolDTO>('POST', '/api/custom-tools', input)
+export const updateCustomTool = (id: string, input: Partial<CustomToolInput>) =>
+  req<CustomToolDTO>('PATCH', `/api/custom-tools/${id}`, input)
+export const deleteCustomTool = (id: string) =>
+  req<{ deleted: boolean; tool_id: string }>('DELETE', `/api/custom-tools/${id}`)
+
+// ── codebase agent devices ──────────────────────────────────────────────────
+export type CodebaseAgentDeviceDTO = {
+  id: string
+  device_id: string
+  name: string
+  approved: boolean
+  enabled: boolean
+  connected: boolean
+  created_at: string
+  last_seen_at: string
+}
+
+export const getCodebaseAgentDevices = () => req<CodebaseAgentDeviceDTO[]>('GET', '/api/codebase-agent-devices')
+export const approveCodebaseAgentDevice = (id: string) =>
+  req<CodebaseAgentDeviceDTO>('POST', `/api/codebase-agent-devices/${id}/approve`)
+export const deleteCodebaseAgentDevice = (id: string) =>
+  req<{ deleted: boolean; device_row_id: string }>('DELETE', `/api/codebase-agent-devices/${id}`)
+
+// ── codebase projects ────────────────────────────────────────────────────────
+export type CodebaseProjectDTO = {
+  id: string
+  name: string
+  device_id: string
+  root_path: string
+  write_enabled: boolean
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type CodebaseProjectInput = {
+  name: string
+  device_id: string
+  root_path: string
+  write_enabled?: boolean
+}
+
+export const getCodebaseProjects = () => req<CodebaseProjectDTO[]>('GET', '/api/codebase-projects')
+export const createCodebaseProject = (input: CodebaseProjectInput) =>
+  req<CodebaseProjectDTO>('POST', '/api/codebase-projects', input)
+export const updateCodebaseProject = (
+  id: string,
+  input: Partial<Pick<CodebaseProjectDTO, 'name' | 'write_enabled' | 'enabled'>>,
+) => req<CodebaseProjectDTO>('PATCH', `/api/codebase-projects/${id}`, input)
+export const deleteCodebaseProject = (id: string) =>
+  req<{ deleted: boolean; project_id: string }>('DELETE', `/api/codebase-projects/${id}`)

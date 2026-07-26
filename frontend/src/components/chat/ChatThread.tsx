@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { ChatDetailDTO, ChatResponse, MessageBlock } from '../../lib/api'
-import { getChat, sendMessage, uploadFile } from '../../lib/api'
+import type { ChatDetailDTO, ChatResponse, CodebaseProjectDTO, MessageBlock } from '../../lib/api'
+import { getChat, getCodebaseProjects, sendMessage, sendMessageStream, updateChat, uploadFile } from '../../lib/api'
 import { useAgentEvent } from '../../hooks/useAgentEvent'
 import { Composer } from './Composer'
 import { EmptyState } from './EmptyState'
@@ -45,7 +45,33 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
   const [workersEnabled] = useState(true)
   const [thinkingEnabled, setThinkingEnabled] = useState(false)
+  const [codebaseProjects, setCodebaseProjects] = useState<CodebaseProjectDTO[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    getCodebaseProjects().then(setCodebaseProjects).catch(() => {})
+  }, [])
+
+  // Codebase chosen before the chat exists (first message in a new chat).
+  // There's no chat row to PATCH yet, so the selection is held here and sent
+  // with the first message, which creates the chat already attached to it.
+  const [draftCodebaseProjectId, setDraftCodebaseProjectId] = useState<string | null>(null)
+
+  const handleCodebaseProjectChange = useCallback((projectId: string | null) => {
+    if (!chatId) {
+      setDraftCodebaseProjectId(projectId)
+      return
+    }
+    setChat(prev => (prev ? { ...prev, active_codebase_project_id: projectId ?? undefined } : prev))
+    const patch = projectId ? { active_codebase_project_id: projectId } : { clear_codebase_project: true }
+    updateChat(chatId, patch).catch(() => {})
+  }, [chatId])
+
+  // What the composer's picker should show: the saved value once the chat
+  // exists, otherwise the not-yet-persisted draft.
+  const selectedCodebaseProjectId = chatId
+    ? (chat?.active_codebase_project_id ?? null)
+    : draftCodebaseProjectId
 
   // Pending assistant message for streaming (desktop mode)
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
@@ -399,7 +425,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         const dto = await uploadFile(f)
         uploadedIds.push(dto.id)
       }
-       const resp: ChatResponse = await sendMessage({
+      const sendPayload = {
         chat_id: chatId ?? undefined,
         message: text,
         file_ids: uploadedIds,
@@ -407,7 +433,23 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         web_search: webSearchEnabled,
         workers_enabled: workersEnabled,
         thinking_enabled: thinkingEnabled,
-      })
+        // Only meaningful on the create path; an existing chat's codebase is
+        // already persisted server-side.
+        ...(!chatId && draftCodebaseProjectId
+          ? { active_codebase_project_id: draftCodebaseProjectId }
+          : {}),
+      }
+      // Desktop gets live progress via Tauri's stdout->IPC bridge
+      // (useAgentEvent), so it keeps using the plain blocking request. A
+      // browser tab has no such side channel — without HTTP-level
+      // streaming it sees nothing until the whole turn completes, which
+      // both looks frozen and risks a Cloudflare 524 on slow turns through
+      // the tunnel. sendMessageStream() feeds the same handleAgentEvent
+      // reducer live via SSE instead.
+      const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI__
+      const resp: ChatResponse = isTauri
+        ? await sendMessage(sendPayload)
+        : await sendMessageStream(sendPayload, handleAgentEvent)
 
       // Show memory toast for relevant events
       if (resp.memory_events && resp.memory_events.length > 0) {
@@ -542,7 +584,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
           </div>
           <div className="border-t border-(--border) px-6 py-4">
             <div className="max-w-[760px] mx-auto">
-              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} />
+              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} />
             </div>
           </div>
         </main>
@@ -553,7 +595,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       <main className="flex-1 flex flex-col min-w-0">
         <EmptyState
             onChip={p => handleSend(p, [])}
-            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} />}
+            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} />}
           />
       </main>
     )
@@ -587,7 +629,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       </div>
       <div className="border-t border-(--border) px-6 py-4">
         <div className="max-w-[760px] mx-auto">
-          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} />
+          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} />
         </div>
       </div>
     </main>

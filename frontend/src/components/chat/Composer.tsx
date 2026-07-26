@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react'
-import { Brain, FileText, Globe, Paperclip, Send, X } from 'lucide-react'
+import { Brain, FileText, FolderCog, Globe, Paperclip, Send, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
+import type { CodebaseProjectDTO } from '../../lib/api'
 
 const ALLOWED_EXTENSIONS = new Set([
   'csv', 'txt', 'pdf', 'xlsx', 'xls', 'json', 'log', 'md', 'xml',
@@ -35,6 +36,9 @@ interface ComposerProps {
   onWorkersChange?: (enabled: boolean) => void
   thinkingEnabled?: boolean
   onThinkingChange?: (enabled: boolean) => void
+  codebaseProjects?: CodebaseProjectDTO[]
+  activeCodebaseProjectId?: string | null
+  onCodebaseProjectChange?: (id: string | null) => void
 }
 
 function formatBytes(n: number): string {
@@ -43,7 +47,20 @@ function formatBytes(n: number): string {
   return (n / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-export function Composer({ onSend, disabled, initialText = '', webSearchEnabled = false, onWebSearchChange, workersEnabled = true, onWorkersChange, thinkingEnabled = false, onThinkingChange }: ComposerProps) {
+export function Composer({
+  onSend,
+  disabled,
+  initialText = '',
+  webSearchEnabled = false,
+  onWebSearchChange,
+  workersEnabled = true,
+  onWorkersChange,
+  thinkingEnabled = false,
+  onThinkingChange,
+  codebaseProjects = [],
+  activeCodebaseProjectId = null,
+  onCodebaseProjectChange,
+}: ComposerProps) {
   const [text, setText] = useState(initialText)
   const [files, setFiles] = useState<AttachedFile[]>([])
   const [drag, setDrag] = useState(false)
@@ -172,6 +189,29 @@ export function Composer({ onSend, disabled, initialText = '', webSearchEnabled 
           >
             <Brain className={cn('w-3.5 h-3.5', thinkingEnabled && 'text-(--accent)')} /> Thinking
           </button>
+          {codebaseProjects.length > 0 && (
+            <div
+              className={cn(
+                'h-8 pl-2 pr-1.5 rounded-md text-[12px] inline-flex items-center gap-1 border transition-colors',
+                activeCodebaseProjectId
+                  ? 'border-(--accent) bg-(--accent)/10 text-(--accent)'
+                  : 'border-(--border) bg-(--surface) text-(--ink-faint)',
+              )}
+              title="Which codebase project the assistant can access in this chat"
+            >
+              <FolderCog className="w-3.5 h-3.5" />
+              <select
+                value={activeCodebaseProjectId ?? ''}
+                onChange={e => onCodebaseProjectChange?.(e.target.value || null)}
+                className="bg-transparent outline-none max-w-[140px]"
+              >
+                <option value="">No codebase</option>
+                {codebaseProjects.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
         <Button onClick={send} disabled={disabled || (!text.trim() && files.length === 0)}>
           <Send className="w-3.5 h-3.5" /> Send

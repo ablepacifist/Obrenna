@@ -58,6 +58,18 @@ def run_migrations(db: Session) -> None:
                 text("ALTER TABLE chats ADD COLUMN rolling_summary_version INTEGER NOT NULL DEFAULT 1")
             )
 
+        # --- chat_messages.tool_events ---
+        if not _column_exists(db, "chat_messages", "tool_events"):
+            db.execute(
+                text("ALTER TABLE chat_messages ADD COLUMN tool_events JSON NOT NULL DEFAULT '[]'")
+            )
+
+        # --- settings_app.orchestrator_override ---
+        if not _column_exists(db, "settings_app", "orchestrator_override"):
+            db.execute(
+                text("ALTER TABLE settings_app ADD COLUMN orchestrator_override VARCHAR")
+            )
+
         # --- chat_turns table ---
         if not _table_exists(db, "chat_turns"):
             db.execute(text("""
@@ -170,6 +182,76 @@ def run_migrations(db: Session) -> None:
             """))
             db.execute(text(
                 "CREATE INDEX idx_provision_event_logs_job_id ON provision_event_logs(job_id)"
+            ))
+
+        # --- codebase_agent_devices table ---
+        if not _table_exists(db, "codebase_agent_devices"):
+            db.execute(text("""
+                CREATE TABLE codebase_agent_devices (
+                    id TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    approved INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP NOT NULL,
+                    last_seen_at TIMESTAMP NOT NULL
+                )
+            """))
+            db.execute(text(
+                "CREATE UNIQUE INDEX idx_codebase_agent_devices_device_id "
+                "ON codebase_agent_devices(device_id)"
+            ))
+
+        # --- codebase_projects table (v2: device_id replaces base_url/token) ---
+        if _table_exists(db, "codebase_projects") and not _column_exists(db, "codebase_projects", "device_id"):
+            # Pre-release shape (base_url/token) -- never shipped, safe to drop and recreate.
+            db.execute(text("DROP TABLE codebase_projects"))
+        if not _table_exists(db, "codebase_projects"):
+            db.execute(text("""
+                CREATE TABLE codebase_projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    device_id TEXT NOT NULL REFERENCES codebase_agent_devices(device_id),
+                    root_path TEXT NOT NULL,
+                    remote_project_id TEXT NOT NULL,
+                    write_enabled INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+            """))
+            db.execute(text(
+                "CREATE UNIQUE INDEX idx_codebase_projects_name ON codebase_projects(name)"
+            ))
+            db.execute(text(
+                "CREATE INDEX idx_codebase_projects_device_id ON codebase_projects(device_id)"
+            ))
+
+        # --- chats.active_codebase_project_id ---
+        if not _column_exists(db, "chats", "active_codebase_project_id"):
+            db.execute(text(
+                "ALTER TABLE chats ADD COLUMN active_codebase_project_id TEXT "
+                "REFERENCES codebase_projects(id) ON DELETE SET NULL"
+            ))
+
+        # --- custom_tools table ---
+        if not _table_exists(db, "custom_tools"):
+            db.execute(text("""
+                CREATE TABLE custom_tools (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    http_method TEXT NOT NULL DEFAULT 'GET',
+                    headers JSON NOT NULL DEFAULT '{}',
+                    params JSON NOT NULL DEFAULT '[]',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+            """))
+            db.execute(text(
+                "CREATE UNIQUE INDEX idx_custom_tools_name ON custom_tools(name)"
             ))
 
     try:

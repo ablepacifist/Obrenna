@@ -70,6 +70,7 @@ def _chat_dto(chat: Chat) -> ChatDTO:
         id=chat.id,
         title=chat.title,
         folder_id=chat.folder_id,
+        active_codebase_project_id=chat.active_codebase_project_id,
         created_at=chat.created_at.isoformat(),
         updated_at=chat.updated_at.isoformat(),
     )
@@ -82,6 +83,7 @@ def _msg_dto(msg: ChatMessage) -> ChatMessageDTO:
         text=msg.text,
         artifacts=msg.artifacts or [],
         files=msg.files or [],
+        tool_events=getattr(msg, "tool_events", None) or [],
         created_at=msg.created_at.isoformat(),
     )
 
@@ -127,6 +129,10 @@ def update_chat(chat_id: str, payload: UpdateChatRequest, db: Session = Depends(
         chat.folder_id = None
     elif payload.folder_id is not None:
         chat.folder_id = payload.folder_id
+    if payload.clear_codebase_project:
+        chat.active_codebase_project_id = None
+    elif payload.active_codebase_project_id is not None:
+        chat.active_codebase_project_id = payload.active_codebase_project_id
     chat.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(chat)
