@@ -16,6 +16,9 @@ python -m evals suites
 # Score the local model
 python -m evals run --model "qwen2.5-coder:14b"
 
+# Measure the orchestrator path (persona prompt + reasoning-effort ladder)
+python -m evals run --target orchestrator --model "qwen3.5:9b"
+
 # Compare against Claude as a reference (needs: pip install anthropic)
 python -m evals run --model "qwen3.5:9b" --compare
 
@@ -27,27 +30,34 @@ Scorecards are written to `evals/results/<label>-<suite>-<timestamp>.json`.
 Use `--label` to tag a run (`--label baseline-phase0`) so before/after pairs are
 easy to find.
 
-## What it measures — and what it does NOT
+## Two targets — pick the one that matches your question
 
-**It measures raw model capability.** `LocalTarget` calls the model directly
-through `model_runtime.client.chat_completion_sync` with a single prompt. It
-deliberately does **not** go through `orchestrate_turn`, so none of the
-following are exercised:
+| `--target` | Path | Use it to measure |
+|---|---|---|
+| `local` (default) | bare prompt → `chat_completion_sync` | **model selection**, with nothing else varying |
+| `orchestrator` | the real `orchestrate_turn` | the **persona prompt**, the **reasoning-effort ladder**, workers, the tool loop |
 
-- the persona / system prompt bands (`ORCHESTRATOR_STATIC_SYSTEM_PROMPT`)
-- memory retrieval and knowledge packs
-- the reasoning-effort ladder (`_reasoning_effort_for_round`)
-- tools, the write gate, `ask_user`
+`local` deliberately skips the orchestrator, which makes it the clean way to
+compare two models — no prompt or effort differences confound the result. The
+cost is that it is blind to everything the orchestrator adds, so a prompt
+change will show up as exactly no movement.
 
-**Consequence:** this harness cleanly attributes a **model-selection** change
-(swapping which model is the orchestrator) because nothing else varies. It will
-**not** detect a change to the persona prompt or to reasoning-effort defaults —
-those only take effect on the `orchestrate_turn` path. Measuring those needs an
-orchestrator-path target, which does not exist yet.
+`orchestrator` runs the actual turn pipeline: the persona band (including its
+reasoning scaffolding), the ask_user policy, the prompt-JSON tool contract, and
+the per-round effort ladder. Memory is stubbed to an **empty** context on
+purpose — the persona band comes from `MemoryContext().to_static_messages()`,
+so an empty context still exercises the full prompt structure while keeping
+runs reproducible. Real retrieval would vary per run with whatever is in your
+database, and a scorecard that moves because a stored fact changed is not
+measuring the model.
 
-That split is deliberate: isolating the model keeps the largest single lever
-free of confounds. But do not read a flat scorecard as "the prompt change did
-nothing" — read it as "this harness cannot see prompt changes."
+**Expect it to be much slower.** On the seed suite the orchestrator path ran
+~80s/case against ~15s/case for `local` — the cost of round-1 effort at `high`
+plus the full prompt stack. That difference is a real measurement, not
+overhead to be optimised away blindly.
+
+Still **not** exercised by either target: real memory retrieval, knowledge
+packs, and codebase tools.
 
 ## Suites
 

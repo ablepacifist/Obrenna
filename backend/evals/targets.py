@@ -148,9 +148,118 @@ class ClaudeTarget:
         )
 
 
+@dataclass
+class OrchestratorTarget:
+    """The local model driven through the REAL ``orchestrate_turn``.
+
+    ``LocalTarget`` sends a bare prompt straight to the model, which isolates
+    model selection but is blind to everything the orchestrator adds. This
+    target runs the actual turn pipeline, so the levers that only exist there
+    become measurable:
+
+      * the prompt bands -- persona (``ORCHESTRATOR_STATIC_SYSTEM_PROMPT``,
+        including its reasoning scaffolding), the ask_user policy, the
+        prompt-JSON tool contract
+      * the per-round reasoning-effort ladder (``_round_reasoning_effort``)
+      * worker dispatch and the tool loop
+
+    Memory is stubbed to an EMPTY context on purpose. The persona band comes
+    from ``MemoryContext().to_static_messages()``, so an empty context still
+    exercises the full prompt structure -- while keeping runs reproducible
+    (real retrieval would vary per run with whatever is in the user's DB, and a
+    scorecard that moves because a stored fact changed is not measuring the
+    model). That also removes the need for a database session.
+    """
+
+    model: str = ""
+    name: str = "orchestrator"
+    thinking_enabled: bool = True
+    workers_enabled: bool = False
+    timeout: float = 600.0
+
+    def __post_init__(self) -> None:
+        from app.model_runtime.config import RuntimeConfig
+
+        base_url = os.environ.get("OBRENNA_EVAL_BASE_URL", "http://localhost:11434/v1")
+        if not self.model:
+            self.model = os.environ.get("OBRENNA_EVAL_MODEL", "")
+            if not self.model:
+                raise ValueError(
+                    "No model specified. Pass --model or set OBRENNA_EVAL_MODEL."
+                )
+        self._config = RuntimeConfig(
+            provider="openai_compatible",
+            base_url=base_url,
+            models={"orchestrator": self.model},
+        )
+        # tool_call_mode/max_tool_rounds mirror what the resolver hands a local
+        # model; the eval prompts need no tools, so the loop settles in round 1.
+        from app.agent.runtime import ResolvedPlan
+
+        self._plan = ResolvedPlan({
+            "orchestrator": {
+                "model": self.model,
+                "tool_call_mode": "prompt_json",
+                "max_tool_rounds": 2,
+            },
+        })
+        self._turn = 0
+
+    def generate(self, prompt: str) -> str:
+        import asyncio
+
+        from app.agent import runtime as rt
+
+        class _EmptyMemory:
+            def to_static_messages(self):
+                # The real persona band — this is what makes the prompt
+                # scaffolding measurable.
+                from app.services.memory import (
+                    ORCHESTRATOR_STATIC_SYSTEM_PROMPT,
+                    canonicalise_system_content,
+                )
+                return [{
+                    "role": "system",
+                    "content": canonicalise_system_content(ORCHESTRATOR_STATIC_SYSTEM_PROMPT),
+                }]
+
+            def to_dynamic_messages(self):
+                return []
+
+        original = rt.assemble_context
+        rt.assemble_context = lambda *a, **k: _EmptyMemory()
+        self._turn += 1
+        chat_id = f"eval-{self._turn}"
+
+        async def _collect() -> str:
+            tokens: list[str] = []
+            async for event in rt.orchestrate_turn(
+                prompt, chat_id, None, self._config, self._plan,
+                workers_enabled=self.workers_enabled,
+                thinking_enabled=self.thinking_enabled,
+            ):
+                # Mirror the runtime's own rule: a round boundary discards
+                # prior-round tokens, so only the final answer is scored --
+                # otherwise a tool preamble would be graded as the answer.
+                if event.type == "phase" and event.payload.get("phase") == "model":
+                    tokens.clear()
+                elif event.type == "token":
+                    tokens.append(event.payload.get("text", ""))
+            return "".join(tokens)
+
+        try:
+            return asyncio.run(asyncio.wait_for(_collect(), timeout=self.timeout))
+        finally:
+            rt.assemble_context = original
+
+
 def build_target(kind: str, *, model: str = "", **kwargs) -> Target:
     if kind == "local":
         return LocalTarget(model=model, **kwargs)
+    if kind == "orchestrator":
+        return OrchestratorTarget(model=model, **kwargs)
     if kind == "claude":
         return ClaudeTarget(model=model or "claude-opus-5", **kwargs)
-    raise ValueError(f"unknown target: {kind!r} (expected 'local' or 'claude')")
+    raise ValueError(
+        f"unknown target: {kind!r} (expected 'local', 'orchestrator', or 'claude')"
+    )

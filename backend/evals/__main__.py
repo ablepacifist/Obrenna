@@ -40,12 +40,12 @@ def _run(args: argparse.Namespace) -> int:
         print(f"  [{mark}] {result.case_id:<14} {result.latency_ms / 1000:>6.1f}s  {detail}")
 
     try:
-        target = build_target("local", model=args.model)
+        target = build_target(args.target, model=args.model)
     except (ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"\nrunning local target ({target.model})...")
+    print(f"\nrunning {args.target} target ({target.model})...")
     local = run_suite(target, cases, on_case=progress)
     print("\n" + format_scorecard(local))
 
@@ -67,6 +67,7 @@ def _run(args: argparse.Namespace) -> int:
         "suite": args.suite,
         "cases": len(cases),
         "label": args.label,
+        "target_kind": args.target,
         "local": local.to_dict(include_results=True),
     }
     if reference is not None:
@@ -102,6 +103,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="bundled suite name or path to a .jsonl file")
     run.add_argument("--model", default="",
                      help="local model tag (default: $OBRENNA_EVAL_MODEL)")
+    run.add_argument("--target", default="local", choices=["local", "orchestrator"],
+                     help="'local' sends a bare prompt to the model (isolates model "
+                          "selection); 'orchestrator' runs the real orchestrate_turn, so "
+                          "the persona prompt and reasoning-effort ladder are exercised")
     run.add_argument("--category", default=None, help="only run one category")
     run.add_argument("--limit", type=int, default=None, help="cap number of cases")
     run.add_argument("--compare", action="store_true",

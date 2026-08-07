@@ -6,8 +6,33 @@
 #   .\obrenna.ps1 stop       # stop EVERYTHING, Ollama included
 #   .\obrenna.ps1 restart    # stop, then start
 #   .\obrenna.ps1 status     # show what's currently running
+#
+#   .\obrenna.ps1 start -Lan # additionally accept connections from other
+#                            # machines on your network, so a codebase-agent
+#                            # running on another PC can reach this one. See
+#                            # docs/setup.md -> "Codebases on other computers".
+
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet("start", "stop", "restart", "status")]
+    [string]$Command = "",
+
+    # Opt-in network exposure. Default is localhost-only: uvicorn binds
+    # 127.0.0.1 unless told otherwise, and widening that silently would put the
+    # whole API (chats, settings) on the LAN without the user asking.
+    [switch]$Lan,
+
+    # Override the bind address directly (implies -Lan semantics). Use when
+    # you want to pin one interface instead of all of them.
+    [string]$BindAddress = ""
+)
 
 $ErrorActionPreference = "Stop"
+
+# 0.0.0.0 = every interface. The codebase-agent dials OUT to this address, so
+# the remote machine needs to be able to reach it; localhost cannot be reached
+# from another PC.
+$BackendHost = if ($BindAddress) { $BindAddress } elseif ($Lan) { "0.0.0.0" } else { "127.0.0.1" }
 
 $Root = $PSScriptRoot
 $BackendDir = Join-Path $Root "backend"
@@ -27,6 +52,21 @@ $FrontendPort = 5173
 $OllamaPort = 11434
 $AuthPort = 9100
 $CaddyPort = 9080
+
+function Get-LocalAddresses {
+  # This machine's LAN IPv4 addresses - what a remote agent must dial.
+  # Filters out loopback and APIPA (169.254.x) since neither is reachable from
+  # another PC, which is the only reason we print these at all.
+  try {
+    Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+      Where-Object {
+        $_.IPAddress -ne "127.0.0.1" -and $_.IPAddress -notlike "169.254.*"
+      } |
+      Select-Object -ExpandProperty IPAddress -Unique
+  } catch {
+    @()
+  }
+}
 
 function Test-PortListening($port) {
   [bool](Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
@@ -86,8 +126,15 @@ function Start-Backend {
     Write-Host "Backend already listening on :$BackendPort, skipping."
     return
   }
-  Write-Host "Starting backend on :$BackendPort..."
-  Start-Process -FilePath "python" -ArgumentList "-m", "uvicorn", "main:app", "--reload", "--port", "$BackendPort" `
+  if ($BackendHost -eq "127.0.0.1") {
+    Write-Host "Starting backend on :$BackendPort (localhost only)..."
+  } else {
+    Write-Host "Starting backend on ${BackendHost}:$BackendPort - reachable from other machines."
+    foreach ($ip in Get-LocalAddresses) {
+      Write-Host "  agent on another PC: python -m codebase_agent.main --server http://${ip}:$BackendPort"
+    }
+  }
+  Start-Process -FilePath "python" -ArgumentList "-m", "uvicorn", "main:app", "--reload", "--host", "$BackendHost", "--port", "$BackendPort" `
     -WorkingDirectory $BackendDir -WindowStyle Hidden `
     -RedirectStandardOutput "$LogDir\backend.log" -RedirectStandardError "$LogDir\backend.err.log"
 }
@@ -272,9 +319,13 @@ function Show-Usage {
   Write-Host "  stop     everything, Ollama included"
   Write-Host "  restart  stop then start"
   Write-Host "  status   show what's currently listening/running"
+  Write-Host ""
+  Write-Host "  -Lan                 also accept connections from other machines, so a"
+  Write-Host "                       codebase-agent on another PC can reach this one"
+  Write-Host "  -BindAddress <ip>    bind one specific interface instead of all"
 }
 
-switch ($args[0]) {
+switch ($Command) {
   "start"   { Invoke-Start }
   "stop"    { Invoke-Stop }
   "restart" { Invoke-Restart }
