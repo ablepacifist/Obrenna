@@ -156,6 +156,12 @@ class Chat(Base):
     active_codebase_project_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("codebase_projects.id", ondelete="SET NULL"), nullable=True
     )
+    # How much latitude the agent has over files in this chat:
+    #   "auto"   — write tools run unattended (previous, and still default,
+    #              behaviour, so existing chats are unaffected)
+    #   "manual" — every write suspends the turn for per-edit approval
+    #   "plan"   — write tools are refused; the agent can only read and propose
+    agent_mode: Mapped[str] = mapped_column(String, default="auto", server_default="auto")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -184,6 +190,14 @@ class ChatMessage(Base):
     # "remembers" never touching any file), so this is fed back into the
     # conversation context and lets the UI show tool activity after reload.
     tool_events: Mapped[Any] = mapped_column(JSON, default=list)
+    # Ordered render blocks for this message: interleaved text runs and tool
+    # cards, each tool card carrying the FULL arguments (old_string/new_string
+    # for an edit). tool_events above is a compact audit trail for the model's
+    # context and deliberately drops the diff detail; that made every edit diff
+    # vanish on reload, because the UI had nothing left to render from. This is
+    # the render-fidelity copy. Content is capped per block on write so one
+    # huge file can't bloat a row.
+    blocks: Mapped[Any] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     chat: Mapped["Chat"] = relationship(back_populates="messages")

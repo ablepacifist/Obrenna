@@ -7,7 +7,7 @@ prefix/KV cache reuses them on turns 2+.
 """
 from __future__ import annotations
 
-from app.agent.runtime import _build_orchestrator_messages, WEB_SEARCH_HINT
+from app.agent.runtime import _build_orchestrator_messages, ASK_USER_HINT, WEB_SEARCH_HINT
 from app.services.memory import (
     ORCHESTRATOR_STATIC_SYSTEM_PROMPT,
     MemoryContext,
@@ -50,10 +50,12 @@ class TestBandAPrimeToolContract:
     def test_tool_contract_precedes_dynamic_memory(self):
         dynamic = MemoryContext(facts=[{"id": "f1", "text": "User prefers Python"}]).to_dynamic_messages()
         msgs = _msgs(dynamic, tool_call_mode="prompt_json", allowed_tools=_ALLOWED_TOOLS)
-        # Band A (persona), Band A′ (tool contract), Band B (dynamic memory).
+        # Band A (persona), Band A′ (tool contract), Band A‴ (ask_user policy,
+        # always present), then Band B (dynamic memory).
         assert msgs[0]["content"] == _PERSONA
         assert "Available tools:" in msgs[1]["content"], "Band A′ must be the tool contract"
-        assert "User prefers Python" in msgs[2]["content"], "Band B must follow the contract"
+        assert msgs[2]["content"] == canonicalise_system_content(ASK_USER_HINT)
+        assert "User prefers Python" in msgs[3]["content"], "Band B must follow the static bands"
         assert "User prefers Python" not in msgs[1]["content"], (
             "the tool contract must not include per-turn memory"
         )
@@ -83,6 +85,7 @@ class TestBandADoublePrimeWebSearchHint:
         assert msgs[0]["content"] == _PERSONA
         assert "Available tools:" in msgs[1]["content"]
         assert msgs[2]["content"] == canonicalise_system_content(WEB_SEARCH_HINT)
+        assert msgs[3]["content"] == canonicalise_system_content(ASK_USER_HINT)
 
     def test_hint_absent_when_web_disabled(self):
         msgs = _msgs([], tool_call_mode="openai_native", web_search_enabled=False)
@@ -94,11 +97,12 @@ class TestBandADoublePrimeWebSearchHint:
         d2 = MemoryContext(facts=[{"id": "f2", "text": "User lives in Seattle"}]).to_dynamic_messages()
         m1 = _msgs(d1, tool_call_mode="prompt_json", allowed_tools=_ALLOWED_TOOLS, web_search_enabled=True)
         m2 = _msgs(d2, tool_call_mode="prompt_json", allowed_tools=_ALLOWED_TOOLS, web_search_enabled=True)
-        # Bands A, A′, A″ all byte-identical; Band B differs.
+        # Bands A, A′, A″, A‴ all byte-identical; Band B differs.
         assert m1[0]["content"] == m2[0]["content"]
         assert m1[1]["content"] == m2[1]["content"]
         assert m1[2]["content"] == m2[2]["content"]
-        assert m1[3]["content"] != m2[3]["content"]
+        assert m1[3]["content"] == m2[3]["content"]
+        assert m1[4]["content"] != m2[4]["content"]
 
 
 class TestByteStablePrefix:
@@ -109,10 +113,12 @@ class TestByteStablePrefix:
         msgs2 = _msgs(d2, tool_call_mode="prompt_json", allowed_tools=_ALLOWED_TOOLS)
         # Band A identical...
         assert msgs1[0]["content"] == msgs2[0]["content"]
-        # ...and Band A′ (tool contract) identical with the same tool set.
+        # ...Band A′ (tool contract) identical with the same tool set...
         assert msgs1[1]["content"] == msgs2[1]["content"]
+        # ...Band A‴ (ask_user policy) is a constant, so identical too...
+        assert msgs1[2]["content"] == msgs2[2]["content"]
         # ...while Band B differs.
-        assert msgs1[2]["content"] != msgs2[2]["content"]
+        assert msgs1[3]["content"] != msgs2[3]["content"]
 
 
 class TestDynamicBandStamp:

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { ChatDetailDTO, ChatResponse, CodebaseProjectDTO, MessageBlock } from '../../lib/api'
-import { getChat, getCodebaseProjects, sendMessage, sendMessageStream, updateChat, uploadFile } from '../../lib/api'
+import type { AgentMode, ChatDetailDTO, ChatResponse, CodebaseProjectDTO, MessageBlock } from '../../lib/api'
+import { answerQuestion, decideApproval, getChat, getCodebaseProjects, sendMessage, sendMessageStream, updateChat, uploadFile } from '../../lib/api'
+import { ApprovalCard } from './ApprovalCard'
+import { QuestionCard } from './QuestionCard'
 import { useAgentEvent } from '../../hooks/useAgentEvent'
 import { Composer } from './Composer'
 import { EmptyState } from './EmptyState'
@@ -73,6 +75,21 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
     ? (chat?.active_codebase_project_id ?? null)
     : draftCodebaseProjectId
 
+  // Write policy — same draft-until-the-chat-exists pattern as the codebase.
+  const [draftAgentMode, setDraftAgentMode] = useState<AgentMode>('auto')
+  const selectedAgentMode: AgentMode = chatId
+    ? (chat?.agent_mode ?? 'auto')
+    : draftAgentMode
+
+  const handleAgentModeChange = useCallback((mode: AgentMode) => {
+    if (!chatId) {
+      setDraftAgentMode(mode)
+      return
+    }
+    setChat(prev => (prev ? { ...prev, agent_mode: mode } : prev))
+    updateChat(chatId, { agent_mode: mode }).catch(() => {})
+  }, [chatId])
+
   // Pending assistant message for streaming (desktop mode)
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
   const [pendingStatus, setPendingStatus] = useState<AssistantMessageStatus>('pending')
@@ -99,6 +116,31 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
   // Keyed by assistant message id; the refetched flat `text` must not clobber
   // these until the chat is reloaded (Step 7 will persist blocks server-side).
   const locallyRenderedRef = useRef<Map<string, { blocks: MessageBlock[]; sources?: Array<{ title: string; url: string; snippet: string }> }>>(new Map())
+
+  const handleAnswerQuestion = useCallback((questionId: string, answer: string) => {
+    // Optimistically settle; the question_resolved event confirms.
+    setPendingBlocks(prev => prev.map(b =>
+      b.kind === 'question' && b.questionId === questionId ? { ...b, answer } : b,
+    ))
+    answerQuestion(questionId, answer).catch(err => {
+      const msg = err instanceof Error ? err.message : 'Failed to send answer'
+      addToast(`Could not send that answer: ${msg}`, 'error', 5000)
+    })
+  }, [addToast])
+
+  const handleApprovalDecision = useCallback((approvalId: string, decision: 'approve' | 'reject') => {
+    // Optimistically settle the card; the approval_resolved event confirms it.
+    setPendingBlocks(prev => prev.map(b =>
+      b.kind === 'approval' && b.approvalId === approvalId ? { ...b, decision } : b,
+    ))
+    decideApproval(approvalId, decision).catch(err => {
+      // The turn moved on without us (timed out, or the backend restarted).
+      // Reverting the card to undecided would be misleading — the approval is
+      // dead either way — so just say why nothing happened.
+      const msg = err instanceof Error ? err.message : 'Failed to submit decision'
+      addToast(`Could not ${decision} that change: ${msg}`, 'error', 5000)
+    })
+  }, [addToast])
 
   useEffect(() => {
     if (!chatId) { setChat(null); setChatLoading(false); return }
@@ -280,6 +322,72 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         }
         return [...prev, { kind: 'tool', callId, toolName, args, status: 'running' }]
       })
+    } else if (event.type === 'approval_request') {
+      // The backend turn is now SUSPENDED on this. Push an approval block so
+      // the card renders in the cadence; nothing resumes until the user acts.
+      const payload = event.payload as Record<string, unknown>
+      const approvalId = typeof payload.approval_id === 'string' ? payload.approval_id : ''
+      const callId = typeof payload.call_id === 'string' ? payload.call_id : ''
+      const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'tool'
+      const args = payload.arguments && typeof payload.arguments === 'object'
+        ? payload.arguments as Record<string, unknown>
+        : {}
+      if (approvalId) {
+        setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+        setPendingStatus('working')
+        setPendingPhaseLabel('Waiting for your approval')
+        setPendingBlocks(prev => (
+          prev.some(b => b.kind === 'approval' && b.approvalId === approvalId)
+            ? prev
+            : [...prev, { kind: 'approval', approvalId, callId, toolName, args }]
+        ))
+      }
+    } else if (event.type === 'approval_resolved') {
+      // Settle the card. Also covers decisions this client didn't make (another
+      // window, or a timeout), so the UI can't be left showing a live prompt
+      // for an approval the backend already moved past.
+      const payload = event.payload as Record<string, unknown>
+      const approvalId = typeof payload.approval_id === 'string' ? payload.approval_id : ''
+      const decision = typeof payload.decision === 'string' ? payload.decision : ''
+      if (approvalId && decision) {
+        setPendingBlocks(prev => prev.map(b =>
+          b.kind === 'approval' && b.approvalId === approvalId
+            ? { ...b, decision: decision as 'approve' | 'reject' | 'timeout' }
+            : b,
+        ))
+      }
+    } else if (event.type === 'question_request') {
+      // The backend turn is SUSPENDED on this question until it's answered.
+      const payload = event.payload as Record<string, unknown>
+      const questionId = typeof payload.question_id === 'string' ? payload.question_id : ''
+      const callId = typeof payload.call_id === 'string' ? payload.call_id : ''
+      const question = typeof payload.question === 'string' ? payload.question : ''
+      const options = Array.isArray(payload.options)
+        ? (payload.options as unknown[]).filter((o): o is string => typeof o === 'string')
+        : []
+      if (questionId && question) {
+        setPendingMessageId(prev => prev ?? (event.message_id || 'pending-assistant'))
+        setPendingStatus('working')
+        setPendingPhaseLabel('Waiting for your answer')
+        setPendingBlocks(prev => (
+          prev.some(b => b.kind === 'question' && b.questionId === questionId)
+            ? prev
+            : [...prev, { kind: 'question', questionId, callId, question, options }]
+        ))
+      }
+    } else if (event.type === 'question_resolved') {
+      // Settle the card, including when the answer came from elsewhere or the
+      // wait timed out (empty answer), so it can't sit there looking live.
+      const payload = event.payload as Record<string, unknown>
+      const questionId = typeof payload.question_id === 'string' ? payload.question_id : ''
+      const answer = typeof payload.answer === 'string' ? payload.answer : ''
+      if (questionId) {
+        setPendingBlocks(prev => prev.map(b =>
+          b.kind === 'question' && b.questionId === questionId
+            ? { ...b, answer: answer || '(no answer — continued with an assumption)' }
+            : b,
+        ))
+      }
     } else if (event.type === 'tool_progress') {
       const payload = event.payload as Record<string, unknown>
       const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : 'tool'
@@ -438,6 +546,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
         ...(!chatId && draftCodebaseProjectId
           ? { active_codebase_project_id: draftCodebaseProjectId }
           : {}),
+        ...(!chatId && draftAgentMode !== 'auto' ? { agent_mode: draftAgentMode } : {}),
       }
       // Desktop gets live progress via Tauri's stdout->IPC bridge
       // (useAgentEvent), so it keeps using the plain blocking request. A
@@ -520,6 +629,30 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
               {pendingBlocks.map((b, i) =>
                 b.kind === 'text' ? (
                   <MarkdownContent key={i} streaming={style === 'scramble'}>{b.text}</MarkdownContent>
+                ) : b.kind === 'question' ? (
+                  <QuestionCard
+                    key={b.questionId}
+                    questionId={b.questionId}
+                    question={b.question}
+                    options={b.options}
+                    answer={b.answer}
+                    onAnswer={handleAnswerQuestion}
+                  />
+                ) : b.kind === 'approval' ? (
+                  <ApprovalCard
+                    key={b.approvalId}
+                    approval={{
+                      approval_id: b.approvalId,
+                      chat_id: chatId ?? '',
+                      message_id: pendingMessageId ?? '',
+                      tool_name: b.toolName,
+                      call_id: b.callId,
+                      arguments: b.args,
+                      created_at: 0,
+                    }}
+                    onDecide={handleApprovalDecision}
+                    settled={b.decision === 'timeout' ? 'reject' : b.decision}
+                  />
                 ) : (
                   <ToolCallCard key={i} block={b} />
                 ),
@@ -584,7 +717,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
           </div>
           <div className="border-t border-(--border) px-6 py-4">
             <div className="max-w-[760px] mx-auto">
-              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} />
+              <Composer onSend={handleSend} disabled={true} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} agentMode={selectedAgentMode} onAgentModeChange={handleAgentModeChange} />
             </div>
           </div>
         </main>
@@ -595,7 +728,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       <main className="flex-1 flex flex-col min-w-0">
         <EmptyState
             onChip={p => handleSend(p, [])}
-            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} />}
+            composer={<Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} agentMode={selectedAgentMode} onAgentModeChange={handleAgentModeChange} />}
           />
       </main>
     )
@@ -629,7 +762,7 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       </div>
       <div className="border-t border-(--border) px-6 py-4">
         <div className="max-w-[760px] mx-auto">
-          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} />
+          <Composer onSend={handleSend} disabled={sending} webSearchEnabled={webSearchEnabled} onWebSearchChange={setWebSearchEnabled} thinkingEnabled={thinkingEnabled} onThinkingChange={setThinkingEnabled} codebaseProjects={codebaseProjects} activeCodebaseProjectId={selectedCodebaseProjectId} onCodebaseProjectChange={handleCodebaseProjectChange} agentMode={selectedAgentMode} onAgentModeChange={handleAgentModeChange} />
         </div>
       </div>
     </main>

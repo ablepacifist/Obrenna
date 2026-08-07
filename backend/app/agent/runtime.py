@@ -32,6 +32,7 @@ from ..mcp.custom_tool_dispatch import (
 from ..mcp.codebase_tool_dispatch import (
     call_codebase_tool,
     get_active_codebase_project,
+    is_mutating_tool,
     list_enabled_codebase_tool_defs,
 )
 from ..model_runtime.config import RuntimeConfig
@@ -51,7 +52,23 @@ from ..services.runtime_context import (
     build_relative_date_hint_message,
 )
 from ..services.trace_logging import trace_event
+from .approvals import (
+    DECISION_APPROVE,
+    create_approval,
+    wait_for_decision,
+)
+from .questions import (
+    ASK_USER_TOOL_DEF,
+    ASK_USER_TOOL_NAME,
+    NO_ANSWER,
+    create_question,
+    wait_for_answer,
+)
 from .events import (
+    approval_request_event,
+    approval_resolved_event,
+    question_request_event,
+    question_resolved_event,
     done_event,
     error_event,
     new_message_id,
@@ -381,6 +398,55 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "record of files you created earlier."
 )
 
+# Per-mode write policy, appended after the codebase hint. Without this the
+# model has no idea its writes are gated: in plan mode it would call a write
+# tool, get refused, and likely retry or report a change it never made. Telling
+# it up front turns a refusal loop into the behaviour the user asked for.
+AGENT_MODE_HINTS = {
+    "manual": (
+        "EDIT APPROVAL IS ON for this chat. Every file change or command you "
+        "attempt is shown to the user for approval before it runs, so:\n"
+        "- Make one focused change at a time rather than a large batch — each is "
+        "approved separately.\n"
+        "- Say what you are about to change and why BEFORE calling the tool, so "
+        "the user has the context to judge it.\n"
+        "- If a tool result says the user declined, do NOT retry it or try to "
+        "achieve the same change another way. Acknowledge it and ask what they "
+        "would prefer."
+    ),
+    "plan": (
+        "PLAN MODE IS ON for this chat. File changes and shell commands are NOT "
+        "applied — any attempt to write, edit, move, delete, or run will be "
+        "refused. Do not attempt them.\n"
+        "You CAN still read freely (codebase_list_directory, codebase_read_file, "
+        "codebase_search) and you should, so your plan is grounded in the real "
+        "code rather than assumptions.\n"
+        "Deliver a concrete plan: which files you would change, what the change "
+        "is in each (show the code), and in what order. Then tell the user they "
+        "can switch to 'Approve edits' or 'Auto-edit' mode to apply it. Never "
+        "claim you made a change in this mode."
+    ),
+}
+
+# Always present (ask_user is always in the tool set). Small orchestrators
+# default to guessing when a request is underspecified and then confidently
+# build the wrong thing; this gives them an explicit alternative, while the
+# "do NOT ask" half stops the opposite failure of interrogating the user about
+# things they could just look up.
+ASK_USER_HINT = (
+    "You can ask the user a question mid-task with the `ask_user` tool. It "
+    "pauses your turn and waits for their real answer, so use it when the "
+    "request is genuinely ambiguous and guessing wrong would waste work — "
+    "which of several matching files they meant, which of two approaches they "
+    "want, a value only they know.\n"
+    "Ask ONE specific question, and supply 'options' when the answer is a "
+    "choice between known alternatives.\n"
+    "Do NOT use ask_user to: ask permission to make a change (changes are "
+    "gated separately), confirm something you were already told, ask what you "
+    "could find out by reading the code, or check in on obvious next steps. "
+    "When the intent is clear, just do the work."
+)
+
 WEB_SEARCH_HINT = (
     "The user has explicitly enabled web search for this chat, which signals "
     "they want answers grounded in fresh, external information rather than from "
@@ -418,12 +484,41 @@ class TurnTelemetry:
     # Round 1 = first orchestrator call; keys: prompt_eval_count,
     # prompt_eval_duration, eval_count, eval_duration, usage.
     ollama_stats: dict[int, dict[str, Any]] = None  # type: ignore[assignment]
+    # ── Reasoning-quality instrumentation ──────────────────────────────────
+    # Everything above measures how FAST a turn was; nothing measured whether
+    # it was any good. These record the levers that affect answer quality, so a
+    # change in eval scores can be attributed to a cause rather than guessed at.
+    # The scorecards themselves come from backend/evals.
+    orchestrator_model: str = ""
+    agent_mode: str = ""
+    thinking_enabled: bool = False
+    # Reasoning effort actually sent per round (see _reasoning_effort_for_round),
+    # keyed by round. "none" is a real value and is the interesting one: it is
+    # what a turn with thinking off looks like.
+    reasoning_effort_by_round: dict[int, str] = None  # type: ignore[assignment]
+    # Suspensions for user input, which cost wall-clock but are not model time —
+    # without these, a manual-mode turn looks pathologically slow.
+    approval_wait_ms: int = 0
+    question_wait_ms: int = 0
 
     def __post_init__(self) -> None:
         if self.tool_runtimes_ms is None:
             self.tool_runtimes_ms = []
         if self.ollama_stats is None:
             self.ollama_stats = {}
+        if self.reasoning_effort_by_round is None:
+            self.reasoning_effort_by_round = {}
+
+    def record_reasoning_effort(self, round_no: int, effort: str) -> None:
+        self.reasoning_effort_by_round[round_no] = effort
+
+    def record_wait(self, kind: str, elapsed_s: float) -> None:
+        """Accumulate time a turn spent suspended on the user."""
+        ms = int(elapsed_s * 1000)
+        if kind == "approval":
+            self.approval_wait_ms += ms
+        elif kind == "question":
+            self.question_wait_ms += ms
 
     def mark_event(self) -> None:
         if self.first_event_at is None:
@@ -484,6 +579,16 @@ class TurnTelemetry:
             "stream_event_count": self.stream_event_count,
             "prefix_cache_hit": prefix_cache_hit,
             "ollama_stats": self.ollama_stats,
+            # Quality-attribution fields (see the dataclass comment).
+            "orchestrator_model": self.orchestrator_model,
+            "agent_mode": self.agent_mode,
+            "thinking_enabled": self.thinking_enabled,
+            "reasoning_effort_by_round": self.reasoning_effort_by_round,
+            "approval_wait_ms": self.approval_wait_ms,
+            "question_wait_ms": self.question_wait_ms,
+            # Model time excludes user-input suspensions, so manual mode is
+            # comparable to auto mode on latency.
+            "model_time_ms": max(0, int(total * 1000) - self.approval_wait_ms - self.question_wait_ms),
         }
 
 
@@ -527,6 +632,7 @@ async def orchestrate_turn(
     web_search: bool = False,
     workers_enabled: bool = True,
     thinking_enabled: bool = False,
+    agent_mode: str = "auto",
 ) -> AsyncIterator[StreamEvent]:
     """Orchestrate a single chat turn through the agent runtime.
 
@@ -551,12 +657,18 @@ async def orchestrate_turn(
         assistant_message_id: Optional pre-assigned message ID.
         web_search: Whether to include web_search tool in the allowed set.
         workers_enabled: Whether to enable worker models for this turn.
+        agent_mode: File-write policy for this turn — "auto" (unattended),
+            "manual" (each write suspends the turn for approval) or "plan"
+            (writes refused; read + propose only).
 
     Yields:
         StreamEvent instances for token/done/error/tool_call/tool_result/tool_progress.
     """
     msg_id = assistant_message_id or new_message_id()
     telemetry = TurnTelemetry(started_at=time.perf_counter())
+    telemetry.orchestrator_model = resolved_plan.orchestrator_model or ""
+    telemetry.agent_mode = agent_mode
+    telemetry.thinking_enabled = thinking_enabled
 
     def tracked(event: StreamEvent) -> StreamEvent:
         telemetry.mark_event()
@@ -566,15 +678,159 @@ async def orchestrate_turn(
         calls: list[dict],
         mcp_client: Any,
         ctx: dict[str, Any],
+        blocked: dict[str, str] | None = None,
     ) -> list[dict]:
         try:
             return await handle_tool_calls(
                 calls, mcp_client, trace_context=ctx, user_message=user_message, chat_id=chat_id,
+                blocked_calls=blocked,
             )
         except TypeError as exc:
             if "trace_context" not in str(exc):
                 raise
             return await handle_tool_calls(calls, mcp_client)
+
+    async def _gate_calls(calls: list[dict], round_no: int):
+        """Handle everything that must happen BEFORE a round of calls dispatches:
+        ``ask_user`` interception, and the agent_mode write policy.
+
+        An async GENERATOR so both handshakes can yield events through
+        orchestrate_turn's own stream -- the global emitter only reaches the
+        Tauri sidecar via stdout, so a browser (SSE) client would never see an
+        approval or question emitted any other way, and the turn would hang
+        until it timed out. Yields StreamEvents, then finally the blocked map.
+
+        Returns (via the last yielded value) ``{call_id: reason}`` for calls
+        that must NOT be dispatched -- either refused (plan mode / declined
+        approval) or already satisfied here (``ask_user``, whose "result" is
+        the user's answer). Such calls stay in the ``calls`` list so every
+        downstream ``zip(calls, results)`` keeps its 1:1 alignment; ``_exec``
+        substitutes the supplied content instead of dispatching.
+        """
+        blocked: dict[str, dict] = {}
+
+        # ── ask_user: suspend and ask, regardless of agent_mode ──────────────
+        for tc in calls:
+            fn = tc.get("function", {})
+            if fn.get("name", "") != ASK_USER_TOOL_NAME:
+                continue
+            call_id = tc.get("id", "")
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            question_text = str(args.get("question") or "").strip()
+            raw_options = args.get("options")
+            options = [str(o) for o in raw_options] if isinstance(raw_options, list) else []
+            if not question_text:
+                # Malformed call — don't suspend the turn on an empty prompt.
+                blocked[call_id] = {"refused": True, "message": (
+                    "ask_user requires a non-empty 'question'. Ask a specific "
+                    "question, or continue without asking."
+                )}
+                continue
+
+            question = await create_question(
+                chat_id=chat_id, message_id=msg_id, call_id=call_id,
+                question=question_text, options=options,
+            )
+            yield tracked(question_request_event(
+                chat_id=chat_id, question_id=question.request_id, call_id=call_id,
+                question=question_text, options=options, message_id=msg_id,
+            ))
+            trace_event(
+                "ask_user_awaiting_answer",
+                **trace_context, round=round_no, call_id=call_id,
+                question_id=question.request_id,
+            )
+            _wait_start = time.perf_counter()
+            answer = await wait_for_answer(question)
+            telemetry.record_wait("question", time.perf_counter() - _wait_start)
+            yield tracked(question_resolved_event(
+                chat_id=chat_id, question_id=question.request_id,
+                answer=answer or "", call_id=call_id, message_id=msg_id,
+            ))
+            trace_event(
+                "ask_user_answered",
+                **trace_context, round=round_no, call_id=call_id,
+                question_id=question.request_id, answered=answer is not None,
+            )
+            # The answer IS the tool result, and it is a SUCCESS, not a refusal
+            # — feed it straight back so the model continues with it in context.
+            blocked[call_id] = {
+                "refused": False,
+                "message": (
+                    f"The user answered: {answer}" if answer is not None else NO_ANSWER
+                ),
+            }
+
+        # ── write policy ─────────────────────────────────────────────────────
+        if agent_mode not in ("manual", "plan"):
+            yield blocked
+            return
+        for tc in calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            if not is_mutating_tool(name):
+                continue
+            call_id = tc.get("id", "")
+            args = fn.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+
+            if agent_mode == "plan":
+                blocked[call_id] = {"refused": True, "message": (
+                    "This chat is in plan mode, so file changes are not applied. "
+                    "Describe the change you would make instead, then let the user "
+                    "switch to manual or auto mode to apply it."
+                )}
+                trace_event(
+                    "tool_call_blocked_plan_mode",
+                    **trace_context, round=round_no, tool_name=name, call_id=call_id,
+                )
+                continue
+
+            # manual mode: suspend the turn until the user decides.
+            approval = await create_approval(
+                chat_id=chat_id, message_id=msg_id, tool_name=name,
+                call_id=call_id, arguments=args,
+            )
+            yield tracked(approval_request_event(
+                chat_id=chat_id, approval_id=approval.request_id,
+                tool_name=name, call_id=call_id, arguments=args, message_id=msg_id,
+            ))
+            trace_event(
+                "tool_call_awaiting_approval",
+                **trace_context, round=round_no, tool_name=name,
+                call_id=call_id, approval_id=approval.request_id,
+            )
+            _wait_start = time.perf_counter()
+            decision = await wait_for_decision(approval)
+            telemetry.record_wait("approval", time.perf_counter() - _wait_start)
+            yield tracked(approval_resolved_event(
+                chat_id=chat_id, approval_id=approval.request_id,
+                decision=decision, call_id=call_id, message_id=msg_id,
+            ))
+            trace_event(
+                "tool_call_approval_resolved",
+                **trace_context, round=round_no, tool_name=name,
+                call_id=call_id, approval_id=approval.request_id, decision=decision,
+            )
+            if decision != DECISION_APPROVE:
+                blocked[call_id] = {"refused": True, "message": (
+                    "The user declined this change. Do not retry it. "
+                    "Acknowledge the decision and ask what they would prefer instead."
+                )}
+        yield blocked
 
     exp0_fast_path = is_exp0_plan(resolved_plan)
     fast_intent = classify_intent_fast(user_message, file_ids)
@@ -753,6 +1009,10 @@ async def orchestrate_turn(
         + list_enabled_custom_tool_defs()
         + list_enabled_codebase_tool_defs(chat_id)
     )
+    # ask_user is always available: needing to clarify isn't specific to having
+    # a codebase attached. It is intercepted in the tool loop rather than
+    # dispatched, since "calling" it means suspending the turn for an answer.
+    allowed_tools = allowed_tools + [ASK_USER_TOOL_DEF]
     tool_call_mode = resolved_plan.orchestrator_tool_call_mode
     trace_event(
         "tools_resolved",
@@ -795,6 +1055,7 @@ async def orchestrate_turn(
         tool_call_mode=tool_call_mode, allowed_tools=allowed_tools,
         web_search_enabled=web_search,
         codebase_project_name=active_codebase_project.name if active_codebase_project else None,
+        agent_mode=agent_mode,
     )
     # DEBUG, not INFO: message content is private local content.
     logger.debug("ORCHESTRATOR MESSAGES: %d messages, first_user=%r last_user=%r", len(orchestrator_messages), orchestrator_messages[0]["content"] if orchestrator_messages and len(orchestrator_messages) > 0 else "", orchestrator_messages[-1]["content"] if orchestrator_messages else "")
@@ -957,6 +1218,7 @@ async def orchestrate_turn(
                 thinking_enabled, tool_round, finalization_round,
                 resolved_plan.reasoning_distilled,
             )
+            telemetry.record_reasoning_effort(tool_round, reasoning_effort)
             trace_event(
                 "orchestrator_call_start",
                 **trace_context,
@@ -1042,6 +1304,16 @@ async def orchestrate_turn(
                             total=len(calls),
                         ))
 
+                        # Write policy for this round. In manual mode this
+                        # SUSPENDS here until the user approves each write, so
+                        # nothing below runs before they decide.
+                        _blocked: dict[str, dict] = {}
+                        async for _gate_ev in _gate_calls(calls, tool_round):
+                            if isinstance(_gate_ev, dict):
+                                _blocked = _gate_ev
+                            else:
+                                yield _gate_ev
+
                         # Execute tool calls
                         _tool_start = time.perf_counter()
                         tool_results, narrations = await _execute_with_narration(
@@ -1051,6 +1323,7 @@ async def orchestrate_turn(
                                 calls,
                                 mcp_client,
                                 {**trace_context, "round": tool_round},
+                                _blocked,
                             ),
                         )
                         telemetry.record_tool_runtime(time.perf_counter() - _tool_start)
@@ -1492,6 +1765,7 @@ def _build_orchestrator_messages(
     allowed_tools: list[dict] | None = None,
     web_search_enabled: bool = False,
     codebase_project_name: str | None = None,
+    agent_mode: str = "auto",
 ) -> list[dict]:
     """Build the full message sequence for the orchestrator.
 
@@ -1543,6 +1817,13 @@ def _build_orchestrator_messages(
     # phrasing ("can you see the attached project?") rather than just calling
     # a tool to check. Stable within a chat while the binding doesn't change,
     # so still prefix-cacheable.
+    # Band A‴⁻: clarifying-question policy. Constant, so it stays inside the
+    # cacheable prefix.
+    messages.append({
+        "role": "system",
+        "content": canonicalise_system_content(ASK_USER_HINT),
+    })
+
     if codebase_project_name:
         messages.append({
             "role": "system",
@@ -1550,6 +1831,15 @@ def _build_orchestrator_messages(
                 CODEBASE_PROJECT_HINT_TEMPLATE.format(name=codebase_project_name)
             ),
         })
+        # Band A⁗: write policy for this chat. Only meaningful alongside a
+        # codebase (nothing to gate without one) and stable while the mode
+        # doesn't change, so it stays inside the cacheable prefix.
+        mode_hint = AGENT_MODE_HINTS.get(agent_mode)
+        if mode_hint:
+            messages.append({
+                "role": "system",
+                "content": canonicalise_system_content(mode_hint),
+            })
 
     # Band B: per-turn memory block (version-stamped, dynamic).
     messages.extend(dynamic_parts)
@@ -1665,7 +1955,11 @@ def _round_reasoning_effort(
     if finalization_round:
         return "none"
     if tool_round <= 1:
-        return "medium"
+        # Round 1 is where the actual reasoning happens — the model has the
+        # whole question and hasn't yet committed to an approach. Raised from
+        # "medium": reasoning effort is the cheapest quality lever available
+        # and this is the round where it pays.
+        return "high"
     # Continuation round (round > 1, not finalization).
     return "low" if reasoning_distilled else "none"
 
@@ -2057,6 +2351,7 @@ async def handle_tool_calls(
     trace_context: dict[str, Any] | None = None,
     user_message: str | None = None,
     chat_id: str | None = None,
+    blocked_calls: dict[str, str] | None = None,
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
@@ -2066,6 +2361,11 @@ async def handle_tool_calls(
             {"name": ..., "arguments": ...}}`` (OpenAI tool-call shape, also
             used by the prompt-JSON scanner's synthesized calls).
         mcp_client: MCP client instance (transport-agnostic).
+        blocked_calls: ``{call_id: reason}`` for calls the caller's write policy
+            refused (plan mode, or a declined manual-mode approval). Such calls
+            are NOT dispatched; the reason is returned as a non-retryable tool
+            error so the model learns the change didn't happen and why. They
+            stay in ``tool_calls`` so result ordering is unchanged.
 
     Returns:
         List of tool result dicts with keys: tool_call_id, tool_name, content.
@@ -2113,6 +2413,41 @@ async def handle_tool_calls(
 
     async def _exec(item: dict) -> dict:
         tool_name = item["name"]
+        # Resolved by the caller before dispatch — either REFUSED (plan mode /
+        # declined approval) or already SATISFIED (ask_user, whose result is the
+        # user's answer). Checked before anything else so such a call can never
+        # reach the dispatcher.
+        pre = (blocked_calls or {}).get(item["call_id"])
+        if pre:
+            # Tolerate a bare string for the refusal case so older callers (and
+            # tests) that pass a plain reason keep working.
+            if isinstance(pre, str):
+                pre = {"refused": True, "message": pre}
+            message = pre.get("message", "")
+            refused = pre.get("refused", True)
+            trace_event(
+                "tool_call_refused" if refused else "tool_call_substituted",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                reason=message,
+            )
+            if refused:
+                # retryable=False: the model must not loop trying to force a
+                # change the user said no to.
+                content = json.dumps({
+                    "error": True,
+                    "message": message,
+                    "retryable": False,
+                    "user_declined": True,
+                })
+            else:
+                content = message
+            return {
+                "tool_call_id": item["call_id"],
+                "tool_name": tool_name,
+                "content": content,
+            }
         # Schema validation failed and no repair applied — feed a structured,
         # retryable error back into the loop rather than dispatching a call the
         # MCP backend will reject with an opaque hard error.

@@ -234,6 +234,22 @@ def run_migrations(db: Session) -> None:
                 "REFERENCES codebase_projects(id) ON DELETE SET NULL"
             ))
 
+        # --- chat_messages.blocks ---
+        # Pre-existing messages get '[]' and keep rendering from flat text;
+        # only turns taken after this migration have blocks to replay.
+        if not _column_exists(db, "chat_messages", "blocks"):
+            db.execute(text(
+                "ALTER TABLE chat_messages ADD COLUMN blocks JSON DEFAULT '[]'"
+            ))
+
+        # --- chats.agent_mode ---
+        # Defaults to 'auto' so every pre-existing chat keeps the unattended
+        # behaviour it had before manual/plan mode existed.
+        if not _column_exists(db, "chats", "agent_mode"):
+            db.execute(text(
+                "ALTER TABLE chats ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'auto'"
+            ))
+
         # --- custom_tools table ---
         if not _table_exists(db, "custom_tools"):
             db.execute(text("""

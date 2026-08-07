@@ -83,12 +83,15 @@ export function MessageBubble({ msg, onOpenArtifact }: MessageBubbleProps) {
         <div className="text-[14px] text-(--ink)">
           {msg.blocks && msg.blocks.length > 0 ? (
             <div className="space-y-2">
+              {/* Only text and tool blocks are persisted. Approval/question
+                  blocks are live-only prompts — once decided they're part of
+                  the tool card's own record, so there's nothing to replay. */}
               {msg.blocks.map((b, i) =>
                 b.kind === 'text' ? (
                   <MarkdownContent key={i}>{b.text}</MarkdownContent>
-                ) : (
+                ) : b.kind === 'tool' ? (
                   <ToolCallCard key={i} block={b} />
-                ),
+                ) : null,
               )}
             </div>
           ) : (

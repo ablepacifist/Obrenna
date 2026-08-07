@@ -48,6 +48,23 @@ _OP_BY_TOOL_NAME = {
     "codebase_run_command": "run_command",
 }
 
+# Tools that can change the user's files. These are what "manual" mode gates
+# behind per-call approval and what "plan" mode refuses outright.
+# ``run_command`` is included because a shell command can do anything a write
+# tool can (and more), so exempting it would make manual mode meaningless.
+MUTATING_CODEBASE_TOOLS = frozenset({
+    "codebase_edit_file",
+    "codebase_write_file",
+    "codebase_delete_file",
+    "codebase_move_file",
+    "codebase_run_command",
+})
+
+
+def is_mutating_tool(tool_name: str) -> bool:
+    """True if ``tool_name`` can modify the connected project."""
+    return tool_name in MUTATING_CODEBASE_TOOLS
+
 
 def get_active_codebase_project(chat_id: str) -> Optional[CodebaseProject]:
     db = SessionLocal()

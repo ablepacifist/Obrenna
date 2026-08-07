@@ -93,8 +93,10 @@ def test_compact_mutates_in_place_and_returns_char_counts():
 def test_round_reasoning_effort_stock_model():
     f = _round_reasoning_effort
     # Stock: round 1 full, continuation dark (mechanical sufficiency check),
-    # finalization dark for everyone.
-    assert f(True, 1, False, False) == "medium"
+    # finalization dark for everyone. Round 1 is "high" — raised from "medium"
+    # because that round is where the reasoning actually happens, and effort is
+    # the cheapest quality lever available.
+    assert f(True, 1, False, False) == "high"
     assert f(True, 2, False, False) == "none"
     assert f(True, 3, False, False) == "none"
     assert f(True, 5, True, False) == "none"   # finalization
@@ -104,7 +106,7 @@ def test_round_reasoning_effort_distilled_model():
     f = _round_reasoning_effort
     # Distilled: round 1 full (need CoT to form the envelope), continuation
     # downshifts to low (keeps envelope formation alive), finalization dark.
-    assert f(True, 1, False, True) == "medium"
+    assert f(True, 1, False, True) == "high"
     assert f(True, 2, False, True) == "low"
     assert f(True, 3, False, True) == "low"
     assert f(True, 5, True, True) == "none"     # finalization for everyone
