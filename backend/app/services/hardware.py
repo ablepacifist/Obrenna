@@ -13,6 +13,7 @@ import subprocess
 from typing import Any
 
 from .hardware_resolver import (
+    build_live,
     HardwareFingerprint,
     LiveFreeResources,
     build_fingerprint,
@@ -50,10 +51,13 @@ def resolve_managed_plan(
             detected = _probe_all()
 
         fp = build_fingerprint(detected)
-        live = LiveFreeResources(
-            gpu_vram_free_gb=detected.get("gpu_vram_free_gb") or 0.0,
-            ram_free_gb=detected.get("ram_free_gb") or 0.0,
-        )
+        # Use build_live() rather than constructing this inline. The two had
+        # drifted into duplicates of each other, so the total-capacity fallback
+        # added to build_live() did not reach this path -- which is the one the
+        # app actually resolves plans through. The symptom was that the fix
+        # appeared to work when called directly and changed nothing in the
+        # running app.
+        live = build_live(detected)
 
         catalog = load_catalog()
         plan = choose_and_validate(fp, catalog, live)
