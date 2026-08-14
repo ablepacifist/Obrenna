@@ -141,43 +141,63 @@ route is **not** unauthenticated — the gateway refuses every agent when no
 token is configured, deliberately (a misconfiguration should break the agent,
 not quietly open a path to the backend).
 
-### 1. Generate a token and set it on THIS PC
+**No env files to copy.** The token is generated for you and printed; you copy
+one line to the other machine.
+
+### 1. On THIS PC — start normally and copy the printed command
 
 ```powershell
-python -c "import secrets; print(secrets.token_urlsafe(32))"
+.\obrenna.ps1 start
 ```
 
-Set it in the environment the **gateway's auth service** runs under, then
-restart the gateway:
+On first run this generates a token into `obrenna-gateway\.agent_token` and
+prints exactly what to run elsewhere:
+
+```
+Codebase agent on ANOTHER computer - run this there:
+  python -m codebase_agent.main --server https://llm.alex-dyakin.com --name <that-pc> --token 6EUtxWY...
+```
+
+The token lives in that file, not in an environment variable, so it survives
+restarts and reboots. (It is gitignored — never commit it.) `start` reprints it
+every time, so you never have to go looking.
+
+### 2. On the other computer — get the agent, then run that line
+
+The agent is code, so it does have to exist on that machine — clone the repo
+(or copy just the `codebase-agent/` folder) and install its deps:
 
 ```powershell
-$env:OBRENNA_AGENT_TOKEN = "<the value you just generated>"
-.\obrenna.ps1 restart
+cd codebase-agent
+pip install -r requirements.txt
 ```
 
-Must be at least 32 characters — the gateway refuses shorter ones rather than
-honour a guessable secret on an internet-facing route. Set it permanently with
-`setx OBRENNA_AGENT_TOKEN "<value>"` (new shells only).
-
-### 2. Run the agent on the other machine
-
-Point it at your public URL and give it the same token:
+Then paste the printed command, replacing `<that-pc>` with a name you'll
+recognise in the approval list:
 
 ```powershell
-$env:OBRENNA_AGENT_TOKEN = "<same value>"
-python -m codebase_agent.main --server https://llm.alex-dyakin.com --name work-laptop
+python -m codebase_agent.main --server https://llm.alex-dyakin.com --name work-laptop --token 6EUtxWY...
 ```
 
-`--token <value>` works too, but the environment variable is the better habit:
-a token on the command line is visible in the process list and shell history.
+Prefer `$env:OBRENNA_AGENT_TOKEN = "..."` before running it if you'd rather the
+secret not sit in shell history — the agent reads that variable when `--token`
+is absent.
 
 Then approve the device and add the project exactly as in Route A, step 4.
 
-**If it's refused**, the agent says which problem it is — no token vs wrong
-token — rather than leaving you guessing at a handshake error. A wrong-token
-message when you're sure it matches usually means `OBRENNA_AGENT_TOKEN` isn't
-set in the environment the auth service actually inherited; restart the gateway
-after setting it.
+### If it's refused
+
+The agent tells you which problem it is — no token vs wrong token — instead of
+a bare handshake error. A wrong-token message when you're sure it matches
+usually means the gateway is running with a different one: check
+`obrenna-gateway\.agent_token` on this PC and re-copy. Note an env var, if set,
+takes precedence over the file.
+
+### Rotating it
+
+Delete `obrenna-gateway\.agent_token`, run `.\obrenna.ps1 restart`, and copy
+the new printed command to each agent machine. Old agents start failing
+immediately with the wrong-token message.
 
 ### Security note
 

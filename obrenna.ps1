@@ -182,11 +182,42 @@ function Stop-Gateway {
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+function Initialize-AgentToken {
+  # The shared secret a remote codebase-agent presents to get through the
+  # gateway's login wall. Generated once and kept in a file rather than an
+  # environment variable: the gateway is started by this script, so an
+  # env-var-only secret silently disappears whenever it is restarted from a
+  # shell that hasn't exported it -- and every remote agent is then refused
+  # with no obvious cause.
+  $tokenFile = Join-Path $GatewayDir ".agent_token"
+  if (-not (Test-Path $tokenFile)) {
+    $generated = python -c "import secrets; print(secrets.token_urlsafe(32))"
+    if ($LASTEXITCODE -ne 0 -or -not $generated) {
+      Write-Host "  (could not generate an agent token - remote agents will be refused)"
+      return $null
+    }
+    # No trailing newline: the value is compared verbatim on the other side.
+    [System.IO.File]::WriteAllText($tokenFile, $generated.Trim())
+    Write-Host "Generated a codebase-agent token (first run) -> $tokenFile"
+  }
+  return (Get-Content $tokenFile -Raw).Trim()
+}
+
+function Show-AgentToken {
+  $tokenFile = Join-Path $GatewayDir ".agent_token"
+  if (-not (Test-Path $tokenFile)) { return }
+  $tok = (Get-Content $tokenFile -Raw).Trim()
+  Write-Host ""
+  Write-Host "Codebase agent on ANOTHER computer - run this there:"
+  Write-Host "  python -m codebase_agent.main --server https://llm.alex-dyakin.com --name <that-pc> --token $tok"
+}
+
 function Start-Gateway {
   if (-not (Test-Path $GatewayDir)) {
     Write-Host "Gateway repo not found at $GatewayDir - skipping (set OBRENNA_GATEWAY_DIR to override)."
     return
   }
+  Initialize-AgentToken | Out-Null
   $authPy = Join-Path $GatewayDir ".venv\Scripts\python.exe"
   if (-not (Test-Path $authPy)) { $authPy = "python" }
 
@@ -269,6 +300,7 @@ function Invoke-Start {
   Write-Host "Backend:  http://localhost:$BackendPort/docs"
   Write-Host "Ollama:   http://localhost:$OllamaPort"
   Write-Host "Logs:     $LogDir\*.log"
+  Show-AgentToken
 }
 
 function Invoke-Stop {
