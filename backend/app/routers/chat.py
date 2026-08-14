@@ -12,7 +12,7 @@ import os
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -40,7 +40,26 @@ from ..db import get_db
 from ..models import AppSettings, Artifact, Chat, ChatMessage, CodebaseProject, File, ModelEndpoint
 from ..model_runtime.client import chat_completion_sync
 from ..model_runtime.config import RuntimeConfig
-from ..schemas.api import ChatMessageDTO, ChatRequest, ChatResponse
+from ..agent.approvals import (
+    cancel_chat_approvals,
+    list_pending_for_chat,
+    resolve_approval,
+)
+from ..agent.questions import (
+    list_pending_for_chat as list_pending_questions,
+    resolve_question,
+)
+from ..schemas.api import (
+    AnswerQuestionRequest,
+    AnswerQuestionResponse,
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
+    ChatMessageDTO,
+    ChatRequest,
+    ChatResponse,
+    PendingApprovalDTO,
+    PendingQuestionDTO,
+)
 from ..schemas.artifact import validate_artifact
 from ..services import csv_profiler, dashboard_builder, summarize
 from ..services.hardware_resolver import (
@@ -119,6 +138,107 @@ def _summarize_tool_event(tool: str, arguments: dict, result: str) -> dict:
         "ok": ok,
         "detail": detail,
     }
+
+
+# Per-field cap on what goes into a persisted block. A whole-file
+# codebase_write_file body (or a giant diff) would otherwise land verbatim in
+# the row and be replayed into the UI on every load. Generous enough that real
+# edits survive intact; the live view already showed the untruncated version.
+_BLOCK_ARG_MAX_CHARS = 8000
+_BLOCK_SUMMARY_MAX_CHARS = 400
+# Arguments worth keeping for rendering. Everything needed to draw a diff or
+# name the target; anything else is noise in the transcript.
+_BLOCK_KEEP_ARGS = (
+    "path", "new_path", "old_string", "new_string", "content", "command",
+    # ask_user renders as the question it asked, not as a tool invocation.
+    "question", "options",
+)
+
+
+def _truncate(value: Any, limit: int) -> Any:
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + "\n… (truncated)"
+    return value
+
+
+def _render_args_for_block(tool: str, arguments: dict) -> dict:
+    """Keep only the args the UI renders, each capped."""
+    if not isinstance(arguments, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _BLOCK_KEEP_ARGS:
+        if key in arguments:
+            out[key] = _truncate(arguments[key], _BLOCK_ARG_MAX_CHARS)
+    return out
+
+
+class _BlockAccumulator:
+    """Builds the ordered render blocks for an assistant turn.
+
+    Mirrors what ChatThread does live (text runs and tool cards interleaved in
+    arrival order) so a reloaded transcript looks like what the user watched,
+    instead of collapsing to flat text with the diffs thrown away.
+
+    Note it does NOT clear text at round boundaries the way the persisted flat
+    ``text`` does. That truncation exists so the saved reply is just the final
+    answer; here the preamble prose is part of the cadence the user saw, so it
+    is kept.
+    """
+
+    def __init__(self) -> None:
+        self.blocks: list[dict] = []
+        self._by_call: dict[str, dict] = {}
+
+    def add_token(self, text: str) -> None:
+        if not text:
+            return
+        if self.blocks and self.blocks[-1].get("kind") == "text":
+            self.blocks[-1]["text"] += text
+        else:
+            self.blocks.append({"kind": "text", "text": text})
+
+    def add_tool_call(self, call_id: str, tool_name: str, arguments: dict) -> None:
+        block = {
+            "kind": "tool",
+            "callId": call_id,
+            "toolName": tool_name,
+            "args": _render_args_for_block(tool_name, arguments),
+            "status": "running",
+        }
+        self.blocks.append(block)
+        if call_id:
+            self._by_call[call_id] = block
+
+    def add_narration(self, call_id: str, description: str) -> None:
+        block = self._by_call.get(call_id)
+        if block is not None and description:
+            block["description"] = _truncate(description, _BLOCK_SUMMARY_MAX_CHARS)
+
+    def finish_tool(self, call_id: str, result: str) -> None:
+        block = self._by_call.get(call_id)
+        if block is None:
+            return
+        ok = True
+        summary = ""
+        if isinstance(result, str) and result:
+            try:
+                parsed = json.loads(result)
+                if isinstance(parsed, dict):
+                    ok = not parsed.get("error", False)
+                    summary = str(parsed.get("message", "") or "")
+            except (json.JSONDecodeError, ValueError):
+                pass
+        block["status"] = "done" if ok else "error"
+        if summary:
+            block["summary"] = _truncate(summary, _BLOCK_SUMMARY_MAX_CHARS)
+
+    def result(self) -> list[dict]:
+        # Drop trailing whitespace-only text runs so a reloaded message doesn't
+        # end in an empty bubble.
+        return [
+            b for b in self.blocks
+            if b.get("kind") != "text" or (b.get("text") or "").strip()
+        ]
 
 
 def _tool_events_history_trailer(events: list[dict]) -> str:
@@ -459,6 +579,7 @@ def _process_chat_message_inner(
             id=uuid.uuid4().hex,
             title=payload.message[:60] or "New chat",
             active_codebase_project_id=new_project_id,
+            agent_mode=payload.agent_mode or "auto",
         )
         db.add(chat)
         db.flush()
@@ -529,7 +650,7 @@ def _process_chat_message_inner(
         # requests/new chats fail with `database is locked`.
         _commit_or_http_error(db, phase="initial user message")
         # Normal chat — use agent runtime
-        reply_text, msg_id, is_exp0, tool_events = _handle_normal_chat(db, chat, user_msg, payload,
+        reply_text, msg_id, is_exp0, tool_events, reply_blocks = _handle_normal_chat(db, chat, user_msg, payload,
                                                   assistant_message_id=msg_id,
                                                   web_search=payload.web_search,
                                                   workers_enabled=effective_workers_enabled,
@@ -557,6 +678,7 @@ def _process_chat_message_inner(
         text=reply_text,
         artifacts=artifact_ids,
         tool_events=tool_events,
+        blocks=reply_blocks,
     )
     db.add(asst_msg)
 
@@ -633,6 +755,89 @@ def _process_chat_message_inner(
 
 
 router.add_api_route("/artifact", send_message, methods=["POST"], response_model=ChatResponse)
+
+
+@router.get("/approvals/{chat_id}", response_model=list[PendingApprovalDTO])
+async def list_chat_approvals(chat_id: str):
+    """Approvals currently blocking this chat's turn.
+
+    A client that reloaded mid-turn has missed the approval_request event and
+    would otherwise show a turn that looks hung. This lets it recover the card.
+    """
+    # Wire shape keeps ``approval_id`` (what the client knows it as); the
+    # registry calls it request_id since it also carries ask_user questions.
+    return [
+        PendingApprovalDTO(
+            approval_id=a.request_id,
+            chat_id=a.chat_id,
+            message_id=a.message_id,
+            tool_name=a.payload.get("tool_name", ""),
+            call_id=a.payload.get("call_id", ""),
+            arguments=a.payload.get("arguments", {}) or {},
+            created_at=a.created_at,
+        )
+        for a in list_pending_for_chat(chat_id)
+    ]
+
+
+@router.get("/questions/{chat_id}", response_model=list[PendingQuestionDTO])
+async def list_chat_questions(chat_id: str):
+    """ask_user questions currently blocking this chat's turn (reload recovery)."""
+    return [
+        PendingQuestionDTO(
+            question_id=q.request_id,
+            chat_id=q.chat_id,
+            message_id=q.message_id,
+            call_id=q.payload.get("call_id", ""),
+            question=q.payload.get("question", ""),
+            options=q.payload.get("options", []) or [],
+            created_at=q.created_at,
+        )
+        for q in list_pending_questions(chat_id)
+    ]
+
+
+@router.post("/questions/{question_id}", response_model=AnswerQuestionResponse)
+async def answer_question(question_id: str, payload: AnswerQuestionRequest):
+    """Answer a suspended ask_user question, resuming the turn.
+
+    Same loop-crossing and lock-avoidance rules as ``decide_approval``.
+    """
+    try:
+        question = resolve_question(question_id, payload.answer)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if question is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No such pending question — it may have already been answered, timed out, or its turn ended.",
+        )
+    return AnswerQuestionResponse(question_id=question_id, chat_id=question.chat_id)
+
+
+@router.post("/approvals/{approval_id}", response_model=ApprovalDecisionResponse)
+async def decide_approval(approval_id: str, payload: ApprovalDecisionRequest):
+    """Approve or reject a suspended tool call, resuming the turn.
+
+    Async (main loop) while the turn it unblocks sleeps on the runtime's own
+    loop -- ``resolve_approval`` marshals the wakeup across. It deliberately
+    does NOT take the chat's turn lock: the suspended turn still holds it, so
+    acquiring it here would deadlock the very turn we're trying to release.
+    """
+    try:
+        approval = resolve_approval(approval_id, payload.decision)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if approval is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No such pending approval — it may have already been decided, timed out, or its turn ended.",
+        )
+    return ApprovalDecisionResponse(
+        approval_id=approval_id,
+        decision=payload.decision,
+        chat_id=approval.chat_id,
+    )
 
 
 class _StreamDone:
@@ -895,6 +1100,9 @@ def _handle_normal_chat(
     # the memory of its own file actions (the "I never created any file" bug).
     captured_tool_events: list[dict] = []
     _pending_calls: dict[str, dict] = {}
+    # Render-fidelity blocks (see _BlockAccumulator): what the UI replays after
+    # a reload, including the edit diffs tool_events deliberately drops.
+    blocks = _BlockAccumulator()
 
     try:
         async def _collect():
@@ -930,6 +1138,7 @@ def _handle_normal_chat(
                     web_search=web_search,
                     workers_enabled=workers_enabled,
                     thinking_enabled=thinking_enabled,
+                    agent_mode=getattr(chat, "agent_mode", "auto") or "auto",
                 ):
                     # Stream every orchestrator event live to the Rust sidecar
                     # via stdout. token/tool/done/error drive the existing
@@ -946,6 +1155,14 @@ def _handle_normal_chat(
                         tokens.clear()
                     elif event.type == "token":
                         tokens.append(event.payload.get("text", ""))
+                        blocks.add_token(event.payload.get("text", ""))
+                    elif event.type == "tool_progress":
+                        # Helper-model narration: the headline shown on the card.
+                        if event.payload.get("stage") == "narrating":
+                            blocks.add_narration(
+                                event.payload.get("call_id", ""),
+                                event.payload.get("summary", "") or "",
+                            )
                     elif event.type == "tool_call":
                         # Any prose the model streamed before calling a tool is a
                         # preamble ("You're right — let me check that directory:"),
@@ -960,6 +1177,11 @@ def _handle_normal_chat(
                             "tool": event.payload.get("tool_name", ""),
                             "arguments": event.payload.get("arguments", {}) or {},
                         }
+                        blocks.add_tool_call(
+                            event.payload.get("call_id", ""),
+                            event.payload.get("tool_name", ""),
+                            event.payload.get("arguments", {}) or {},
+                        )
                     elif event.type == "tool_result":
                         call = _pending_calls.pop(event.payload.get("call_id", ""), None)
                         captured_tool_events.append(_summarize_tool_event(
@@ -967,6 +1189,10 @@ def _handle_normal_chat(
                             (call or {}).get("arguments", {}),
                             event.payload.get("result", ""),
                         ))
+                        blocks.finish_tool(
+                            event.payload.get("call_id", ""),
+                            event.payload.get("result", ""),
+                        )
                     elif event.type == "error":
                         # Per failure_modes.orchestrator_error =
                         # "emit_typed_error_persist_clean_message": the typed
@@ -1000,9 +1226,15 @@ def _handle_normal_chat(
         # the UI and no partial turn should be silently persisted as if it
         # succeeded.
         logger.error("Agent orchestration failed: %s", exc)
+        # The turn died; any approval it was waiting on is now orphaned. Drop
+        # them so the UI doesn't keep showing a live-looking approval card for
+        # a turn that no longer exists.
+        cancelled = cancel_chat_approvals(chat.id)
+        if cancelled:
+            logger.info("Cancelled %d pending approval(s) for dead turn on chat %s", cancelled, chat.id)
         raise HTTPException(status_code=503, detail=str(exc))
 
-    return reply_text, msg_id, is_exp0, captured_tool_events
+    return reply_text, msg_id, is_exp0, captured_tool_events, blocks.result()
 
 
 def _run_fact_extraction(chat_id: str, user_msg_id: str, assistant_msg_id: str):

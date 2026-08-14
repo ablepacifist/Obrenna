@@ -1,9 +1,21 @@
 import { useRef, useState } from 'react'
-import { Brain, FileText, FolderCog, Globe, Paperclip, Send, X } from 'lucide-react'
+import { Brain, FileText, FolderCog, Globe, Paperclip, Send, ShieldCheck, X } from 'lucide-react'
 import { cn } from '../../lib/cn'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
-import type { CodebaseProjectDTO } from '../../lib/api'
+import type { AgentMode, CodebaseProjectDTO } from '../../lib/api'
+
+const AGENT_MODE_LABELS: Record<AgentMode, string> = {
+  auto: 'Auto-edit',
+  manual: 'Approve edits',
+  plan: 'Plan only',
+}
+
+const AGENT_MODE_HINTS: Record<AgentMode, string> = {
+  auto: 'Changes are applied without asking.',
+  manual: 'Each change pauses for your approval before it is applied.',
+  plan: 'No changes are applied — the assistant only reads and proposes.',
+}
 
 const ALLOWED_EXTENSIONS = new Set([
   'csv', 'txt', 'pdf', 'xlsx', 'xls', 'json', 'log', 'md', 'xml',
@@ -39,6 +51,8 @@ interface ComposerProps {
   codebaseProjects?: CodebaseProjectDTO[]
   activeCodebaseProjectId?: string | null
   onCodebaseProjectChange?: (id: string | null) => void
+  agentMode?: AgentMode
+  onAgentModeChange?: (mode: AgentMode) => void
 }
 
 function formatBytes(n: number): string {
@@ -60,6 +74,8 @@ export function Composer({
   codebaseProjects = [],
   activeCodebaseProjectId = null,
   onCodebaseProjectChange,
+  agentMode = 'auto',
+  onAgentModeChange,
 }: ComposerProps) {
   const [text, setText] = useState(initialText)
   const [files, setFiles] = useState<AttachedFile[]>([])
@@ -208,6 +224,32 @@ export function Composer({
                 <option value="">No codebase</option>
                 {codebaseProjects.map(p => (
                   <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {/* Write policy. Only meaningful once a codebase is attached — with
+              no project there are no files to edit, so showing it then would
+              just be a control that does nothing. */}
+          {activeCodebaseProjectId && (
+            <div
+              className={cn(
+                'h-8 pl-2 pr-1.5 rounded-md text-[12px] inline-flex items-center gap-1 border transition-colors',
+                agentMode === 'auto'
+                  ? 'border-(--border) bg-(--surface) text-(--ink-faint)'
+                  : 'border-(--accent) bg-(--accent)/10 text-(--accent)',
+              )}
+              title={AGENT_MODE_HINTS[agentMode]}
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <select
+                value={agentMode}
+                onChange={e => onAgentModeChange?.(e.target.value as AgentMode)}
+                className="bg-transparent outline-none"
+                aria-label="Edit approval mode"
+              >
+                {(Object.keys(AGENT_MODE_LABELS) as AgentMode[]).map(m => (
+                  <option key={m} value={m}>{AGENT_MODE_LABELS[m]}</option>
                 ))}
               </select>
             </div>

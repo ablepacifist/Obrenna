@@ -27,11 +27,22 @@ EVENT_TYPE_ARTIFACT_PLAN = "artifact_plan"
 EVENT_TYPE_ARTIFACT_SKELETON = "artifact_skeleton"
 EVENT_TYPE_ARTIFACT_UPDATE = "artifact_update"
 EVENT_TYPE_TELEMETRY = "telemetry"
+# Manual-mode approval handshake: the turn suspends on approval_request and
+# resumes once the user decides (relayed back as approval_resolved so the UI
+# can settle the card even if the decision came from another client).
+EVENT_TYPE_APPROVAL_REQUEST = "approval_request"
+EVENT_TYPE_APPROVAL_RESOLVED = "approval_resolved"
+# ask_user handshake: same suspend/resume shape as approvals, but the response
+# is a free-text answer rather than a verdict.
+EVENT_TYPE_QUESTION_REQUEST = "question_request"
+EVENT_TYPE_QUESTION_RESOLVED = "question_resolved"
 VALID_EVENT_TYPES = (
     EVENT_TYPE_TOKEN, EVENT_TYPE_DONE, EVENT_TYPE_ERROR,
     EVENT_TYPE_TOOL_CALL, EVENT_TYPE_TOOL_RESULT, EVENT_TYPE_TOOL_PROGRESS,
     EVENT_TYPE_THINKING_DELTA, EVENT_TYPE_PHASE, EVENT_TYPE_ARTIFACT_PLAN,
     EVENT_TYPE_ARTIFACT_SKELETON, EVENT_TYPE_ARTIFACT_UPDATE, EVENT_TYPE_TELEMETRY,
+    EVENT_TYPE_APPROVAL_REQUEST, EVENT_TYPE_APPROVAL_RESOLVED,
+    EVENT_TYPE_QUESTION_REQUEST, EVENT_TYPE_QUESTION_RESOLVED,
 )
 
 CHANNEL_AGENT_EVENT = "agent_event"
@@ -421,6 +432,95 @@ def thinking_delta_event(chat_id: str, text: str, message_id: str = "") -> Strea
         message_id=message_id,
         type=EVENT_TYPE_THINKING_DELTA,
         payload={"text": text},
+    )
+
+
+def approval_request_event(
+    chat_id: str,
+    approval_id: str,
+    tool_name: str,
+    call_id: str,
+    arguments: dict[str, Any] | None = None,
+    message_id: str = "",
+) -> StreamEvent:
+    """Create an approval_request event (manual mode: turn is now suspended).
+
+    Carries the FULL arguments -- including ``old_string``/``new_string`` for
+    an edit -- because the UI has to render the exact diff being approved.
+    The turn is blocked awaiting ``resolve_approval(approval_id, ...)``.
+    """
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_APPROVAL_REQUEST,
+        payload={
+            "approval_id": approval_id,
+            "tool_name": tool_name,
+            "call_id": call_id,
+            "arguments": arguments or {},
+        },
+    )
+
+
+def approval_resolved_event(
+    chat_id: str,
+    approval_id: str,
+    decision: str,
+    call_id: str = "",
+    message_id: str = "",
+) -> StreamEvent:
+    """Create an approval_resolved event. ``decision`` is 'approve'|'reject'|'timeout'."""
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_APPROVAL_RESOLVED,
+        payload={
+            "approval_id": approval_id,
+            "decision": decision,
+            "call_id": call_id,
+        },
+    )
+
+
+def question_request_event(
+    chat_id: str,
+    question_id: str,
+    call_id: str,
+    question: str,
+    options: list[str] | None = None,
+    message_id: str = "",
+) -> StreamEvent:
+    """Create a question_request event (turn is now suspended awaiting an answer)."""
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_QUESTION_REQUEST,
+        payload={
+            "question_id": question_id,
+            "call_id": call_id,
+            "question": question,
+            "options": options or [],
+        },
+    )
+
+
+def question_resolved_event(
+    chat_id: str,
+    question_id: str,
+    answer: str,
+    call_id: str = "",
+    message_id: str = "",
+) -> StreamEvent:
+    """Create a question_resolved event. Empty ``answer`` means nobody answered."""
+    return StreamEvent(
+        chat_id=chat_id,
+        message_id=message_id,
+        type=EVENT_TYPE_QUESTION_RESOLVED,
+        payload={
+            "question_id": question_id,
+            "answer": answer,
+            "call_id": call_id,
+        },
     )
 
 

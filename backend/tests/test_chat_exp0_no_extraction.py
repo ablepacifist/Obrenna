@@ -72,7 +72,7 @@ class TestHandleNormalChatReturnsExp0Flag:
 
         payload = ChatRequest(chat_id=chat.id, message="hi")
 
-        _reply, _msg_id, is_exp0, _tool_events = chat_router._handle_normal_chat(
+        _reply, _msg_id, is_exp0, _tool_events, _blocks = chat_router._handle_normal_chat(
             db, chat, user_msg, payload, assistant_message_id="asst-exp0-1",
         )
 
@@ -111,7 +111,7 @@ class TestHandleNormalChatReturnsExp0Flag:
 
         payload = ChatRequest(chat_id=chat.id, message="hi")
 
-        _reply, _msg_id, is_exp0, _tool_events = chat_router._handle_normal_chat(
+        _reply, _msg_id, is_exp0, _tool_events, _blocks = chat_router._handle_normal_chat(
             db, chat, user_msg, payload, assistant_message_id="asst-nonexp0-1",
         )
 
@@ -174,7 +174,7 @@ class TestSendMessageSkipsExtractionOnExp0:
         def fake_handle_normal_chat(*args, **kwargs):
             assert commits, "send_message must commit chat/user rows before orchestration"
             assert not db.new, "no pending INSERTs should be held during orchestration"
-            return "reply", "asst-precommit-1", True, []
+            return "reply", "asst-precommit-1", True, [], []
 
         monkeypatch.setattr(db, "commit", tracking_commit)
         monkeypatch.setattr(chat_router, "_handle_normal_chat", fake_handle_normal_chat)

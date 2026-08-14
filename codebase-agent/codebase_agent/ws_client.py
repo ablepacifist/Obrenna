@@ -53,9 +53,15 @@ async def _handle_command(ws, raw: str, send_lock: asyncio.Lock) -> None:
         await ws.send(payload)
 
 
-async def _run_once(server: str, device_id: str, device_name: str) -> None:
+async def _run_once(server: str, device_id: str, device_name: str, token: str = "") -> None:
     url = _ws_url(server)
-    async with websockets.connect(url) as ws:
+    # Sent as a header, never in the URL: a token in the query string ends up
+    # in access logs, proxy logs and shell history. Harmless when connecting
+    # straight to the backend (nothing reads it there); required when the
+    # public gateway is in the path, since it is what stands in for the
+    # browser login cookie the agent cannot obtain.
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    async with websockets.connect(url, additional_headers=headers) as ws:
         await ws.send(json.dumps({"type": "hello", "device_id": device_id, "device_name": device_name}))
         ack = json.loads(await ws.recv())
         if ack.get("approved"):
@@ -68,7 +74,36 @@ async def _run_once(server: str, device_id: str, device_name: str) -> None:
             asyncio.create_task(_handle_command(ws, raw, send_lock))
 
 
-async def run(server: str, name: str | None = None) -> None:
+def _explain_rejection(exc: Exception, server: str, has_token: bool) -> str | None:
+    """Turn an auth rejection into something actionable.
+
+    A 401 from the gateway surfaces as a bare handshake error, which reads like
+    a network fault and sends people looking at firewalls. It is almost always
+    a token problem, so say so.
+    """
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    if status not in (401, 403):
+        return None
+    if not has_token:
+        return (
+            f"{server} refused the connection ({status}): it is behind the login "
+            "gateway, which needs a token.\n"
+            "  Pass --token <secret> (or set OBRENNA_AGENT_TOKEN) with the value "
+            "of OBRENNA_AGENT_TOKEN on the machine running Obrenna.\n"
+            "  Connecting straight to the backend instead (LAN/localhost) needs "
+            "no token."
+        )
+    return (
+        f"{server} rejected the token ({status}). It must match OBRENNA_AGENT_TOKEN "
+        "on the machine running Obrenna exactly.\n"
+        "  If that variable is unset or under 32 characters there, the gateway "
+        "refuses every agent by design -- check the gateway's logs."
+    )
+
+
+async def run(server: str, name: str | None = None, token: str = "") -> None:
     device_id = get_or_create_device_id()
     device_name = name or default_device_name()
     print(f"Codebase agent starting. Device: {device_name} ({device_id})")
@@ -76,10 +111,16 @@ async def run(server: str, name: str | None = None) -> None:
     attempt = 0
     while True:
         try:
-            await _run_once(server, device_id, device_name)
+            await _run_once(server, device_id, device_name, token)
             attempt = 0  # clean session before the drop resets backoff
         except (websockets.exceptions.WebSocketException, OSError) as exc:
-            logger.warning("Connection to %s lost/failed: %s", server, exc)
+            hint = _explain_rejection(exc, server, bool(token))
+            if hint:
+                # Config error, not a transient drop -- printed every attempt
+                # so it can't scroll past unnoticed in a reconnect loop.
+                print(f"\n{hint}\n")
+            else:
+                logger.warning("Connection to %s lost/failed: %s", server, exc)
         delay = RECONNECT_BACKOFF[min(attempt, len(RECONNECT_BACKOFF) - 1)]
         attempt += 1
         print(f"Reconnecting in {delay}s...")

@@ -133,6 +133,11 @@ class ExportPdfResponse(BaseModel):
 
 # --- chat -------------------------------------------------------------------
 
+# How much latitude the agent has over files in a chat. "auto" is the default
+# everywhere so existing chats keep their previous unattended behaviour.
+AgentMode = Literal["auto", "manual", "plan"]
+
+
 class ChatRequest(BaseModel):
     chat_id: Optional[str] = None
     message: str = ""
@@ -147,6 +152,56 @@ class ChatRequest(BaseModel):
     # first turn always ran with no codebase access. Ignored when chat_id is
     # given -- an existing chat's codebase is changed via PATCH.
     active_codebase_project_id: Optional[str] = None
+    # Same story for the write policy: settable on the request that creates the
+    # chat so the very first turn already respects it.
+    agent_mode: Optional[AgentMode] = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """User's verdict on a suspended write. Only these two values resume a turn."""
+    decision: Literal["approve", "reject"]
+
+
+class ApprovalDecisionResponse(BaseModel):
+    approval_id: str
+    decision: str
+    chat_id: str
+
+
+class PendingApprovalDTO(BaseModel):
+    """A write suspended awaiting approval.
+
+    ``arguments`` is the tool's full argument dict (including old_string /
+    new_string for an edit) so the client can render the exact diff.
+    """
+    approval_id: str
+    chat_id: str
+    message_id: str
+    tool_name: str
+    call_id: str
+    arguments: dict[str, Any] = {}
+    created_at: float
+
+
+class AnswerQuestionRequest(BaseModel):
+    """User's answer to an ask_user question. Blank answers don't resume a turn."""
+    answer: str = Field(min_length=1)
+
+
+class AnswerQuestionResponse(BaseModel):
+    question_id: str
+    chat_id: str
+
+
+class PendingQuestionDTO(BaseModel):
+    """A question the agent is suspended on, awaiting an answer."""
+    question_id: str
+    chat_id: str
+    message_id: str
+    call_id: str
+    question: str
+    options: list[str] = []
+    created_at: float
 
 
 class ChatMessageDTO(BaseModel):
@@ -156,6 +211,10 @@ class ChatMessageDTO(BaseModel):
     artifacts: list[str] = []
     files: list[dict[str, Any]] = []
     tool_events: list[dict[str, Any]] = []
+    # Ordered render blocks (text runs + tool cards with full args). Empty for
+    # messages written before blocks were persisted; the UI falls back to
+    # ``text`` in that case.
+    blocks: list[dict[str, Any]] = []
     created_at: str
 
 
@@ -170,6 +229,7 @@ class ChatDTO(BaseModel):
     title: str
     folder_id: Optional[str] = None
     active_codebase_project_id: Optional[str] = None
+    agent_mode: AgentMode = "auto"
     created_at: str
     updated_at: str
 
@@ -203,6 +263,7 @@ class UpdateChatRequest(BaseModel):
     unfile: bool = False
     active_codebase_project_id: Optional[str] = None
     clear_codebase_project: bool = False
+    agent_mode: Optional[AgentMode] = None
 
 
 # --- memory -------------------------------------------------------------------

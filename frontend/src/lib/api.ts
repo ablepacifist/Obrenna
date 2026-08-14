@@ -225,6 +225,27 @@ export type MessageBlock =
       summary?: string
       description?: string
     }
+  // A write awaiting your decision. Lives in the block list so it renders in
+  // the right place in the cadence (after the prose that led up to it). While
+  // `decision` is undefined the backend turn is genuinely suspended on it.
+  | {
+      kind: 'approval'
+      approvalId: string
+      callId: string
+      toolName: string
+      args: Record<string, unknown>
+      decision?: 'approve' | 'reject' | 'timeout'
+    }
+  // An ask_user question. Same suspension semantics as an approval: while
+  // `answer` is undefined the backend turn is blocked on it.
+  | {
+      kind: 'question'
+      questionId: string
+      callId: string
+      question: string
+      options: string[]
+      answer?: string
+    }
 
 export type ChatMessageDTO = {
   id: string
@@ -234,16 +255,26 @@ export type ChatMessageDTO = {
   files: { name: string; size: number }[]
   created_at: string
   sources?: { title: string; url: string; snippet: string }[]
-  // UI-only (not persisted by the backend yet). Present on the in-flight and
-  // just-completed assistant message so the cadence renders after `done`.
+  // Ordered render blocks. Persisted server-side, so a reloaded transcript
+  // replays the same cadence (including edit diffs) the user watched live.
+  // Empty/absent on messages written before blocks were persisted — the UI
+  // falls back to `text` for those.
   blocks?: MessageBlock[]
 }
 export type ChatResponse = { chat_id: string; message: ChatMessageDTO; memory_events?: MemoryEvent[] }
+
+/** How much latitude the agent has over files in a chat.
+ *  auto   — writes apply unattended
+ *  manual — every write pauses the turn for your approval
+ *  plan   — writes refused; the agent reads and proposes only */
+export type AgentMode = 'auto' | 'manual' | 'plan'
+
 export type ChatDTO = {
   id: string
   title: string
   folder_id?: string
   active_codebase_project_id?: string | null
+  agent_mode?: AgentMode
   created_at: string
   updated_at: string
 }
@@ -260,7 +291,55 @@ export type SendMessageRequest = {
   /** Codebase to attach when this send CREATES the chat (no chat_id yet).
    *  Existing chats change codebase via updateChat() instead. */
   active_codebase_project_id?: string
+  /** Write policy for the chat this send creates. Same create-path-only
+   *  reasoning as active_codebase_project_id. */
+  agent_mode?: AgentMode
 }
+
+/** A write the agent wants to make, with the turn suspended until you decide.
+ *  `arguments` carries the full tool args (old_string/new_string for an edit)
+ *  so the diff can be rendered exactly as it will be applied. */
+export type PendingApprovalDTO = {
+  approval_id: string
+  chat_id: string
+  message_id: string
+  tool_name: string
+  call_id: string
+  arguments: Record<string, unknown>
+  created_at: number
+}
+
+/** Resolve a suspended write, resuming the turn. */
+export const decideApproval = (approvalId: string, decision: 'approve' | 'reject') =>
+  req<{ approval_id: string; decision: string; chat_id: string }>(
+    'POST', `/api/chat/approvals/${approvalId}`, { decision },
+  )
+
+/** Approvals still blocking a chat's turn. Used to recover the approval card
+ *  after a reload mid-turn, which would otherwise look like a hung turn. */
+export const getChatApprovals = (chatId: string) =>
+  req<PendingApprovalDTO[]>('GET', `/api/chat/approvals/${chatId}`)
+
+/** A question the agent is suspended on, awaiting an answer. */
+export type PendingQuestionDTO = {
+  question_id: string
+  chat_id: string
+  message_id: string
+  call_id: string
+  question: string
+  options: string[]
+  created_at: number
+}
+
+/** Answer a suspended ask_user question, resuming the turn. */
+export const answerQuestion = (questionId: string, answer: string) =>
+  req<{ question_id: string; chat_id: string }>(
+    'POST', `/api/chat/questions/${questionId}`, { answer },
+  )
+
+/** Questions still blocking a chat's turn (reload recovery, as above). */
+export const getChatQuestions = (chatId: string) =>
+  req<PendingQuestionDTO[]>('GET', `/api/chat/questions/${chatId}`)
 
 export const sendMessage = (payload: SendMessageRequest) =>
    req<ChatResponse>('POST', '/api/chat', {
