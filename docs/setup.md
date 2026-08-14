@@ -58,6 +58,22 @@ machine needs no open ports and no port forwarding — only this PC does.
    └──────────────────────┘                   └────────────────────┘
 ```
 
+### Pick a route: same network, or over the internet
+
+| | Same LAN (`-Lan`) | Over the internet (tunnel) |
+|---|---|---|
+| Setup on this PC | one firewall rule | none — the tunnel already dials out |
+| Reachable from | your own network only | anywhere |
+| Agent needs a token | no | **yes** |
+| Speed | fastest (no internet hop) | goes via Cloudflare |
+
+Both are covered below. The tunnel is the answer if computer A isn't on your
+network; the LAN route is simpler and faster when it is.
+
+---
+
+## Route A — same network
+
 ### 1. Start Obrenna so other machines can reach it
 
 By default the backend binds `127.0.0.1` — localhost only, unreachable from
@@ -112,6 +128,57 @@ machine** (e.g. `C:\dev\myapp` on the laptop, not a path on this PC).
 Pick the project in the composer's codebase dropdown and it works exactly like
 a local one — including manual/plan mode and per-edit approval.
 
+---
+
+## Route B — over the internet, through the tunnel
+
+No firewall rule, works from anywhere, but the agent needs a **token**.
+
+Everything behind the gateway normally requires a browser login cookie, and a
+headless agent can't obtain one. So `/api/codebase-agent/connect` is exempt
+from the cookie check and authenticated with a shared secret instead. That
+route is **not** unauthenticated — the gateway refuses every agent when no
+token is configured, deliberately (a misconfiguration should break the agent,
+not quietly open a path to the backend).
+
+### 1. Generate a token and set it on THIS PC
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Set it in the environment the **gateway's auth service** runs under, then
+restart the gateway:
+
+```powershell
+$env:OBRENNA_AGENT_TOKEN = "<the value you just generated>"
+.\obrenna.ps1 restart
+```
+
+Must be at least 32 characters — the gateway refuses shorter ones rather than
+honour a guessable secret on an internet-facing route. Set it permanently with
+`setx OBRENNA_AGENT_TOKEN "<value>"` (new shells only).
+
+### 2. Run the agent on the other machine
+
+Point it at your public URL and give it the same token:
+
+```powershell
+$env:OBRENNA_AGENT_TOKEN = "<same value>"
+python -m codebase_agent.main --server https://llm.alex-dyakin.com --name work-laptop
+```
+
+`--token <value>` works too, but the environment variable is the better habit:
+a token on the command line is visible in the process list and shell history.
+
+Then approve the device and add the project exactly as in Route A, step 4.
+
+**If it's refused**, the agent says which problem it is — no token vs wrong
+token — rather than leaving you guessing at a handshake error. A wrong-token
+message when you're sure it matches usually means `OBRENNA_AGENT_TOKEN` isn't
+set in the environment the auth service actually inherited; restart the gateway
+after setting it.
+
 ### Security note
 
 `-Lan` puts the whole backend API on your network, and Obrenna's own API has no
@@ -123,6 +190,11 @@ the codebase specifically:
   connect time;
 - `write_enabled` is per project, so a project can be attached read-only.
 
-For anything beyond a trusted LAN — a machine over the internet — use the
-gateway instead (`obrenna-gateway`: Caddy + auth service + Cloudflare tunnel).
-That path has an actual login in front of it; `-Lan` does not.
+Route B (the tunnel) is the stronger option for anything beyond a trusted LAN:
+the browser UI sits behind a real login, and the one exempt route is gated by
+the shared secret. Two independent credentials — a stolen browser session
+doesn't grant agent access, and the agent token doesn't unlock the UI.
+
+Rotating the token: change `OBRENNA_AGENT_TOKEN` on this PC, restart the
+gateway, and update it on each agent machine. Old agents start failing
+immediately with the wrong-token message.
