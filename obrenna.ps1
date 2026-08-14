@@ -14,7 +14,7 @@
 
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status")]
+    [ValidateSet("start", "stop", "restart", "status", "token")]
     [string]$Command = "",
 
     # Opt-in network exposure. Default is localhost-only: uvicorn binds
@@ -182,13 +182,18 @@ function Stop-Gateway {
   Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+$script:AgentTokenIsNew = $false
+
 function Initialize-AgentToken {
   # The shared secret a remote codebase-agent presents to get through the
-  # gateway's login wall. Generated once and kept in a file rather than an
+  # gateway's login wall. Generated ONCE and kept in a file rather than an
   # environment variable: the gateway is started by this script, so an
   # env-var-only secret silently disappears whenever it is restarted from a
   # shell that hasn't exported it -- and every remote agent is then refused
   # with no obvious cause.
+  #
+  # The generate step is guarded on the file's absence, so restarting does NOT
+  # mint a new token. Remote machines are configured once and keep working.
   $tokenFile = Join-Path $GatewayDir ".agent_token"
   if (-not (Test-Path $tokenFile)) {
     $generated = python -c "import secrets; print(secrets.token_urlsafe(32))"
@@ -198,17 +203,39 @@ function Initialize-AgentToken {
     }
     # No trailing newline: the value is compared verbatim on the other side.
     [System.IO.File]::WriteAllText($tokenFile, $generated.Trim())
-    Write-Host "Generated a codebase-agent token (first run) -> $tokenFile"
+    $script:AgentTokenIsNew = $true
   }
   return (Get-Content $tokenFile -Raw).Trim()
 }
 
 function Show-AgentToken {
+  # Only splash the secret on the run that created it. Reprinting it on every
+  # start both looks like re-issuing (it isn't) and puts the secret on screen
+  # during every screen-share and in every scrollback. Afterwards just point at
+  # where it lives.
   $tokenFile = Join-Path $GatewayDir ".agent_token"
   if (-not (Test-Path $tokenFile)) { return }
+
+  if ($script:AgentTokenIsNew) {
+    $tok = (Get-Content $tokenFile -Raw).Trim()
+    Write-Host ""
+    Write-Host "Codebase-agent token created (ONE TIME - it does not change on restart)."
+    Write-Host "Run this ONCE on each other computer that holds code:"
+    Write-Host "  python -m codebase_agent.main --server https://llm.alex-dyakin.com --name <that-pc> --token $tok"
+  } else {
+    Write-Host "Agent token: unchanged. '.\obrenna.ps1 token' to show the command again."
+  }
+}
+
+function Invoke-ShowToken {
+  $tokenFile = Join-Path $GatewayDir ".agent_token"
+  if (-not (Test-Path $tokenFile)) {
+    Write-Host "No agent token yet - run '.\obrenna.ps1 start' once to create one."
+    return
+  }
   $tok = (Get-Content $tokenFile -Raw).Trim()
-  Write-Host ""
-  Write-Host "Codebase agent on ANOTHER computer - run this there:"
+  Write-Host "Token file: $tokenFile"
+  Write-Host "This value is permanent across restarts. Run this on the other computer:"
   Write-Host "  python -m codebase_agent.main --server https://llm.alex-dyakin.com --name <that-pc> --token $tok"
 }
 
@@ -351,6 +378,7 @@ function Show-Usage {
   Write-Host "  stop     everything, Ollama included"
   Write-Host "  restart  stop then start"
   Write-Host "  status   show what's currently listening/running"
+  Write-Host "  token    print the codebase-agent command for another computer"
   Write-Host ""
   Write-Host "  -Lan                 also accept connections from other machines, so a"
   Write-Host "                       codebase-agent on another PC can reach this one"
@@ -362,5 +390,6 @@ switch ($Command) {
   "stop"    { Invoke-Stop }
   "restart" { Invoke-Restart }
   "status"  { Invoke-Status }
+  "token"   { Invoke-ShowToken }
   default   { Show-Usage }
 }

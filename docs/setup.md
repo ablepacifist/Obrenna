@@ -19,6 +19,7 @@ From **PowerShell**, at the repo root (`e:\code\LLM\GrebGlob`):
 .\obrenna.ps1 stop       # stops everything, Ollama included
 .\obrenna.ps1 restart    # stop then start
 .\obrenna.ps1 status     # show what's currently running
+.\obrenna.ps1 token      # print the setup command for another computer
 ```
 
 One file, native PowerShell, no Git Bash dependency.
@@ -141,8 +142,10 @@ route is **not** unauthenticated — the gateway refuses every agent when no
 token is configured, deliberately (a misconfiguration should break the agent,
 not quietly open a path to the backend).
 
-**No env files to copy.** The token is generated for you and printed; you copy
-one line to the other machine.
+**No env files to copy, and the token is set up once.** It is generated on the
+first `start`, stored in `obrenna-gateway\.agent_token`, and **does not change
+when you restart** — restart Obrenna as often as you like without touching the
+other machine. Regenerating only happens if you delete that file.
 
 ### 1. On THIS PC — start normally and copy the printed command
 
@@ -150,17 +153,24 @@ one line to the other machine.
 .\obrenna.ps1 start
 ```
 
-On first run this generates a token into `obrenna-gateway\.agent_token` and
-prints exactly what to run elsewhere:
+The **first** run generates the token and prints exactly what to run elsewhere:
 
 ```
-Codebase agent on ANOTHER computer - run this there:
+Codebase-agent token created (ONE TIME - it does not change on restart).
+Run this ONCE on each other computer that holds code:
   python -m codebase_agent.main --server https://llm.alex-dyakin.com --name <that-pc> --token 6EUtxWY...
 ```
 
-The token lives in that file, not in an environment variable, so it survives
-restarts and reboots. (It is gitignored — never commit it.) `start` reprints it
-every time, so you never have to go looking.
+Every run after that just says `Agent token: unchanged` — deliberately, so it
+never looks like a new one was issued, and so the secret isn't splashed across
+your screen on every restart. To see the command again at any time:
+
+```powershell
+.\obrenna.ps1 token
+```
+
+The token lives in a file rather than an environment variable so it survives
+restarts and reboots. It is gitignored — never commit it.
 
 ### 2. On the other computer — get the agent, then run that line
 
@@ -195,9 +205,10 @@ takes precedence over the file.
 
 ### Rotating it
 
-Delete `obrenna-gateway\.agent_token`, run `.\obrenna.ps1 restart`, and copy
-the new printed command to each agent machine. Old agents start failing
-immediately with the wrong-token message.
+Only do this if the token leaks — routine restarts never change it. Delete
+`obrenna-gateway\.agent_token`, run `.\obrenna.ps1 restart`, and copy the newly
+printed command to each agent machine. Old agents start failing immediately
+with the wrong-token message.
 
 ### Security note
 
