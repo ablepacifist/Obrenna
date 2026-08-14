@@ -373,6 +373,15 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "to check before answering — never assume you lack access without having tried a "
     "tool call first.\n"
     "\n"
+    "0. THIS PROJECT IS THE SOURCE OF TRUTH ABOUT ITSELF. Any question about "
+    "what this project contains or how it works — its database tables, schema, "
+    "models, API, config, dependencies, structure, or the contents of any file "
+    "— is answered by READING THE PROJECT with codebase_search, "
+    "codebase_list_directory and codebase_read_file. Do NOT answer such "
+    "questions from memory, and do NOT use web_search for them: this code is "
+    "private and is not on the web, so searching for it finds nothing and "
+    "wastes the turn. Reading a few files is always the right first move.\n"
+    "\n"
     "RULES FOR FILE ACTIONS — these prevent you from misleading the user:\n"
     "1. NEVER claim you created, edited, moved, or deleted a file unless a tool "
     "result in THIS turn confirmed it succeeded. If you have not called the tool "
@@ -458,6 +467,34 @@ WEB_SEARCH_HINT = (
     "search. Do NOT search for things you can compute or determine locally "
     "(arithmetic, the current time, the user's own files) or for pure opinion/"
     "creative tasks. After searching, cite the source URLs in your answer."
+)
+
+# Used INSTEAD of WEB_SEARCH_HINT when a codebase is also attached.
+#
+# The two hints otherwise compete and the wrong one wins. Observed in the wild:
+# asked "what are the main database tables in this project" with a codebase
+# attached, the orchestrator called web_search and then reported it had found
+# nothing -- searching the public internet for a private repo. The generic hint
+# lists "documentation" as a reason to search and says "when in doubt, search",
+# which a question about a project matches; its one guard ("the user's own
+# files") is a short clause buried at the end.
+#
+# So when a codebase is present, web_search is scoped explicitly to the outside
+# world and the codebase is named as the authority for anything about "this
+# project".
+WEB_SEARCH_HINT_WITH_CODEBASE = (
+    "The user has enabled web search for this chat, so you have the "
+    "`web_search` tool for facts about the OUTSIDE WORLD: news, releases, "
+    "prices, third-party library docs, error messages from other people's "
+    "software. Cite source URLs when you use it.\n"
+    "\n"
+    "A codebase is ALSO attached to this chat, and it takes precedence. "
+    "Anything about 'this project', 'the code', 'our schema', 'the database "
+    "tables', 'the API', how this system works, or what any file contains is "
+    "answered by READING THE CODEBASE with the codebase_* tools — never by "
+    "web_search. The web does not contain the user's private code, so "
+    "searching it for those questions returns nothing useful and wastes the "
+    "turn. If a question could be read from the project, read the project."
 )
 
 
@@ -1806,9 +1843,16 @@ def _build_orchestrator_messages(
     # to both tool-call modes — native models otherwise only see the bare tool
     # description via the OpenAI tools field.
     if web_search_enabled:
+        # With a codebase attached, use the variant that scopes web_search to
+        # the outside world and names the codebase as the authority on "this
+        # project". The generic hint's "documentation" trigger and "when in
+        # doubt, search" otherwise beat the codebase tools on questions about
+        # the user's own code.
         messages.append({
             "role": "system",
-            "content": canonicalise_system_content(WEB_SEARCH_HINT),
+            "content": canonicalise_system_content(
+                WEB_SEARCH_HINT_WITH_CODEBASE if codebase_project_name else WEB_SEARCH_HINT
+            ),
         })
 
     # Band A‴: codebase-project usage hint, same rationale as the web-search
