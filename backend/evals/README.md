@@ -56,8 +56,10 @@ measuring the model.
 plus the full prompt stack. That difference is a real measurement, not
 overhead to be optimised away blindly.
 
-Still **not** exercised by either target: real memory retrieval, knowledge
-packs, and codebase tools.
+Still **not** exercised by either target: real memory retrieval and knowledge
+packs. The codebase tools are exercised only in the sense that the
+`codebase_agent` suite below scores what the model *says* about them — a chat
+with a project attached is needed for the tools themselves to fire.
 
 ## Suites
 
@@ -65,6 +67,22 @@ packs, and codebase tools.
 produced offline, with no dataset downloads. Categories: `math` (multi-step
 arithmetic), `logic` (formal deduction), `semantic` (reference resolution and
 entailment), `multihop` (fact chaining), `commonsense` (physical reasoning).
+
+`suites/codebase_agent.jsonl` is a **behavioural** suite, drawn case by case
+from a real session where the agent failed against an R/Shiny project with a
+live database. It does not test knowledge: it tests whether the model gives up.
+Categories: `capability` (claiming it cannot do something it can), `search`
+(reading an empty result as proof of absence), `hedging` (equivocating about a
+file it has read), `verification` (handing over SQL it never ran), `persistence`
+(ending the turn by interrogating the user), `narration` (promising instead of
+doing).
+
+```bash
+python -m evals run --target orchestrator --cases evals/suites/codebase_agent.jsonl
+```
+
+Run it against `orchestrator`, not `local`: the `local` target has no tools, so
+it fails the tool-use cases by construction. That difference is the measurement.
 
 Public benchmarks load from an external JSONL of the same shape:
 
@@ -80,7 +98,21 @@ Case schema (one JSON object per line):
 ```
 
 `grader` is `numeric` (final number must match), `mcq` (final choice letter), or
-`contains` (every `required_terms` entry must appear).
+`contains` (every `required_terms` entry must appear **and** no `forbidden_terms`
+entry may appear).
+
+`forbidden_terms` is what makes behavioural cases gradable. A refusal has no
+right answer to match — the whole assertion is that a particular sentence was
+not said:
+
+```json
+{"id": "cb-capability-01", "category": "capability", "grader": "contains",
+ "forbidden_terms": ["i cannot access", "only let me read"],
+ "question": "..."}
+```
+
+A failing case reports `said: <phrase>` rather than a bare false, so a
+regression names itself.
 
 ## Grading
 

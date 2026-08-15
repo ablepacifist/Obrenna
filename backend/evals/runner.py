@@ -42,6 +42,7 @@ def run_suite(
                 grader=case.grader,
                 expected=case.answer,
                 required_terms=case.required_terms,
+                forbidden_terms=case.forbidden_terms,
             )
 
         result = CaseResult(
