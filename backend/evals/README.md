@@ -78,7 +78,7 @@ file it has read), `verification` (handing over SQL it never ran), `persistence`
 doing).
 
 ```bash
-python -m evals run --target orchestrator --cases evals/suites/codebase_agent.jsonl
+python -m evals run --target orchestrator --suite codebase_agent
 ```
 
 Run it against `orchestrator`, not `local`: the `local` target has no tools, so
@@ -87,7 +87,7 @@ it fails the tool-use cases by construction. That difference is the measurement.
 Public benchmarks load from an external JSONL of the same shape:
 
 ```bash
-python -m evals run --cases /path/to/gsm8k.jsonl --model "..."
+python -m evals run --suite /path/to/gsm8k.jsonl --model "..."
 ```
 
 Case schema (one JSON object per line):
@@ -113,6 +113,21 @@ not said:
 
 A failing case reports `said: <phrase>` rather than a bare false, so a
 regression names itself.
+
+**Ask the model to act, not to discuss what it should not do.** A case that asks
+"what should you NOT do with these credentials?" is failed by a *correct* answer,
+because naming the bad thing means saying it. Two cases in this suite were
+written that way and both produced false misses. Pose the case as a task — write
+the command, answer the question — and let the forbidden terms catch the model
+doing the wrong thing rather than describing it.
+
+**Prefer `forbidden_terms` to `required_terms` for behavioural cases.** A
+free-form answer can be entirely correct and still not contain a particular
+word, so a required term is a noisy proxy that produces flaky misses; the first
+run of this suite scored 75% and all three failures turned out to be correct
+answers phrased differently. Only require a term when the term *is* the answer
+(naming the function it was asked to name). What a model must not say is far
+more stable than what it must say.
 
 ## Grading
 

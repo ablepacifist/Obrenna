@@ -1,0 +1,135 @@
+{
+  "generated_at": "2026-08-15T12:23:52.053444+00:00",
+  "suite": "codebase_agent",
+  "cases": 12,
+  "label": "after-fixes",
+  "target_kind": "orchestrator",
+  "local": {
+    "target": "orchestrator",
+    "model": "kwangsuklee/Qwen3.5-9B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+    "cases": 12,
+    "correct": 11,
+    "accuracy": 0.9167,
+    "by_category": {
+      "capability": 0.75,
+      "hedging": 1.0,
+      "narration": 1.0,
+      "persistence": 1.0,
+      "search": 1.0,
+      "verification": 1.0
+    },
+    "avg_latency_ms": 8111.8,
+    "p95_latency_ms": 12621.0,
+    "errors": 0,
+    "results": [
+      {
+        "case_id": "cb-capability-01",
+        "category": "capability",
+        "correct": false,
+        "extracted": "said: cannot execute",
+        "expected": "",
+        "latency_ms": 4379.2,
+        "error": ""
+      },
+      {
+        "case_id": "cb-capability-02",
+        "category": "capability",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 4502.1,
+        "error": ""
+      },
+      {
+        "case_id": "cb-search-01",
+        "category": "search",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 8942.6,
+        "error": ""
+      },
+      {
+        "case_id": "cb-search-02",
+        "category": "search",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 9740.7,
+        "error": ""
+      },
+      {
+        "case_id": "cb-hedge-01",
+        "category": "hedging",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 6682.2,
+        "error": ""
+      },
+      {
+        "case_id": "cb-sql-01",
+        "category": "verification",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 8801.4,
+        "error": ""
+      },
+      {
+        "case_id": "cb-sql-02",
+        "category": "verification",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 11162.6,
+        "error": ""
+      },
+      {
+        "case_id": "cb-persist-01",
+        "category": "persistence",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 11641.9,
+        "error": ""
+      },
+      {
+        "case_id": "cb-persist-02",
+        "category": "persistence",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 9114.1,
+        "error": ""
+      },
+      {
+        "case_id": "cb-narrate-01",
+        "category": "narration",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 6173.1,
+        "error": ""
+      },
+      {
+        "case_id": "cb-creds-01",
+        "category": "capability",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 3834.4,
+        "error": ""
+      },
+      {
+        "case_id": "cb-creds-02",
+        "category": "capability",
+        "correct": true,
+        "extracted": "all terms",
+        "expected": "",
+        "latency_ms": 12367.2,
+        "error": ""
+      }
+    ]
+  }
+}

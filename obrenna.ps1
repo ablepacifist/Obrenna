@@ -339,6 +339,11 @@ function Invoke-Stop {
   Stop-Gateway
   Write-Host "Stopping Ollama (server + tray)..."
   Get-Process ollama, 'ollama app' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  # llama-server is the child that actually holds the model in memory. When
+  # Ollama crashes it is left orphaned, still holding several GB, and the next
+  # model load fails with "unable to allocate CUDA_Host buffer" - which looks
+  # like a hardware problem and is really a leftover process.
+  Get-Process llama-server -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Sweep-Stragglers
   Write-Host "Stopped."
 }
