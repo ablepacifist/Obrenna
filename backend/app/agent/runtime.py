@@ -147,17 +147,31 @@ class ResolvedPlan:
             return val
         return 3
 
+    # Share of the context window one tool result may occupy, and the chars-per
+    # -token ratio used to convert. A fifth leaves room for the prompt band, the
+    # conversation, several results in a round, and the reply.
+    _TOOL_RESULT_CTX_SHARE = 0.20
+    _CHARS_PER_TOKEN = 4
+
     @property
     def tool_result_budget(self) -> int:
         """Per-orchestrator char budget for compacting a single tool result.
 
-        Sourced from the catalog model_definition (via the resolver). Defaults to
-        4000 chars when the resolver didn't populate it.
+        Scales with the context actually resolved for this machine, floored at
+        the catalog's per-model value. The catalog number has to be a static
+        worst case — the 9B orchestrator serves tiers whose ctx_min is 8192 and
+        whose ctx_max is 65536 — and holding every machine to that worst case is
+        what cut real source files off at roughly 1500 tokens on hardware with
+        four times the window to spare. That is the "it didn't look hard enough"
+        symptom: it looked, and the result was thrown away before it arrived.
         """
         val = self.orchestrator.get("tool_result_budget", 4000)
-        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
-            return val
-        return 4000
+        base = val if isinstance(val, int) and not isinstance(val, bool) and val > 0 else 4000
+        ctx = self.ctx
+        if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+            scaled = int(ctx * self._CHARS_PER_TOKEN * self._TOOL_RESULT_CTX_SHARE)
+            return max(base, scaled)
+        return base
 
     @property
     def summarizer_model(self) -> str:
@@ -2075,6 +2089,84 @@ def _trim_file_read(content: str, per_result_budget: int) -> str:
     return content[:head] + "\n...[middle truncated]...\n" + content[-tail:]
 
 
+def _trim_run_command(content: str, per_result_budget: int) -> str:
+    """Trim a run_command result without ever losing the verdict.
+
+    The payload is ``{command, cwd, exit_code, stdout, stderr, timed_out}`` in
+    that order, so a blanket head-truncation deleted ``stderr`` and
+    ``timed_out`` outright whenever stdout was chatty — the model was handed a
+    command that appeared to have produced output and no error at all, and
+    reported success. exit_code, timed_out and stderr are small and are the
+    whole point, so they are kept in full and only stdout is budgeted.
+    """
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _head_truncate(content, per_result_budget)
+    if not isinstance(obj, dict) or "stdout" not in obj:
+        return _head_truncate(content, per_result_budget)
+
+    trimmed = dict(obj)
+    stderr = trimmed.get("stderr") if isinstance(trimmed.get("stderr"), str) else ""
+    # Whatever stderr needs, stdout gets the rest — but never less than a
+    # usable slice, or a noisy warning stream would starve the actual output.
+    stdout_budget = max(400, per_result_budget - len(stderr) - 200)
+    stdout = trimmed.get("stdout")
+    if isinstance(stdout, str) and len(stdout) > stdout_budget:
+        head = int(stdout_budget * 0.4)
+        tail = stdout_budget - head
+        trimmed["stdout"] = (
+            stdout[:head] + "\n... [stdout truncated] ...\n" + stdout[-tail:]
+        )
+    if len(stderr) > per_result_budget:
+        # Only reachable when stderr alone is enormous; keep the end, which is
+        # where the actual error is.
+        trimmed["stderr"] = "... [stderr truncated] ...\n" + stderr[-per_result_budget:]
+    return json.dumps(trimmed, ensure_ascii=False)
+
+
+def _trim_search_results(content: str, per_result_budget: int) -> str:
+    """Trim search results by shortening lines, never by dropping matches.
+
+    Which files contain a symbol is the answer; the text of each line is
+    supporting detail. Head-truncating cut the JSON mid-array, so the model saw
+    an arbitrary prefix of the matches and no indication there were more.
+    """
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _head_truncate(content, per_result_budget)
+    matches = obj.get("matches") if isinstance(obj, dict) else None
+    if not isinstance(matches, list) or not matches:
+        return _head_truncate(content, per_result_budget)
+
+    per_match = max(80, per_result_budget // len(matches))
+    trimmed_matches = []
+    for match in matches:
+        if not isinstance(match, dict):
+            trimmed_matches.append(match)
+            continue
+        entry = dict(match)
+        line = entry.get("line")
+        if isinstance(line, str) and len(line) > per_match:
+            entry["line"] = line[:per_match].rstrip() + "…"
+        # Context is the first thing to go: useful, but never at the cost of
+        # losing the path and line number of a match.
+        if per_match < 160:
+            entry.pop("before", None)
+            entry.pop("after", None)
+        else:
+            for side in ("before", "after"):
+                lines = entry.get(side)
+                if isinstance(lines, list):
+                    entry[side] = [
+                        (item[:per_match] if isinstance(item, str) else item)
+                        for item in lines
+                    ]
+        trimmed_matches.append(entry)
+    return json.dumps({**obj, "matches": trimmed_matches}, ensure_ascii=False)
+
+
 def _trim_tool_result(tool_name: str, content: str, per_result_budget: int) -> str:
     """Per-tool structural trim. NOT a blanket head-truncation — the shape carries
     the sufficiency information the orchestrator needs to decide whether it has
@@ -2085,8 +2177,15 @@ def _trim_tool_result(tool_name: str, content: str, per_result_budget: int) -> s
         return content
     if tool_name == "web_search":
         return _trim_web_search(content, per_result_budget)
-    if tool_name == "file_read":
+    # codebase_read_file was falling through to the blanket head-truncate, so a
+    # file was cut at an arbitrary byte — which is how the model could read a
+    # helper module and still be unsure what was in it.
+    if tool_name in ("file_read", "codebase_read_file"):
         return _trim_file_read(content, per_result_budget)
+    if tool_name == "codebase_run_command":
+        return _trim_run_command(content, per_result_budget)
+    if tool_name == "codebase_search":
+        return _trim_search_results(content, per_result_budget)
     return _head_truncate(content, per_result_budget)
 
 
@@ -2192,9 +2291,13 @@ def _run_command_failed(result_content: str) -> bool:
     try:
         data = json.loads(result_content)
     except (json.JSONDecodeError, TypeError):
-        return False
+        # Unparseable means something went wrong, not that all is well: a bare
+        # "Tool error: ..." string and a payload cut mid-JSON both land here,
+        # and both used to read as success — so the model was never nudged off
+        # exactly the failures that produced the most output.
+        return True
     if not isinstance(data, dict):
-        return False
+        return True
     if data.get("error") or data.get("timed_out"):
         return True
     exit_code = data.get("exit_code")

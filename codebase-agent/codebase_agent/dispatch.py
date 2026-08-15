@@ -18,7 +18,7 @@ from .command_exec import run_command
 from .edit import EditConflictError, EditNotFoundError, EditNotUniqueError, edit_file
 from .fs_tools import FsError, delete_file, list_directory, move_file, read_file, write_new_file
 from .pathsafety import PathSafetyError
-from .search import search_codebase
+from .search import DEFAULT_CONTEXT_LINES, search_codebase
 
 
 def _err(message: str) -> dict[str, Any]:
@@ -65,17 +65,38 @@ def op_delete_project(params: dict[str, Any]) -> dict[str, Any]:
     return {"deleted": ok}
 
 
+_LIST_ENTRY_CAP = 200
+_LIST_TRUNCATED_NOTE = (
+    "Listing stopped at the entry limit -- this directory has more in it. "
+    "List a subdirectory to see the rest; do not conclude a file is missing "
+    "from this listing alone."
+)
+
+
 def op_list_directory(params: dict[str, Any]) -> dict[str, Any]:
     root, error = _get_project_root(params["project_id"])
     if error:
         return error
     try:
         entries = list_directory(
-            root, params.get("path", "."), recursive=bool(params.get("recursive", False))
+            root,
+            params.get("path", "."),
+            recursive=bool(params.get("recursive", False)),
+            max_entries=_LIST_ENTRY_CAP,
         )
     except (PathSafetyError, FsError) as exc:
         return _err(str(exc))
-    return {"entries": [asdict(e) for e in entries]}
+    # Hitting the cap used to be silent, which is another way a file that exists
+    # reads as one that doesn't.
+    truncated = len(entries) >= _LIST_ENTRY_CAP
+    payload: dict[str, Any] = {
+        "entries": [asdict(e) for e in entries],
+        "entry_count": len(entries),
+        "truncated": truncated,
+    }
+    if truncated:
+        payload["note"] = _LIST_TRUNCATED_NOTE
+    return payload
 
 
 def op_read_file(params: dict[str, Any]) -> dict[str, Any]:
@@ -89,20 +110,52 @@ def op_read_file(params: dict[str, Any]) -> dict[str, Any]:
     return {"path": params["path"], **asdict(result)}
 
 
+_NO_MATCH_NOTE = (
+    "No lines matched. This is NOT proof the symbol is absent from the project: "
+    "try a shorter or partial pattern, a different casing, regex=false for a "
+    "literal string, or list the directory you expect it in and read the file."
+)
+_TRUNCATED_NOTE = (
+    "Result limit reached -- there are more matches than these. Narrow the "
+    "pattern or search a subdirectory with 'path' to see the rest."
+)
+
+
 def op_search(params: dict[str, Any]) -> dict[str, Any]:
     root, error = _get_project_root(params["project_id"])
     if error:
         return error
     try:
-        matches = search_codebase(
+        outcome = search_codebase(
             root,
             params["pattern"],
             path=params.get("path", "."),
             regex=bool(params.get("regex", True)),
+            context=int(params.get("context", DEFAULT_CONTEXT_LINES)),
         )
     except (PathSafetyError, ValueError) as exc:
         return _err(str(exc))
-    return {"matches": [asdict(m) for m in matches]}
+
+    # The counts travel with the matches so an empty list can be read as "looked
+    # at 1400 files and found nothing" rather than as a bare, ambiguous [].
+    payload: dict[str, Any] = {
+        "matches": [asdict(m) for m in outcome.matches],
+        "match_count": len(outcome.matches),
+        "files_with_matches": outcome.files_with_matches,
+        "backend": outcome.backend,
+        "truncated": outcome.truncated,
+    }
+    # Omitted rather than reported as 0 when the backend cannot say: "scanned 0
+    # files" is a much stronger claim than "don't know", and the wrong one.
+    if outcome.files_scanned is not None:
+        payload["files_scanned"] = outcome.files_scanned
+    if outcome.files_skipped_large:
+        payload["files_skipped_too_large"] = outcome.files_skipped_large
+    if not outcome.matches:
+        payload["note"] = _NO_MATCH_NOTE
+    elif outcome.truncated:
+        payload["note"] = _TRUNCATED_NOTE
+    return payload
 
 
 def op_edit_file(params: dict[str, Any]) -> dict[str, Any]:

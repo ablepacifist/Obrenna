@@ -85,6 +85,10 @@ def test_junction_escape_rejected(root: Path, tmp_path_factory: pytest.TempPathF
         ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
         capture_output=True,
         text=True,
+        # Under pytest's default fd capture there is no valid stdin handle to
+        # inherit, and Windows fails the spawn outright with "The handle is
+        # invalid" -- so this test only ran when someone passed -s.
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         pytest.skip(f"junction creation failed in this environment: {result.stderr}")

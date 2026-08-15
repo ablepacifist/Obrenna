@@ -27,6 +27,9 @@ class DeviceConnection:
         self.device_id = device_id
         self.websocket = websocket
         self._pending: dict[str, asyncio.Future] = {}
+        # Requests we stopped waiting for. Kept so a late reply is recognised as
+        # late rather than silently dropped as unknown.
+        self._abandoned: set[str] = set()
 
     async def send_command(
         self, op: str, params: dict[str, Any], timeout: float = DEFAULT_TIMEOUT
@@ -42,7 +45,16 @@ class DeviceConnection:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
-            raise ConnectionError(f"Device did not respond in time for '{op}'")
+            self._abandoned.add(request_id)
+            # Say what actually happened. The command was delivered and is very
+            # likely still running on the user's machine -- calling that "no
+            # response" invites the model to run a mutating command a second
+            # time while the first one is mid-flight.
+            raise ConnectionError(
+                f"No reply from the device within {timeout:.0f}s for '{op}'. The command was "
+                "delivered and may still be running there. Do not simply repeat it -- check "
+                "whether it already took effect, or run it again with a longer timeout."
+            )
         finally:
             self._pending.pop(request_id, None)
 
@@ -50,6 +62,16 @@ class DeviceConnection:
         fut = self._pending.get(request_id)
         if fut is not None and not fut.done():
             fut.set_result(payload)
+        elif request_id in self._abandoned:
+            # The reply arrived after we gave up. Nothing can consume it now,
+            # but it must not vanish without trace: this is the signature of a
+            # timeout set too tight, and the only place it is observable.
+            self._abandoned.discard(request_id)
+            logger.warning(
+                "codebase-agent %s replied to request %s after it timed out; "
+                "the command completed but its output was discarded",
+                self.device_id, request_id,
+            )
 
     def fail_all(self, error: Exception) -> None:
         for fut in self._pending.values():

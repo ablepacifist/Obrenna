@@ -80,6 +80,20 @@ def get_active_codebase_project(chat_id: str) -> Optional[CodebaseProject]:
         db.close()
 
 
+def _coerce_int(value: Any, *, default: int, low: int, high: int) -> int:
+    """Clamp a model-supplied number, never raise.
+
+    A model that passes timeout="fast" used to raise ValueError from outside the
+    guarded block, so the turn's tool result became a bare "Tool error: invalid
+    literal for int()" string -- unparseable, and therefore invisible to the
+    failure detection that would otherwise stop it retrying.
+    """
+    try:
+        return max(low, min(int(value), high))
+    except (TypeError, ValueError):
+        return default
+
+
 def list_enabled_codebase_tool_defs(chat_id: str) -> list[dict[str, Any]]:
     project = get_active_codebase_project(chat_id)
     if project is None:
@@ -126,16 +140,29 @@ def list_enabled_codebase_tool_defs(chat_id: str) -> list[dict[str, Any]]:
         },
         {
             "name": "codebase_search",
-            "description": f"Search for a pattern across files in the '{project.name}' codebase.",
+            "description": (
+                f"Search every file in the '{project.name}' codebase for a pattern. This is how "
+                "you find where something is defined or used. Matches are case-insensitive and "
+                "come back with the file path, the line number, and a few lines of surrounding "
+                "code so you can tell a definition from a call site. Hidden and gitignored files "
+                "(including .env) are searched too. Up to 100 matches are returned; the result "
+                "says how many files were looked at and whether it hit that limit. "
+                "IMPORTANT: an empty result does NOT mean the thing does not exist. Before you "
+                "say something is missing, search again for a shorter or partial name (search "
+                "'get_db_conn', not 'get_db_connection(conn, opts)'), try regex=false to match "
+                "the text literally, and list or read the directory you expect it in. Say which "
+                "of those you tried."
+            ),
             "is_read_only": True,
             "depends_on": [],
             "requires_user_prompt": False,
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Text or regular expression to search for."},
+                    "pattern": {"type": "string", "description": "Text or regular expression to search for. Prefer a short distinctive fragment (a function name) over a long exact line."},
                     "path": {"type": "string", "description": "Directory to search within, relative to the project root.", "default": "."},
-                    "regex": {"type": "boolean", "description": "Treat pattern as a regular expression.", "default": True},
+                    "regex": {"type": "boolean", "description": "Treat pattern as a regular expression. Set false to match the text literally, which is what you want for patterns containing ( ) [ ] . $ or |.", "default": True},
+                    "context": {"type": "integer", "description": "Lines of surrounding code to include with each match.", "default": 2},
                 },
                 "required": ["pattern"],
             },
@@ -242,7 +269,13 @@ def list_enabled_codebase_tool_defs(chat_id: str) -> list[dict[str, Any]]:
                 "claim success in that case. Use non-interactive commands that exit on their "
                 "own (e.g. 'python main.py', 'npm test', 'npm run build'); never start a "
                 "long-running server or a command that waits for input, as it will just time "
-                "out. Commands run from the project root unless you set cwd."
+                "out. Commands run from the project root unless you set cwd. "
+                "The project's own .env / .Renviron is ALREADY loaded into the environment, so "
+                "its database credentials and hostnames are present: call the project's existing "
+                "connection helper (e.g. Rscript -e \"source('shared/db_helpers.R'); "
+                "con <- get_db_connection(); ...\" or python -c \"import db; ...\") and it will "
+                "connect. Never invent a connection string, never ask the user for a password, "
+                "and never print credentials to stdout."
             ),
             "is_read_only": False,
             "depends_on": [],
@@ -325,6 +358,8 @@ async def call_codebase_tool(chat_id: str, project: CodebaseProject, tool_name: 
 
     elif op == "search":
         params.update(pattern=args["pattern"], path=path, regex=bool(args.get("regex", True)))
+        if args.get("context") is not None:
+            params["context"] = _coerce_int(args.get("context"), default=2, low=0, high=10)
 
     elif op == "edit_file":
         if not project.write_enabled:
@@ -407,14 +442,14 @@ async def call_codebase_tool(chat_id: str, project: CodebaseProject, tool_name: 
             }
         params.update(command=command, cwd=args.get("cwd") or ".")
         if args.get("timeout") is not None:
-            params["timeout"] = args["timeout"]
+            params["timeout"] = _coerce_int(args.get("timeout"), default=120, low=1, high=600)
 
     try:
         if op == "run_command":
             # A build/test can take much longer than the 20s default WS timeout.
             # Give the socket the command's own timeout plus margin so the agent
             # gets to finish and report, rather than the hub timing out first.
-            cmd_timeout = min(int(args.get("timeout") or 120), 600)
+            cmd_timeout = _coerce_int(args.get("timeout"), default=120, low=1, high=600)
             result = await conn.send_command(op, params, timeout=float(cmd_timeout + 20))
         else:
             result = await conn.send_command(op, params)
