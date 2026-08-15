@@ -4,6 +4,7 @@ import { answerQuestion, decideApproval, getChat, getCodebaseProjects, sendMessa
 import { ApprovalCard } from './ApprovalCard'
 import { QuestionCard } from './QuestionCard'
 import { useAgentEvent } from '../../hooks/useAgentEvent'
+import { summarizeToolResult } from '../../lib/toolResult'
 import { Composer } from './Composer'
 import { EmptyState } from './EmptyState'
 import { MessageBubble } from './MessageBubble'
@@ -464,13 +465,16 @@ export function ChatThread({ chatId, onOpenArtifact, onChatCreated }: ChatThread
       const resultStr = payload.result as string
       const callId = typeof payload.call_id === 'string' ? payload.call_id : ''
       const messageId = event.message_id || pendingMessageId
-      // Flip the matching tool card to done with a short result preview.
+      // Flip the matching tool card to done and attach the shaped result, so
+      // the live card shows the same command output / match list the reloaded
+      // transcript will. A raw JSON prefix used to go in `summary`, which read
+      // as noise and hid the output entirely for run_command.
       if (callId) {
-        setPendingBlocks(prev => prev.map(b =>
-          b.kind === 'tool' && b.callId === callId
-            ? { ...b, status: 'done', summary: (resultStr || '').slice(0, 140) }
-            : b,
-        ))
+        setPendingBlocks(prev => prev.map(b => {
+          if (b.kind !== 'tool' || b.callId !== callId) return b
+          const shaped = summarizeToolResult(b.toolName, resultStr || '')
+          return { ...b, status: 'done', ...(shaped ? { result: shaped } : {}) }
+        }))
       }
       if (messageId && resultStr) {
         try {

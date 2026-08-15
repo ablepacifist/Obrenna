@@ -207,15 +207,36 @@ export async function downloadPdfUrl(id: string): Promise<string> {
 // ── chat ──────────────────────────────────────────────────────────────────────
 
 // Ordered content blocks for an assistant message. The backend streams these
-// as discrete events (token / tool_call / tool_result) so the UI can render an
-// interleaved cadence — prose → tool card → prose → tool card — instead of one
-// flat string. `blocks` is UI-only: the backend still persists flat `text`
-// (Step 7 will persist blocks server-side); the frontend attaches blocks
-// in-memory for the in-flight and just-completed message so the cadence
-// survives the done-transition within a session, then falls back to flat text
-// on reload.
+// as discrete events (token / tool_call / tool_result / thinking_delta) so the
+// UI can render an interleaved cadence — prose → tool card → prose → tool card
+// — instead of one flat string. Blocks are persisted server-side alongside the
+// flat `text`, so a reloaded transcript replays the same cadence the user
+// watched, diffs and command output included.
+
+// What a tool produced, in the shape the card renders. Mirrors
+// `_render_result_for_block` in backend/app/routers/chat.py — keep the two in
+// step, or a reloaded transcript stops matching the live one.
+export type ToolResultSummary = {
+  // codebase_run_command
+  exitCode?: number | null
+  stdout?: string
+  stderr?: string
+  timedOut?: boolean
+  // codebase_search
+  matchCount?: number
+  paths?: string[]
+  // codebase_read_file / codebase_list_directory
+  path?: string
+  lineCount?: number
+  entryCount?: number
+  truncated?: boolean
+}
+
 export type MessageBlock =
   | { kind: 'text'; text: string }
+  // The model's reasoning. Streamed as thinking_delta and persisted, so "what
+  // was it thinking" survives the end of the turn and a reload.
+  | { kind: 'thinking'; text: string }
   | {
       kind: 'tool'
       callId: string
@@ -224,6 +245,7 @@ export type MessageBlock =
       status: 'running' | 'done' | 'error'
       summary?: string
       description?: string
+      result?: ToolResultSummary
     }
   // A write awaiting your decision. Lives in the block list so it renders in
   // the right place in the cadence (after the prose that led up to it). While

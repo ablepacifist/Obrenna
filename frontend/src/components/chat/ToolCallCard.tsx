@@ -1,4 +1,4 @@
-import { Check, FileX2, Loader2, MoveRight, Terminal, Wrench } from 'lucide-react'
+import { Check, FileX2, Loader2, MoveRight, Search, Terminal, Wrench } from 'lucide-react'
 import type { MessageBlock } from '../../lib/api'
 
 type ToolBlock = Extract<MessageBlock, { kind: 'tool' }>
@@ -114,16 +114,101 @@ function ChangeDetail({ block }: { block: ToolBlock }) {
     case 'codebase_run_command': {
       const command = str(a.command)
       if (!command) return null
+      const r = block.result
+      const failed = r ? r.timedOut || (r.exitCode !== undefined && r.exitCode !== 0) : false
       return (
-        <div className="mt-1.5 px-2 py-1 rounded-md border border-(--border) bg-(--surface) text-(--ink) text-[11px] font-mono flex items-start gap-1.5 overflow-x-auto">
-          <Terminal className="w-3 h-3 shrink-0 mt-0.5 text-(--ink-faint)" />
-          <span className="whitespace-pre">{command}</span>
-        </div>
+        <>
+          <div className="mt-1.5 px-2 py-1 rounded-md border border-(--border) bg-(--surface) text-(--ink) text-[11px] font-mono flex items-start gap-1.5 overflow-x-auto">
+            <Terminal className="w-3 h-3 shrink-0 mt-0.5 text-(--ink-faint)" />
+            <span className="whitespace-pre">{command}</span>
+          </div>
+          {/* The output. Without this the card showed that a command ran and
+              never what it printed — the single thing the user wanted to see. */}
+          {r && (r.stdout || r.stderr || r.exitCode !== undefined) && (
+            <div className="mt-1 rounded-md border border-(--border) overflow-hidden">
+              {r.stdout && <OutputStream text={r.stdout} />}
+              {r.stderr && <OutputStream text={r.stderr} tone="error" />}
+              <div className={`px-2 py-0.5 text-[10px] font-mono ${
+                failed ? 'bg-red-500/10 text-red-600 dark:text-red-400' : 'bg-(--surface) text-(--ink-faint)'
+              }`}>
+                {r.timedOut ? 'timed out' : `exit ${r.exitCode ?? '?'}`}
+              </div>
+            </div>
+          )}
+        </>
+      )
+    }
+    case 'codebase_search': {
+      const pattern = str(a.pattern)
+      const r = block.result
+      if (!pattern && !r) return null
+      return (
+        <>
+          {pattern && (
+            <div className="mt-1.5 px-2 py-1 rounded-md border border-(--border) bg-(--surface) text-(--ink) text-[11px] font-mono flex items-start gap-1.5 overflow-x-auto">
+              <Search className="w-3 h-3 shrink-0 mt-0.5 text-(--ink-faint)" />
+              <span className="whitespace-pre">{pattern}</span>
+            </div>
+          )}
+          {r?.matchCount !== undefined && (
+            <div className="mt-1 px-2 py-1 rounded-md border border-(--border) bg-(--surface) text-[11px]">
+              <div className="text-(--ink-muted)">
+                {r.matchCount === 0
+                  ? 'no matches'
+                  : `${r.matchCount} match${r.matchCount === 1 ? '' : 'es'}${r.truncated ? ' (capped)' : ''}`}
+              </div>
+              {r.paths?.map(p => (
+                <div key={p} className="font-mono text-(--ink-faint) truncate">{p}</div>
+              ))}
+            </div>
+          )}
+        </>
+      )
+    }
+    case 'codebase_read_file': {
+      const shown = path || str(block.result?.path)
+      if (!shown) return null
+      const lines = block.result?.lineCount
+      return (
+        <PathHeader>
+          {shown}
+          {lines !== undefined && <span className="text-(--ink-faint)"> · {lines} lines</span>}
+          {block.result?.truncated && <span className="text-(--ink-faint)"> · truncated</span>}
+        </PathHeader>
+      )
+    }
+    case 'codebase_list_directory': {
+      const count = block.result?.entryCount
+      return (
+        <PathHeader>
+          {path || '.'}
+          {count !== undefined && (
+            <span className="text-(--ink-faint)">
+              {' '}· {count} entr{count === 1 ? 'y' : 'ies'}{block.result?.truncated ? '+' : ''}
+            </span>
+          )}
+        </PathHeader>
       )
     }
     default:
       return null
   }
+}
+
+/** A captured stdout/stderr stream, scrollable so a long log doesn't take over
+ *  the transcript. */
+function OutputStream({ text, tone }: { text: string; tone?: 'error' }) {
+  return (
+    <div
+      className={`px-2 py-1 max-h-48 overflow-auto text-[11px] font-mono whitespace-pre-wrap break-words ${
+        tone === 'error'
+          ? 'bg-red-500/5 text-red-600 dark:text-red-400'
+          : 'bg-(--surface) text-(--ink-muted)'
+      }`}
+    >
+      {text}
+    </div>
+  )
 }
 
 export function ToolCallCard({ block }: ToolCallCardProps) {

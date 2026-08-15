@@ -5,7 +5,7 @@ import type { ChatMessageDTO } from '../../lib/api'
 import { getArtifact } from '../../lib/api'
 import { ArtifactCard } from '../artifacts/ArtifactCard'
 import { MarkdownContent } from './MarkdownContent'
-import { ThinkingPane } from './ThinkingPane'
+import { ThinkingBlock, ThinkingPane } from './ThinkingPane'
 import { ToolCallCard } from './ToolCallCard'
 import { useTheme } from '../../theme/ThemeProvider'
 import ObrennaMono from '../../assets/logos/ObrennaMono.png'
@@ -83,12 +83,15 @@ export function MessageBubble({ msg, onOpenArtifact }: MessageBubbleProps) {
         <div className="text-[14px] text-(--ink)">
           {msg.blocks && msg.blocks.length > 0 ? (
             <div className="space-y-2">
-              {/* Only text and tool blocks are persisted. Approval/question
-                  blocks are live-only prompts — once decided they're part of
-                  the tool card's own record, so there's nothing to replay. */}
+              {/* Text, reasoning and tool blocks are persisted. Approval and
+                  question blocks are live-only prompts — once decided they're
+                  part of the tool card's own record, so there's nothing to
+                  replay. */}
               {msg.blocks.map((b, i) =>
                 b.kind === 'text' ? (
                   <MarkdownContent key={i}>{b.text}</MarkdownContent>
+                ) : b.kind === 'thinking' ? (
+                  <ThinkingBlock key={i} text={b.text} />
                 ) : b.kind === 'tool' ? (
                   <ToolCallCard key={i} block={b} />
                 ) : null,

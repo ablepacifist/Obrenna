@@ -1,15 +1,23 @@
+import { useState } from 'react'
+
 interface ThinkingPaneProps {
   text: string
   expanded: boolean
   onExpandedChange: (expanded: boolean) => void
+  /** Live means the model is still reasoning: pulse the dot, use present tense.
+   *  False is a finished trace replayed from the transcript. */
+  live?: boolean
 }
 
 /**
- * Collapsible pane that shows an ephemeral reasoning/thinking trace streaming
- * from the model. Not persisted — only renders for the in-flight assistant
- * message. Auto-collapsed by ChatThread once answer content begins streaming.
+ * Collapsible pane showing the model's reasoning trace.
+ *
+ * Used twice: streaming, for the in-flight message (ChatThread auto-collapses
+ * it once answer tokens begin), and afterwards via ThinkingBlock for the
+ * persisted `thinking` block. Reasoning used to be discarded at `done`, so the
+ * answer to "what were you thinking?" disappeared the moment it mattered.
  */
-export function ThinkingPane({ text, expanded, onExpandedChange }: ThinkingPaneProps) {
+export function ThinkingPane({ text, expanded, onExpandedChange, live = true }: ThinkingPaneProps) {
   if (!text.trim()) return null
 
   return (
@@ -21,8 +29,8 @@ export function ThinkingPane({ text, expanded, onExpandedChange }: ThinkingPaneP
         aria-expanded={expanded}
       >
         <span className="inline-flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-(--accent) animate-pulse" />
-          Thinking
+          <span className={`w-1.5 h-1.5 rounded-full bg-(--accent) ${live ? 'animate-pulse' : ''}`} />
+          {live ? 'Thinking' : 'Thought process'}
         </span>
         <span className="text-[11px] text-(--ink-faint)">{expanded ? 'Hide' : 'Show'}</span>
       </button>
@@ -33,4 +41,11 @@ export function ThinkingPane({ text, expanded, onExpandedChange }: ThinkingPaneP
       )}
     </div>
   )
+}
+
+/** A persisted reasoning block in a replayed transcript. Collapsed by default —
+ *  it is reference material, not the answer. */
+export function ThinkingBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  return <ThinkingPane text={text} expanded={expanded} onExpandedChange={setExpanded} live={false} />
 }
