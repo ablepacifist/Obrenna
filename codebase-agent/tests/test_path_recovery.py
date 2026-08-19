@@ -180,3 +180,24 @@ class TestFindFilesDispatch:
         out = dispatch.op_find_files({"project_id": "p", "pattern": "nothing_like_this"})
         assert out["match_count"] == 0
         assert "Do not report the file as missing" in out["note"]
+
+
+class TestCapabilityReporting:
+    """The backend needs to know what this build can do, so it never offers the
+    model a tool that answers "Unknown operation"."""
+
+    def test_every_dispatchable_op_is_reported(self):
+        from codebase_agent.dispatch import _OPS, supported_ops
+        assert set(supported_ops()) == set(_OPS)
+
+    def test_the_new_op_is_included(self):
+        from codebase_agent.dispatch import supported_ops
+        assert "find_files" in supported_ops()
+
+    def test_the_hello_frame_carries_it(self):
+        """The list travels at connect; without it the backend assumes an old
+        build and withholds the newer tools."""
+        import inspect
+        from codebase_agent import ws_client
+        src = inspect.getsource(ws_client._run_once)
+        assert '"ops": supported_ops()' in src

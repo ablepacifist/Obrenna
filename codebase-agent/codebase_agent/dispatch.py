@@ -352,3 +352,12 @@ def dispatch(op: str, params: dict[str, Any]) -> dict[str, Any]:
         return _err(f"Missing required parameter: {exc}")
     except Exception as exc:  # noqa: BLE001 -- never let an unexpected error kill the connection
         return _err(f"Unexpected error handling '{op}': {exc}")
+
+
+def supported_ops() -> list[str]:
+    """Op names this agent build can actually perform.
+
+    Reported at connect so the backend can avoid advertising a tool that would
+    come back as "Unknown operation".
+    """
+    return sorted(_OPS)

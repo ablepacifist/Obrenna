@@ -314,6 +314,17 @@ def list_enabled_codebase_tool_defs(chat_id: str) -> list[dict[str, Any]]:
             },
         })
 
+    # Drop anything the connected agent is too old to perform. Offering a tool
+    # that answers "Unknown operation: find_files" is worse than not offering
+    # it: the model reads that as the task being impossible and abandons the
+    # whole approach, rather than reaching for the tool that does exist.
+    conn = get_codebase_agent_hub().get(project.device_id)
+    supports = getattr(conn, "supports", None)
+    # Filter only when the transport can actually answer the question. An
+    # in-process or stubbed connection has no capability view, and defaulting
+    # those to "supports nothing" would silently disarm every codebase tool.
+    if callable(supports):
+        defs = [d for d in defs if supports(_OP_BY_TOOL_NAME.get(d["name"], ""))]
     return defs
 
 

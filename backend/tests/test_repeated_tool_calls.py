@@ -161,3 +161,122 @@ class TestRepeatSuppression:
             [call("codebase_search", {"pattern": "x"}, "c2")], mcp, call_history=history,
         )
         assert "found.R" in again[0]["content"], "the retry after a failure must really run"
+
+
+@pytest.mark.asyncio
+class TestEscalation:
+    """One polite note did not break the loop.
+
+    In the wild the model read "you already ran this", acknowledged it, and
+    re-issued the same search anyway — three times — then ran out of rounds with
+    no answer at all. The second repeat has to stop being a suggestion.
+    """
+
+    async def _repeat(self, times: int):
+        mcp = FakeMCP()
+        history: dict[str, str] = {}
+        counts: dict[str, int] = {}
+        out = []
+        for i in range(times):
+            out = await handle_tool_calls(
+                [call("codebase_search", {"pattern": r"Alex\.D"}, f"c{i}")],
+                mcp, call_history=history, repeat_counts=counts,
+            )
+        return json.loads(out[0]["content"])
+
+    async def test_the_first_repeat_is_a_note(self):
+        payload = await self._repeat(2)
+        assert payload["repeat_count"] == 1
+        assert "STOP" not in payload["message"]
+
+    async def test_the_second_repeat_says_stop(self):
+        payload = await self._repeat(3)
+        assert payload["repeat_count"] == 2
+        assert "STOP" in payload["message"]
+
+    async def test_escalation_points_at_the_database(self):
+        """The observed loop was a search for a person's name — a value that
+        lives in data, not source."""
+        payload = await self._repeat(3)
+        assert "codebase_run_command" in payload["message"]
+        assert "DATA" in payload["message"]
+
+    async def test_escalation_tells_it_to_answer(self):
+        payload = await self._repeat(4)
+        assert "answer the user now" in payload["message"]
+
+    async def test_counts_carry_across_rounds(self):
+        """Each round is a separate handle_tool_calls call; without shared state
+        every repeat would look like the first."""
+        mcp = FakeMCP()
+        history: dict[str, str] = {}
+        counts: dict[str, int] = {}
+        for i in range(4):
+            await handle_tool_calls(
+                [call("codebase_search", {"pattern": "x"}, f"c{i}")],
+                mcp, call_history=history, repeat_counts=counts,
+            )
+        assert counts[_call_signature("codebase_search", {"pattern": "x"})] == 3
+
+
+@pytest.mark.asyncio
+class TestFileReadIsRoutedToTheProject:
+    """file_read is the attachment/allowlist reader, not the project reader.
+
+    Asked for the schema document, the model called file_read with a project
+    path and got "Path not in allowlist: documents/DATABASE_SCHEMA_REFERENCE.md".
+    It read that as "the documentation is unavailable", stopped trying to read
+    docs, and spent the rest of the turn guessing from source.
+    """
+
+    async def test_a_project_path_is_read_from_the_codebase(self, monkeypatch):
+        import app.agent.runtime as rt
+        seen = {}
+
+        async def fake_codebase(chat_id, project, name, args):
+            seen["name"], seen["args"] = name, args
+            return {"path": args["path"], "content": "# Schema\n"}
+
+        monkeypatch.setattr(rt, "get_active_codebase_project", lambda cid: object())
+        monkeypatch.setattr(rt, "call_codebase_tool", fake_codebase)
+
+        results = await handle_tool_calls(
+            [call("file_read", {"path": "documents/DATABASE_SCHEMA_REFERENCE.md"})],
+            FakeMCP(), chat_id="chat1",
+        )
+        assert seen["name"] == "codebase_read_file"
+        assert seen["args"]["path"] == "documents/DATABASE_SCHEMA_REFERENCE.md"
+        assert "# Schema" in results[0]["content"]
+
+    async def test_the_substitution_is_explained_not_silent(self, monkeypatch):
+        import app.agent.runtime as rt
+
+        async def fake_codebase(chat_id, project, name, args):
+            return {"path": args["path"], "content": "x"}
+
+        monkeypatch.setattr(rt, "get_active_codebase_project", lambda cid: object())
+        monkeypatch.setattr(rt, "call_codebase_tool", fake_codebase)
+        results = await handle_tool_calls(
+            [call("file_read", {"path": "docs/a.md"})], FakeMCP(), chat_id="chat1",
+        )
+        assert "codebase_read_file" in json.loads(results[0]["content"])["note"]
+
+    async def test_an_uploaded_attachment_read_is_untouched(self, monkeypatch):
+        """file_id reads are genuine attachment reads and must still work."""
+        import app.agent.runtime as rt
+        monkeypatch.setattr(rt, "get_active_codebase_project", lambda cid: object())
+        mcp = FakeMCP(result={"content": "attachment body"})
+        results = await handle_tool_calls(
+            [call("file_read", {"file_id": "abc123"})], mcp, chat_id="chat1",
+        )
+        assert mcp.calls and mcp.calls[0][0] == "file_read"
+        assert "attachment body" in results[0]["content"]
+
+    async def test_without_a_codebase_file_read_behaves_normally(self, monkeypatch):
+        import app.agent.runtime as rt
+        monkeypatch.setattr(rt, "get_active_codebase_project", lambda cid: None)
+        mcp = FakeMCP(result={"error": True, "message": "Path not in allowlist: x"})
+        results = await handle_tool_calls(
+            [call("file_read", {"path": "x"})], mcp, chat_id="chat1",
+        )
+        assert mcp.calls[0][0] == "file_read"

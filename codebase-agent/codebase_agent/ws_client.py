@@ -17,7 +17,7 @@ import logging
 import websockets
 
 from .auth import default_device_name, get_or_create_device_id
-from .dispatch import dispatch
+from .dispatch import dispatch, supported_ops
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,17 @@ async def _run_once(server: str, device_id: str, device_name: str, token: str = 
     # browser login cookie the agent cannot obtain.
     headers = {"Authorization": f"Bearer {token}"} if token else None
     async with websockets.connect(url, additional_headers=headers) as ws:
-        await ws.send(json.dumps({"type": "hello", "device_id": device_id, "device_name": device_name}))
+        # The op list travels with the hello so the backend never offers the
+        # model a tool this agent cannot perform. Without it, an agent older
+        # than the backend answers a new tool with "Unknown operation: X" --
+        # which the model reads as the task being impossible, not as a version
+        # skew, and abandons the approach.
+        await ws.send(json.dumps({
+            "type": "hello",
+            "device_id": device_id,
+            "device_name": device_name,
+            "ops": supported_ops(),
+        }))
         ack = json.loads(await ws.recv())
         if ack.get("approved"):
             print(f"Connected to {server} -- approved and ready.")

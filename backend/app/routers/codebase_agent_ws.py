@@ -89,6 +89,12 @@ async def codebase_agent_connect(websocket: WebSocket):
         return
 
     conn = await hub.register(device_id, websocket)
+    # An agent older than the backend sends no op list. Recorded as None, which
+    # means "unknown" — the tool layer then offers only the ops every version
+    # has ever had, rather than advertising one that comes back as
+    # "Unknown operation" and reads to the model as an impossible task.
+    ops = hello.get("ops")
+    conn.supported_ops = set(ops) if isinstance(ops, list) else None
     await websocket.send_text(json.dumps({"type": "hello_ack", "approved": device.approved}))
     logger.info("codebase-agent device connected: %s (%s), approved=%s", device_name, device_id, device.approved)
 

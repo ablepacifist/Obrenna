@@ -405,17 +405,14 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "1. NEVER claim you created, edited, moved, or deleted a file unless a tool "
     "result in THIS turn confirmed it succeeded. If you have not called the tool "
     "yet, call it now — do not say 'Done!' first.\n"
-    "1b. The same applies to LOOKING. Never say you searched, checked, read, or "
-    "could not find something unless a tool result in this turn actually shows "
-    "that. 'My searches did not locate it' with no search call in this turn is a "
-    "fabrication — run the search instead.\n"
-    "1c. A FAILED file read is not proof a file is missing. The path you guessed "
-    "was probably wrong: the error tells you where the file really is, or tells "
-    "you to search. Follow it. Never report a file as absent on the strength of "
-    "one failed read.\n"
-    "2. Report file paths EXACTLY as they appear in the tool result's 'path' field, "
-    "never from memory or assumption. If unsure where a file is, call "
-    "codebase_list_directory or codebase_search to find it before naming a path.\n"
+    "1b. The same applies to LOOKING. Never say you searched, read, or could not "
+    "find something unless a tool result in this turn shows it. 'My searches did "
+    "not locate it' with no search call is a fabrication.\n"
+    "1c. A FAILED file read is not proof a file is missing — your path was "
+    "probably wrong. The error says where the file really is, or to search. "
+    "Follow it.\n"
+    "2. Report file paths EXACTLY as they appear in the tool result's 'path' "
+    "field, never from memory. Unsure where a file is? codebase_find_files.\n"
     "3. To MOVE or RENAME a file, use codebase_move_file — do not write a copy and "
     "leave the original. To DELETE a file, use codebase_delete_file — do not try to "
     "blank it with codebase_edit_file. To create a new file at the project root, use "
@@ -440,6 +437,11 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "`python -c ...`): list tables, describe columns, sample rows. Read the "
     "output and use it. Prefer read-only queries; never modify data to answer "
     "a question.\n"
+    "   - A NAME, code or status VALUE (a person, a site, a priority, a date) "
+    "is DATA, not code. Searching source for 'Alex.D' finds nothing because it "
+    "was never there — look it up in the database (SELECT DISTINCT on the "
+    "column) and use what comes back. Two failed code searches for a value "
+    "means you are searching the wrong thing entirely.\n"
     "   - Schema docs go stale. If a doc and the live database disagree, the "
     "database is right. Check the database, and say so if you could not.\n"
     "4d. KEEP GOING UNTIL YOU HAVE THE ANSWER. These end a turn as a failure:\n"
@@ -786,6 +788,7 @@ async def orchestrate_turn(
     # Turn-scoped so a repeat is detectable across rounds -- the observed loop
     # was the SAME search re-issued eight rounds running.
     call_history: dict[str, str] = {}
+    repeat_counts: dict[str, int] = {}
 
     async def _handle_tool_calls_with_trace(
         calls: list[dict],
@@ -796,7 +799,7 @@ async def orchestrate_turn(
         try:
             return await handle_tool_calls(
                 calls, mcp_client, trace_context=ctx, user_message=user_message, chat_id=chat_id,
-                blocked_calls=blocked, call_history=call_history,
+                blocked_calls=blocked, call_history=call_history, repeat_counts=repeat_counts,
             )
         except TypeError as exc:
             if "trace_context" not in str(exc):
@@ -2528,6 +2531,12 @@ def _fallback_answer_from_tool_results(
             if isinstance(item, dict) and (item.get("title") or item.get("snippet")):
                 search_items.append(item)
 
+        # A repeat notice is scaffolding aimed at the model, not evidence. It
+        # used to be dumped verbatim into the user's answer, so a turn that
+        # looped ended by showing them three copies of "You already ran this
+        # exact call" and nothing about their question.
+        if isinstance(parsed, dict) and parsed.get("repeated_call"):
+            continue
         if not candidates and raw:
             other_notes.append(f"{tool_name}: {raw[:300]}")
 
@@ -2683,6 +2692,18 @@ _DEDUPABLE_TOOLS = frozenset({
 })
 
 
+def _is_project_file_read(tool_name: str, args: dict) -> bool:
+    """A ``file_read`` aimed at a project path rather than an uploaded file.
+
+    ``file_id`` reads are genuine attachment reads and are left alone; only a
+    bare ``path`` is the confusion case, since that path can only have come
+    from looking at the project.
+    """
+    if tool_name != "file_read" or not isinstance(args, dict):
+        return False
+    return bool(args.get("path")) and not args.get("file_id")
+
+
 def _call_signature(tool_name: str, args: dict) -> str:
     """Stable key for "the same call again", or "" if it must not be de-duped."""
     if tool_name not in _DEDUPABLE_TOOLS:
@@ -2702,6 +2723,7 @@ async def handle_tool_calls(
     chat_id: str | None = None,
     blocked_calls: dict[str, str] | None = None,
     call_history: dict[str, str] | None = None,
+    repeat_counts: dict[str, int] | None = None,
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
@@ -2766,6 +2788,9 @@ async def handle_tool_calls(
     trace_event("tool_plan_built", **(trace_context or {}), plan=plan)
 
     results: list[dict | None] = [None] * len(tool_calls)
+    # Turn-scoped when the caller supplies it: the escalation only works if
+    # a repeat in round 5 knows about the one in round 4.
+    repeat_counts = repeat_counts if repeat_counts is not None else {}
 
     async def _exec(item: dict) -> dict:
         tool_name = item["name"]
@@ -2828,25 +2853,42 @@ async def handle_tool_calls(
         # until the round cap, ending the turn mid-sentence.
         signature = _call_signature(tool_name, item["args"])
         if call_history is not None and signature and signature in call_history:
+            repeats = repeat_counts.get(signature, 0) + 1
+            repeat_counts[signature] = repeats
             trace_event(
                 "tool_call_repeat_suppressed",
                 **(trace_context or {}),
                 tool_name=tool_name,
                 call_id=item["call_id"],
                 arguments=item["args"],
+                repeat_count=repeats,
             )
+            # Escalate. A single polite note did not break the loop in the wild:
+            # the model acknowledged it and re-issued the same search anyway,
+            # burning the whole round budget and ending with no answer at all.
+            if repeats == 1:
+                message = (
+                    f"You already ran this exact {tool_name} call in this turn. It was not "
+                    "run again — its original result is below, unchanged. Repeating it "
+                    "cannot tell you anything new. Either use this result to answer, or "
+                    "do something DIFFERENT: a different pattern, a different path, a "
+                    "different tool."
+                )
+            else:
+                message = (
+                    f"STOP. This is repeat #{repeats} of the same {tool_name} call. Searching "
+                    "is not working for this. If you are looking for a VALUE (a name, a code, "
+                    "a status) it is DATA — query the database with codebase_run_command "
+                    "instead. Otherwise answer the user now with what you already have, and "
+                    "say plainly what you could not find. Do NOT search again."
+                )
             return {
                 "tool_call_id": item["call_id"],
                 "tool_name": tool_name,
                 "content": json.dumps({
                     "repeated_call": True,
-                    "message": (
-                        f"You already ran this exact {tool_name} call in this turn. It was not "
-                        "run again — its original result is below, unchanged. Repeating it "
-                        "cannot tell you anything new. Either use this result to answer, or "
-                        "do something DIFFERENT: a different pattern, a different path, a "
-                        "different tool."
-                    ),
+                    "repeat_count": repeats,
+                    "message": message,
                     "original_result": call_history[signature],
                 }),
             }
@@ -2859,10 +2901,31 @@ async def handle_tool_calls(
                 arguments=item["args"],
                 parallel=item["parallel"],
             )
-            if tool_name.startswith("codebase_") and chat_id is not None:
+            dispatch_name, dispatch_args = tool_name, item["args"]
+            substituted_from = None
+            if chat_id is not None and _is_project_file_read(tool_name, dispatch_args):
+                # file_read is the built-in attachment/allowlist reader; the model
+                # reaches for it by name when it wants a project file and gets
+                # "Path not in allowlist: documents/DATABASE_SCHEMA_REFERENCE.md",
+                # which reads as "that document is unavailable" — it then stopped
+                # trying to read docs at all. Route it to the codebase instead.
+                if get_active_codebase_project(chat_id) is not None:
+                    dispatch_name = "codebase_read_file"
+                    dispatch_args = {"path": dispatch_args.get("path", "")}
+                    substituted_from = tool_name
+            if dispatch_name.startswith("codebase_") and chat_id is not None:
                 codebase_project = get_active_codebase_project(chat_id)
                 if codebase_project is not None:
-                    result = await call_codebase_tool(chat_id, codebase_project, tool_name, item["args"])
+                    result = await call_codebase_tool(chat_id, codebase_project, dispatch_name, dispatch_args)
+                    if substituted_from and isinstance(result, dict):
+                        result = {
+                            **result,
+                            "note": (
+                                f"'{substituted_from}' does not read project files — this was read "
+                                "with codebase_read_file. Use codebase_read_file for anything in "
+                                "this project."
+                            ),
+                        }
                 else:
                     result = {"error": True, "message": "No active codebase project is bound to this chat."}
             else:
