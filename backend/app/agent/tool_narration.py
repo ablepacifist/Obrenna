@@ -35,6 +35,7 @@ FALLBACK_NARRATION: dict[str, str] = {
     "codebase_list_directory": "Listing the project",
     "codebase_read_file": "Reading a project file",
     "codebase_search": "Searching the codebase",
+    "codebase_find_files": "Looking for files by name",
     "codebase_edit_file": "Editing a project file",
     "codebase_write_file": "Writing a project file",
     "codebase_delete_file": "Deleting a project file",

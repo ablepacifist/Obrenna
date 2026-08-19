@@ -153,3 +153,31 @@ describe('ToolCallCard: existing write rendering still works', () => {
     expect(screen.getByText(/\+ new line/)).toBeTruthy()
   })
 })
+
+describe('ToolCallCard: a failed call says why', () => {
+  // The reason lived in `summary` but only rendered on status 'done', so a
+  // failed tool showed the bare word "error". A user could not tell a wrong
+  // path from a disconnected device — and neither could the model's user.
+  it('shows the error message, not just the word error', () => {
+    render(<ToolCallCard block={block({
+      toolName: 'codebase_read_file',
+      args: { path: 'DATABASE_SCHEMA_REFERENCE.md' },
+      status: 'error',
+      summary: 'Not a file: DATABASE_SCHEMA_REFERENCE.md. A file with that name exists elsewhere in the project: documents/DATABASE_SCHEMA_REFERENCE.md. Retry with one of those exact paths.',
+    })} />)
+
+    expect(screen.getByText(/documents\/DATABASE_SCHEMA_REFERENCE\.md/)).toBeTruthy()
+  })
+
+  it('does not clamp the error, since the recovery is at the end of it', () => {
+    const msg = 'Not a file: x.md. Retry with documents/x.md.'
+    render(<ToolCallCard block={block({ status: 'error', summary: msg })} />)
+    const el = screen.getByText(new RegExp('Retry with documents'))
+    expect(el.className).not.toContain('line-clamp')
+  })
+
+  it('still shows a successful summary as before', () => {
+    render(<ToolCallCard block={block({ status: 'done', summary: 'all good' })} />)
+    expect(screen.getByText('all good')).toBeTruthy()
+  })
+})

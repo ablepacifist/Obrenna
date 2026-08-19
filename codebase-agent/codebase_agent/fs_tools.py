@@ -7,6 +7,7 @@ new-file-only and simpler.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Optional
 
@@ -15,10 +16,94 @@ from .pathsafety import PathSafetyError, resolve_safe_path
 
 READ_BYTE_CAP = 250_000
 WRITE_BYTE_CAP = 250_000
+# Bounded so a wrong path costs a walk, not a full scan of a huge repo.
+FIND_MAX_CANDIDATES = 5
+FIND_MAX_DIRS = 4000
 
 
 class FsError(Exception):
     pass
+
+
+def find_files(root: Path, pattern: str, *, limit: int = 100) -> list[str]:
+    """Project-relative paths whose FILENAME matches ``pattern``.
+
+    codebase_search only ever looked inside files, so there was no way to
+    answer "where is the schema reference document?" -- the model resorted to
+    searching file CONTENTS for 'SCHEMA|TABLES|database.*doc' and missed
+    documents/DATABASE_SCHEMA_REFERENCE.md entirely.
+
+    ``pattern`` is a glob when it contains a wildcard ('*.R', 'test_*.py'),
+    otherwise a case-insensitive substring ('schema' finds
+    DATABASE_SCHEMA_REFERENCE.md), which is what a model reaches for first.
+    """
+    needle = pattern.strip()
+    if not needle:
+        return []
+    is_glob = any(ch in needle for ch in "*?[")
+    lowered = needle.lower()
+
+    found: list[str] = []
+    stack = [root]
+    while stack and len(found) < limit:
+        current = stack.pop()
+        try:
+            children = sorted(current.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if child.is_dir():
+                    if not is_excluded_dir(child.name):
+                        stack.append(child)
+                    continue
+                if is_excluded_file(child.name):
+                    continue
+                name = child.name.lower()
+                hit = fnmatch(name, lowered) if is_glob else lowered in name
+                if hit:
+                    found.append(str(child.relative_to(root)).replace("\\", "/"))
+                    if len(found) >= limit:
+                        break
+            except OSError:
+                continue
+    return sorted(found)
+
+
+def find_by_basename(root: Path, wanted: str, *, limit: int = FIND_MAX_CANDIDATES) -> list[str]:
+    """Project-relative paths of files whose name matches ``wanted``.
+
+    Exists so a wrong path can redirect instead of dead-ending. Asking for
+    'DATABASE_SCHEMA_REFERENCE.md' when it lives in 'docs/' returned only
+    "Not a file: DATABASE_SCHEMA_REFERENCE.md", which reads as "that file is
+    not in this project" -- and was reported to the user as exactly that, while
+    the file sat one directory down.
+    """
+    target = Path(wanted).name.lower()
+    if not target:
+        return []
+    found: list[str] = []
+    dirs_seen = 0
+    stack = [root]
+    while stack and len(found) < limit and dirs_seen < FIND_MAX_DIRS:
+        current = stack.pop()
+        dirs_seen += 1
+        try:
+            children = sorted(current.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if child.is_dir():
+                    if not is_excluded_dir(child.name):
+                        stack.append(child)
+                elif child.name.lower() == target and not is_excluded_file(child.name):
+                    found.append(str(child.relative_to(root)).replace("\\", "/"))
+                    if len(found) >= limit:
+                        break
+            except OSError:
+                continue
+    return found
 
 
 @dataclass

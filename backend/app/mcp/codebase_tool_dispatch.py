@@ -41,6 +41,7 @@ _OP_BY_TOOL_NAME = {
     "codebase_list_directory": "list_directory",
     "codebase_read_file": "read_file",
     "codebase_search": "search",
+    "codebase_find_files": "find_files",
     "codebase_edit_file": "edit_file",
     "codebase_write_file": "write_file",
     "codebase_delete_file": "delete_file",
@@ -136,6 +137,28 @@ def list_enabled_codebase_tool_defs(chat_id: str) -> list[dict[str, Any]]:
                     "limit": {"type": "integer", "description": "Maximum number of lines to read."},
                 },
                 "required": ["path"],
+            },
+        },
+        {
+            "name": "codebase_find_files",
+            "description": (
+                f"Find files in the '{project.name}' codebase BY FILENAME. Use this whenever you "
+                "are looking for a file rather than for code inside files — a schema document, a "
+                "config, a README, a helper module. Give a short fragment of the name: 'schema' "
+                "finds documents/DATABASE_SCHEMA_REFERENCE.md. Wildcards work too ('*.R', "
+                "'test_*.py'). Returns full paths relative to the project root. "
+                "codebase_search looks INSIDE files and will not find a file by its name — if you "
+                "want to know where a document lives, use this tool instead."
+            ),
+            "is_read_only": True,
+            "depends_on": [],
+            "requires_user_prompt": False,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Part of a filename ('schema', 'db_helpers') or a glob ('*.R'). Case-insensitive. Shorter is better."},
+                },
+                "required": ["pattern"],
             },
         },
         {
@@ -355,6 +378,9 @@ async def call_codebase_tool(chat_id: str, project: CodebaseProject, tool_name: 
         params.update(path=path, offset=args.get("offset", 0))
         if args.get("limit") is not None:
             params["limit"] = args["limit"]
+
+    elif op == "find_files":
+        params.update(pattern=args.get("pattern", ""))
 
     elif op == "search":
         params.update(pattern=args["pattern"], path=path, regex=bool(args.get("regex", True)))

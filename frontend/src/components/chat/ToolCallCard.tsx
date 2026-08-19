@@ -246,8 +246,20 @@ export function ToolCallCard({ block }: ToolCallCardProps) {
           </details>
         )
       )}
-      {block.summary && block.status === 'done' && (
-        <div className="mt-1 text-(--ink-muted) line-clamp-2 break-words">{block.summary}</div>
+      {/* The reason a call failed lives in `summary`, and this used to render
+          only on 'done' — so a failed tool showed the word "error" and nothing
+          else, leaving no way to tell a missing file from a disconnected
+          device. Errors are shown in full rather than clamped: the message is
+          the whole point, and it now carries the recovery ("...exists at
+          docs/X. Retry with that path"). */}
+      {block.summary && (
+        block.status === 'error' ? (
+          <div className="mt-1 px-2 py-1 rounded-md border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400 text-[11px] break-words">
+            {block.summary}
+          </div>
+        ) : block.status === 'done' ? (
+          <div className="mt-1 text-(--ink-muted) line-clamp-2 break-words">{block.summary}</div>
+        ) : null
       )}
     </div>
   )

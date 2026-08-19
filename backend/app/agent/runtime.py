@@ -387,6 +387,11 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "to check before answering — never assume you lack access without having tried a "
     "tool call first.\n"
     "\n"
+    "0a. LOOKING FOR A FILE vs LOOKING FOR CODE. codebase_find_files searches "
+    "FILENAMES; codebase_search searches INSIDE files. To locate a document, a "
+    "config or a module ('where is the schema reference?'), call "
+    "codebase_find_files with a short fragment like 'schema' — searching file "
+    "contents for a document's title will not find it.\n"
     "0. THIS PROJECT IS THE SOURCE OF TRUTH ABOUT ITSELF. Any question about "
     "what this project contains or how it works — its database tables, schema, "
     "models, API, config, dependencies, structure, or the contents of any file "
@@ -400,6 +405,14 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "1. NEVER claim you created, edited, moved, or deleted a file unless a tool "
     "result in THIS turn confirmed it succeeded. If you have not called the tool "
     "yet, call it now — do not say 'Done!' first.\n"
+    "1b. The same applies to LOOKING. Never say you searched, checked, read, or "
+    "could not find something unless a tool result in this turn actually shows "
+    "that. 'My searches did not locate it' with no search call in this turn is a "
+    "fabrication — run the search instead.\n"
+    "1c. A FAILED file read is not proof a file is missing. The path you guessed "
+    "was probably wrong: the error tells you where the file really is, or tells "
+    "you to search. Follow it. Never report a file as absent on the strength of "
+    "one failed read.\n"
     "2. Report file paths EXACTLY as they appear in the tool result's 'path' field, "
     "never from memory or assumption. If unsure where a file is, call "
     "codebase_list_directory or codebase_search to find it before naming a path.\n"
@@ -416,24 +429,19 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "has an error, fix the code and run it again — iterate until it works before you "
     "report success. Never claim code runs without having run it.\n"
     "4c. LIVE DATA (databases, APIs, services) — when the answer depends on what "
-    "is actually IN a system rather than what the code says about it, get the real "
-    "thing with codebase_run_command instead of guessing from documentation:\n"
-    "   - Find how the project already connects (a connection helper, an "
-    "existing script) and CALL IT. The project's own .env/.Renviron is already "
-    "loaded into the environment of every command you run, so a helper like "
-    "get_db_connection() that reads its credentials from the environment will "
-    "just work. Never invent connection strings, never ask the user for a "
-    "password, and never print credentials.\n"
-    "   - Then run a short script in whatever language the project already uses "
-    "for this (e.g. `Rscript -e ...` for an R project, `python -c ...` for a "
-    "Python one) to introspect: list tables, describe columns, sample a few "
-    "rows. Read the output and use it.\n"
+    "is actually IN a system rather than what the code says about it, get the "
+    "real thing with codebase_run_command:\n"
+    "   - Find how the project already connects (a helper, an existing script) "
+    "and CALL IT. The project's .env/.Renviron is already loaded into every "
+    "command's environment, so a helper like get_db_connection() that reads "
+    "credentials from the environment just works. Never invent connection "
+    "strings, never ask the user for a password, never print credentials.\n"
+    "   - Introspect in the project's own language (`Rscript -e ...`, "
+    "`python -c ...`): list tables, describe columns, sample rows. Read the "
+    "output and use it. Prefer read-only queries; never modify data to answer "
+    "a question.\n"
     "   - Schema docs go stale. If a doc and the live database disagree, the "
-    "database is right. When a question is about real data — which values exist, "
-    "what a column actually contains, whether a table is populated — check the "
-    "database, and say so if you could not.\n"
-    "   - Prefer read-only queries (SELECT, catalog/introspection views). Do not "
-    "modify data to answer a question.\n"
+    "database is right. Check the database, and say so if you could not.\n"
     "4d. KEEP GOING UNTIL YOU HAVE THE ANSWER. These end a turn as a failure:\n"
     "   - Asking the user for something you could look up. If the answer is in "
     "the code, the config, or the database, GO GET IT. Never end with 'what "
@@ -441,18 +449,19 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "point me to the docs?' -- read the project instead. Ask only about a "
     "genuine preference or decision that the project cannot tell you.\n"
     "   - Saying you cannot do something you have not tried THIS TURN. Your "
-    "tool list is the truth about what you can do. If codebase_run_command is "
-    "listed, you CAN execute code and query databases on that machine -- so do "
-    "it and report what actually came back. Never write 'I don't have access "
-    "to', 'I cannot connect to', or 'the tools only let me read files' when a "
-    "tool for it is right there.\n"
-    "   - Treating an empty search result as proof something is absent. Search "
-    "again with a shorter or partial name, try regex=false, and list or read "
-    "the directory you expect it in. Only after several real attempts may you "
-    "say it is not there -- and then say which attempts you made.\n"
-    "   - Hedging about something you have already read. After reading a file, "
-    "state what is in it. 'It may contain', 'potentially has', and 'appears to "
-    "define' are wrong when the file is in front of you.\n"
+    "tool list is the truth about what you can do: if codebase_run_command is "
+    "listed, you CAN execute code and query databases on that machine. Never "
+    "write 'I don't have access to', 'I cannot connect to', or 'the tools only "
+    "let me read files' when a tool for it is right there.\n"
+    "   - Treating an empty result as proof something is absent. Try a shorter "
+    "or partial name, regex=false, codebase_find_files, and listing the folder "
+    "you expect it in. Only after several real attempts may you say it is not "
+    "there -- and then say which attempts you made.\n"
+    "   - Repeating a call you already made. An identical search returns "
+    "identical bytes; if you have the result, use it or try something else.\n"
+    "   - Hedging about something you have already read. State what is in it: "
+    "'it may contain', 'potentially has', 'appears to define' are wrong when "
+    "the file is in front of you.\n"
     "4e. NEVER HAND OVER CODE YOU COULD HAVE RUN. If you can run it, run it "
     "first. Before writing SQL, look at the real schema (list the tables, "
     "describe the columns, sample rows) and then run your query -- do not infer "
@@ -773,6 +782,11 @@ async def orchestrate_turn(
         telemetry.mark_event()
         return event
 
+    # Every read-only call this turn, keyed by tool+args, with what it returned.
+    # Turn-scoped so a repeat is detectable across rounds -- the observed loop
+    # was the SAME search re-issued eight rounds running.
+    call_history: dict[str, str] = {}
+
     async def _handle_tool_calls_with_trace(
         calls: list[dict],
         mcp_client: Any,
@@ -782,7 +796,7 @@ async def orchestrate_turn(
         try:
             return await handle_tool_calls(
                 calls, mcp_client, trace_context=ctx, user_message=user_message, chat_id=chat_id,
-                blocked_calls=blocked,
+                blocked_calls=blocked, call_history=call_history,
             )
         except TypeError as exc:
             if "trace_context" not in str(exc):
@@ -1218,6 +1232,8 @@ async def orchestrate_turn(
     last_tool_payloads: list[tuple[str, str]] = []
     all_tokens = []
     had_malformed_tool_call = False
+    malformed_signature = None
+    malformed_repeat_count = 0
     narration_nudge_used = False
     # Anti-loop state for repeated identical failing run_command calls.
     last_failed_run_cmd: str | None = None
@@ -1596,6 +1612,11 @@ async def orchestrate_turn(
                     # turn with nothing (or looping the same failure blind).
                     had_malformed_tool_call = True
                     raw_preview = (event.get("raw") or "")[:500]
+                    if raw_preview == malformed_signature:
+                        malformed_repeat_count += 1
+                    else:
+                        malformed_signature = raw_preview
+                        malformed_repeat_count = 1
                     logger.warning(
                         "Malformed tool-call envelope from orchestrator (round %d): %r",
                         tool_round, raw_preview,
@@ -1604,6 +1625,19 @@ async def orchestrate_turn(
                         "orchestrator_tool_call_malformed",
                         **trace_context, round=tool_round, raw_preview=raw_preview,
                     )
+                    if malformed_repeat_count >= 2:
+                        logger.warning(
+                            "Aborting repeated malformed tool-call envelope after %d attempts.",
+                            malformed_repeat_count,
+                        )
+                        trace_event(
+                            "orchestrator_malformed_retry_aborted",
+                            **trace_context,
+                            round=tool_round,
+                            repeat_count=malformed_repeat_count,
+                        )
+                        all_tokens = []
+                        break
                     if finalization_round:
                         logger.warning(
                             "Malformed tool call during forced finalization; using tool-result fallback."
@@ -1967,13 +2001,110 @@ def _build_orchestrator_messages(
             "content": f"**Worker evidence pack summary:**\n{evidence_summary}",
         })
 
-    # Append previous conversation messages (if stateful turn)
-    messages.extend(previous_messages)
+    # Append previous conversation messages (if stateful turn). Broken
+    # prompt-JSON envelopes are not useful history: they teach the model to
+    # repeat the exact malformed call on every retry.
+    history = (
+        _sanitize_prompt_json_history(previous_messages)
+        if tool_call_mode == "prompt_json"
+        else previous_messages
+    )
+    if codebase_project_name:
+        history = _correct_capability_denials(history)
+    messages.extend(history)
 
     # Final user message
     messages.append({"role": "user", "content": user_message})
 
     return messages
+
+
+# Things the model said in earlier turns to talk itself out of tools it has.
+# Drawn verbatim from real transcripts; they come from the model's training
+# prior about chat assistants, not from anything in this app, which is why they
+# recur word-for-word.
+_CAPABILITY_DENIAL_MARKERS = (
+    "i cannot access",
+    "i can't access",
+    "i do not have access",
+    "i don't have access",
+    "cannot invoke",
+    "can't invoke",
+    "exposed through this interface",
+    "cannot connect to",
+    "can't connect to",
+    "only let me read",
+    "not directly query",
+    "cannot execute",
+    "can't execute",
+    "cannot query",
+    "would be speculative",
+    "credentials are not accessible",
+)
+
+_DENIAL_CORRECTION = (
+    "[Correction to the message above: the claim about lacking access was FALSE. "
+    "This conversation has live codebase tools, including codebase_run_command, "
+    "and the project's own .env is already loaded into the environment of every "
+    "command. Do not repeat that claim or ask the user for credentials -- call "
+    "the tool and report what actually came back.]"
+)
+
+
+def _correct_capability_denials(history: list[dict]) -> list[dict]:
+    """Annotate past assistant turns that wrongly claimed to lack access.
+
+    Without this the model copies itself. Once a turn has said "I cannot invoke
+    it without actual credentials", that sentence is in the context as its own
+    prior behaviour, and every later turn in the conversation reproduces it --
+    which is exactly what a user sees as "it STILL says it can't", long after
+    the underlying capability was fixed. A system rule loses to the model's own
+    transcript; correcting the transcript is what actually lands.
+    """
+    corrected: list[dict] = []
+    for message in history:
+        content = message.get("content")
+        if (
+            message.get("role") == "assistant"
+            and isinstance(content, str)
+            and _DENIAL_CORRECTION not in content
+            and any(marker in content.lower() for marker in _CAPABILITY_DENIAL_MARKERS)
+        ):
+            corrected.append({**message, "content": f"{content}\n\n{_DENIAL_CORRECTION}"})
+        else:
+            corrected.append(message)
+    return corrected
+
+
+_PROMPT_JSON_TOOL_START_RE = re.compile(
+    r'\{\s*"action"\s*:\s*"tool_calls?"\s*,',
+)
+
+
+def _sanitize_prompt_json_history(previous_messages: list[dict]) -> list[dict]:
+    """Remove unparseable prompt-JSON tool fragments from prior turns."""
+    sanitized: list[dict] = []
+    for message in previous_messages:
+        if message.get("role") != "assistant" or not isinstance(message.get("content"), str):
+            sanitized.append(message)
+            continue
+
+        content = message["content"]
+        marker = _PROMPT_JSON_TOOL_START_RE.search(content)
+        if marker is None:
+            sanitized.append(message)
+            continue
+
+        try:
+            json.JSONDecoder().raw_decode(content[marker.start():])
+        except json.JSONDecodeError:
+            prefix = content[:marker.start()].rstrip()
+            if prefix:
+                sanitized.append({**message, "content": prefix})
+            continue
+
+        sanitized.append(message)
+    return sanitized
 
 
 def _format_tool_arg_spec(input_schema: dict | None) -> str:
@@ -2539,6 +2670,29 @@ def _repair_tool_args(
     )
 
 
+# Only read-only lookups are de-duplicated. Re-running a command or a write can
+# legitimately be the point (re-run the tests after a fix), and answering one
+# from a cache would be a lie about what happened on disk.
+_DEDUPABLE_TOOLS = frozenset({
+    "codebase_search",
+    "codebase_find_files",
+    "codebase_read_file",
+    "codebase_list_directory",
+    "web_search",
+    "file_read",
+})
+
+
+def _call_signature(tool_name: str, args: dict) -> str:
+    """Stable key for "the same call again", or "" if it must not be de-duped."""
+    if tool_name not in _DEDUPABLE_TOOLS:
+        return ""
+    try:
+        return f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)}"
+    except (TypeError, ValueError):
+        return ""
+
+
 async def handle_tool_calls(
     tool_calls: list[dict],
     mcp_client: Any,
@@ -2547,6 +2701,7 @@ async def handle_tool_calls(
     user_message: str | None = None,
     chat_id: str | None = None,
     blocked_calls: dict[str, str] | None = None,
+    call_history: dict[str, str] | None = None,
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
@@ -2561,6 +2716,12 @@ async def handle_tool_calls(
             are NOT dispatched; the reason is returned as a non-retryable tool
             error so the model learns the change didn't happen and why. They
             stay in ``tool_calls`` so result ordering is unchanged.
+        call_history: Turn-scoped ``{signature: previous result}`` for read-only
+            calls. A repeat of an identical call is answered from here instead
+            of being re-dispatched, with a note that it already ran. Without it
+            a model that has found its answer can re-issue the same search every
+            round until the round cap, then stop mid-sentence having spent the
+            whole turn confirming what it already knew.
 
     Returns:
         List of tool result dicts with keys: tool_call_id, tool_name, content.
@@ -2660,6 +2821,35 @@ async def handle_tool_calls(
                 "tool_name": tool_name,
                 "content": json.dumps({"error": True, "message": item["arg_error"], "retryable": True}),
             }
+        # An identical read-only call already made this turn is answered from
+        # what it returned the first time, with an explicit instruction to move
+        # on. Re-dispatching would return the same bytes and teach the model
+        # nothing; observed in the wild as the same search re-issued every round
+        # until the round cap, ending the turn mid-sentence.
+        signature = _call_signature(tool_name, item["args"])
+        if call_history is not None and signature and signature in call_history:
+            trace_event(
+                "tool_call_repeat_suppressed",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                arguments=item["args"],
+            )
+            return {
+                "tool_call_id": item["call_id"],
+                "tool_name": tool_name,
+                "content": json.dumps({
+                    "repeated_call": True,
+                    "message": (
+                        f"You already ran this exact {tool_name} call in this turn. It was not "
+                        "run again — its original result is below, unchanged. Repeating it "
+                        "cannot tell you anything new. Either use this result to answer, or "
+                        "do something DIFFERENT: a different pattern, a different path, a "
+                        "different tool."
+                    ),
+                    "original_result": call_history[signature],
+                }),
+            }
         try:
             trace_event(
                 "tool_call_start",
@@ -2682,6 +2872,8 @@ async def handle_tool_calls(
                 else:
                     result = await mcp_client.call_tool(tool_name, item["args"])
             content = result if isinstance(result, str) else json.dumps(result)
+            if call_history is not None and signature:
+                call_history[signature] = content
             trace_event(
                 "tool_call_result",
                 **(trace_context or {}),
