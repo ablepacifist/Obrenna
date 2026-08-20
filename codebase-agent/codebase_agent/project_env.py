@@ -19,6 +19,8 @@ import os
 import re
 from pathlib import Path
 
+from .system_env import refreshed_path
+
 # .Renviron uses the same KEY=VALUE form; R reads it automatically only when it
 # happens to be the working directory, so loading it explicitly makes the
 # behaviour the same regardless of which subdirectory a command runs from.
@@ -87,6 +89,11 @@ def load_project_env(root: Path) -> dict[str, str]:
 def build_command_env(root: Path) -> dict[str, str]:
     """The environment a command runs with: the agent's, plus the project's."""
     env = dict(os.environ)
+    # The agent's PATH is frozen at launch, so a program installed since then is
+    # invisible to it even though the user's own shell finds it. Top it up from
+    # the system's current PATH before the project's values are applied.
+    path_key = "Path" if "Path" in env else "PATH"
+    env[path_key] = refreshed_path(env.get(path_key, ""))
     for key, value in load_project_env(root).items():
         if key.upper() in PROTECTED_NAMES:
             continue

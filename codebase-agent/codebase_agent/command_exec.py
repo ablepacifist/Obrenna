@@ -28,6 +28,7 @@ from pathlib import Path
 from .fs_tools import FsError
 from .pathsafety import resolve_safe_path
 from .project_env import build_command_env
+from .system_env import looks_like_missing_program, missing_program_hint
 
 OUTPUT_CHAR_CAP = 20_000
 DEFAULT_TIMEOUT = 120
@@ -91,9 +92,16 @@ def run_command(root: Path, command: str, *, cwd: str = ".", timeout: int | None
             # values never leave this process's child - see project_env.
             env=build_command_env(root),
         )
+        stderr = _cap(proc.stderr)
+        # "'Rscript' is not recognized" was read by a model as proof R was not
+        # installed; it told the user so and stopped. It means only that the
+        # agent's inherited PATH does not have it -- often because the agent
+        # started before it was installed.
+        if proc.returncode != 0 and looks_like_missing_program(stderr, proc.stdout or ""):
+            stderr += missing_program_hint(command)
         return CommandResult(
             command=command, cwd=cwd or ".", exit_code=proc.returncode,
-            stdout=_cap(proc.stdout), stderr=_cap(proc.stderr), timed_out=False,
+            stdout=_cap(proc.stdout), stderr=stderr, timed_out=False,
         )
     except subprocess.TimeoutExpired as exc:
         err = _decode(exc.stderr)
