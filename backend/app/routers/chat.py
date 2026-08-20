@@ -152,7 +152,19 @@ _BLOCK_KEEP_ARGS = (
     "path", "new_path", "old_string", "new_string", "content", "command",
     # ask_user renders as the question it asked, not as a tool invocation.
     "question", "options",
+    # The read-only tools' own arguments. Without these a search or a read
+    # persisted with empty args, so the reloaded card was a bare tool name with
+    # nothing under it -- the user could see that it did something, but never
+    # what.
+    "pattern", "regex", "cwd", "offset", "limit", "recursive",
 )
+# How much of a command's output to keep for the transcript. Enough to see what
+# happened without replaying a whole build log on every page load.
+_BLOCK_OUTPUT_MAX_CHARS = 2000
+_BLOCK_MAX_RESULT_PATHS = 8
+# Reasoning is worth keeping but is the longest thing in a turn; bounded so a
+# reloaded transcript doesn't replay megabytes of CoT.
+_BLOCK_THINKING_MAX_CHARS = 12000
 
 
 def _truncate(value: Any, limit: int) -> Any:
@@ -170,6 +182,69 @@ def _render_args_for_block(tool: str, arguments: dict) -> dict:
         if key in arguments:
             out[key] = _truncate(arguments[key], _BLOCK_ARG_MAX_CHARS)
     return out
+
+
+def _tail(value: Any, limit: int) -> str:
+    """Keep the END of a stream. An error is at the bottom of a log, not the top."""
+    text = value if isinstance(value, str) else ""
+    if len(text) <= limit:
+        return text
+    return "… (earlier output trimmed)\n" + text[-limit:]
+
+
+def _render_result_for_block(tool: str, parsed: dict) -> dict | None:
+    """What a tool produced, in the shape the transcript renders.
+
+    Only ``status`` and an error ``message`` used to be kept. codebase_run_command
+    has no ``message`` on success, so its exit code and output had nowhere to
+    live and the card could never show what the command printed -- the user
+    watched it run a command and was never shown the result.
+    """
+    if tool == "codebase_run_command":
+        out: dict[str, Any] = {}
+        if "exit_code" in parsed:
+            out["exitCode"] = parsed.get("exit_code")
+        for key, field in (("stdout", "stdout"), ("stderr", "stderr")):
+            text = _tail(parsed.get(key), _BLOCK_OUTPUT_MAX_CHARS)
+            if text:
+                out[field] = text
+        if parsed.get("timed_out"):
+            out["timedOut"] = True
+        return out or None
+
+    if tool == "codebase_search":
+        matches = parsed.get("matches")
+        if not isinstance(matches, list):
+            return None
+        paths: list[str] = []
+        for match in matches:
+            path = match.get("path") if isinstance(match, dict) else None
+            if isinstance(path, str) and path not in paths:
+                paths.append(path)
+            if len(paths) >= _BLOCK_MAX_RESULT_PATHS:
+                break
+        return {
+            "matchCount": len(matches),
+            "paths": paths,
+            "truncated": bool(parsed.get("truncated")),
+        }
+
+    if tool == "codebase_read_file":
+        lines = parsed.get("content")
+        out = {"path": str(parsed.get("path") or "")}
+        if isinstance(lines, str):
+            out["lineCount"] = len(lines.splitlines())
+        if parsed.get("truncated"):
+            out["truncated"] = True
+        return out
+
+    if tool == "codebase_list_directory":
+        entries = parsed.get("entries")
+        if not isinstance(entries, list):
+            return None
+        return {"entryCount": len(entries), "truncated": bool(parsed.get("truncated"))}
+
+    return None
 
 
 class _BlockAccumulator:
@@ -197,6 +272,18 @@ class _BlockAccumulator:
         else:
             self.blocks.append({"kind": "text", "text": text})
 
+    def add_thinking(self, text: str) -> None:
+        if not text:
+            return
+        if self.blocks and self.blocks[-1].get("kind") == "thinking":
+            block = self.blocks[-1]
+            # Bounded: a long reasoning trace is worth keeping, an unbounded one
+            # would replay megabytes into the UI on every load.
+            if len(block["text"]) < _BLOCK_THINKING_MAX_CHARS:
+                block["text"] += text
+        else:
+            self.blocks.append({"kind": "thinking", "text": text})
+
     def add_tool_call(self, call_id: str, tool_name: str, arguments: dict) -> None:
         block = {
             "kind": "tool",
@@ -220,6 +307,7 @@ class _BlockAccumulator:
             return
         ok = True
         summary = ""
+        parsed: Any = None
         if isinstance(result, str) and result:
             try:
                 parsed = json.loads(result)
@@ -227,17 +315,21 @@ class _BlockAccumulator:
                     ok = not parsed.get("error", False)
                     summary = str(parsed.get("message", "") or "")
             except (json.JSONDecodeError, ValueError):
-                pass
+                parsed = None
         block["status"] = "done" if ok else "error"
         if summary:
             block["summary"] = _truncate(summary, _BLOCK_SUMMARY_MAX_CHARS)
+        if isinstance(parsed, dict):
+            outcome = _render_result_for_block(block.get("toolName", ""), parsed)
+            if outcome:
+                block["result"] = outcome
 
     def result(self) -> list[dict]:
-        # Drop trailing whitespace-only text runs so a reloaded message doesn't
-        # end in an empty bubble.
+        # Drop whitespace-only prose/reasoning runs so a reloaded message
+        # doesn't render empty bubbles.
         return [
             b for b in self.blocks
-            if b.get("kind") != "text" or (b.get("text") or "").strip()
+            if b.get("kind") not in ("text", "thinking") or (b.get("text") or "").strip()
         ]
 
 
@@ -1156,6 +1248,12 @@ def _handle_normal_chat(
                     elif event.type == "token":
                         tokens.append(event.payload.get("text", ""))
                         blocks.add_token(event.payload.get("text", ""))
+                    elif event.type == "thinking_delta":
+                        # Reasoning used to be streamed and then discarded, so
+                        # "what was it thinking about" vanished at done and on
+                        # reload. Kept in the block list so it sits in the
+                        # cadence where the user watched it happen.
+                        blocks.add_thinking(event.payload.get("text", ""))
                     elif event.type == "tool_progress":
                         # Helper-model narration: the headline shown on the card.
                         if event.payload.get("stage") == "narrating":

@@ -662,6 +662,35 @@ class TestMalformedToolCallHandling:
         assert calls["model"] == 2
         assert any(e.type == "error" for e in events) is False
 
+    def test_broken_prompt_json_history_is_removed_before_model_call(self):
+        from app.agent.runtime import _build_orchestrator_messages
+
+        messages = _build_orchestrator_messages(
+            "continue with the plan",
+            [],
+            [],
+            "",
+            [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "I will read the file first.\n"
+                        '{"action": "tool_call", "tool": "codebase_read_file", "arguments"'
+                    ),
+                },
+                {"role": "user", "content": "it got stuck"},
+            ],
+            tool_call_mode="prompt_json",
+            allowed_tools=[],
+        )
+
+        history = messages[:-1]
+        assistant_history = next(message for message in history if message.get("role") == "assistant")
+        user_history = next(message for message in history if message.get("role") == "user")
+        assert assistant_history["content"] == "I will read the file first."
+        assert user_history["content"] == "it got stuck"
+        assert not any("codebase_read_file" in str(message) for message in history)
+
     @pytest.mark.asyncio
     async def test_malformed_tool_call_exhausts_rounds_emits_friendly_fallback(self, monkeypatch):
         from app.agent import runtime as rt
@@ -700,6 +729,42 @@ class TestMalformedToolCallHandling:
         assert "action" not in tokens
         assert "too large or complex" in tokens
         assert calls["model"] == 2  # round 1 + one forced finalization attempt
+
+    @pytest.mark.asyncio
+    async def test_repeated_malformed_tool_call_aborts_before_round_cap(self, monkeypatch):
+        from app.agent import runtime as rt
+
+        class StubMemory:
+            def to_static_messages(self):
+                return []
+
+            def to_dynamic_messages(self):
+                return []
+
+        monkeypatch.setattr(rt, "assemble_context", lambda *a, **k: StubMemory())
+        monkeypatch.setattr(rt, "get_orchestration_config", lambda: {"worker_timeout_seconds": 1})
+
+        calls = {"model": 0}
+
+        async def fake_stream(*args, **kwargs):
+            calls["model"] += 1
+            yield {"type": "tool_call_malformed", "raw": '{"action":"tool_call","tool":"codebase_read_file","arguments"'}
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        config = RuntimeConfig(provider="openai_compatible", base_url="http://localhost:11434/v1", models={})
+        plan = ResolvedPlan({
+            "orchestrator": {"model": "qwen3.5:4b", "tool_call_mode": "prompt_json", "max_tool_rounds": 5},
+        })
+
+        events = [e async for e in orchestrate_turn(
+            "continue with the plan", "chat-malformed-repeat", None, config, plan,
+            workers_enabled=False,
+        )]
+
+        tokens = "".join(e.payload.get("text", "") for e in events if e.type == "token")
+        assert "too large or complex" in tokens
+        assert calls["model"] == 2
 
 
 class TestOrchestrateTurnNativeToolCalling:

@@ -24,8 +24,15 @@ class ReasoningCase:
     ``grader`` selects how ``answer`` is compared to the model's output:
       ``numeric``  -- final number in the response must equal ``answer``
       ``mcq``      -- final choice letter must equal ``answer``
-      ``contains`` -- every term in ``required_terms`` must appear
+      ``contains`` -- every term in ``required_terms`` must appear, and no term
+                      in ``forbidden_terms`` may appear
     See ``scoring.grade``.
+
+    ``forbidden_terms`` exists for behavioural cases, where the failure is
+    something the model SAYS rather than something it gets wrong: claiming it
+    cannot reach a database it can reach, or ending a turn by asking the user
+    for a fact that is in the repo. Those have no correct "answer" to match --
+    only wrong things to not say.
     """
 
     id: str
@@ -35,6 +42,7 @@ class ReasoningCase:
     grader: str = "numeric"
     choices: list[str] = field(default_factory=list)
     required_terms: list[str] = field(default_factory=list)
+    forbidden_terms: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ReasoningCase":
@@ -46,6 +54,7 @@ class ReasoningCase:
             grader=str(raw.get("grader", "numeric")),
             choices=[str(c) for c in raw.get("choices", []) or []],
             required_terms=[str(t) for t in raw.get("required_terms", []) or []],
+            forbidden_terms=[str(t) for t in raw.get("forbidden_terms", []) or []],
         )
 
 

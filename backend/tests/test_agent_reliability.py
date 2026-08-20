@@ -199,7 +199,14 @@ class TestRepeatedFailingCommandNudge:
         assert _run_command_failed('{"exit_code": 0, "stdout": "ok"}') is False
         assert _run_command_failed('{"timed_out": true, "exit_code": null}') is True
         assert _run_command_failed('{"error": true, "message": "x"}') is True
-        assert _run_command_failed("not json") is False
+        # Unparseable now counts as failure. It used to read as success, which
+        # meant the two shapes that produce it -- a bare "Tool error: ..." string
+        # from an unhandled exception, and a result cut mid-JSON by compaction --
+        # were exempt from the nudge above, exactly when output was largest.
+        assert _run_command_failed("not json") is True
+        assert _run_command_failed('{"exit_code": 1, "stdout": "xxx') is True
+        # Absence of a result is still not evidence of a failed one.
+        assert _run_command_failed("") is False
 
 
 class TestVisibleFailures:

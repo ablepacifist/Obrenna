@@ -56,8 +56,10 @@ measuring the model.
 plus the full prompt stack. That difference is a real measurement, not
 overhead to be optimised away blindly.
 
-Still **not** exercised by either target: real memory retrieval, knowledge
-packs, and codebase tools.
+Still **not** exercised by either target: real memory retrieval and knowledge
+packs. The codebase tools are exercised only in the sense that the
+`codebase_agent` suite below scores what the model *says* about them — a chat
+with a project attached is needed for the tools themselves to fire.
 
 ## Suites
 
@@ -66,10 +68,26 @@ produced offline, with no dataset downloads. Categories: `math` (multi-step
 arithmetic), `logic` (formal deduction), `semantic` (reference resolution and
 entailment), `multihop` (fact chaining), `commonsense` (physical reasoning).
 
+`suites/codebase_agent.jsonl` is a **behavioural** suite, drawn case by case
+from a real session where the agent failed against an R/Shiny project with a
+live database. It does not test knowledge: it tests whether the model gives up.
+Categories: `capability` (claiming it cannot do something it can), `search`
+(reading an empty result as proof of absence), `hedging` (equivocating about a
+file it has read), `verification` (handing over SQL it never ran), `persistence`
+(ending the turn by interrogating the user), `narration` (promising instead of
+doing).
+
+```bash
+python -m evals run --target orchestrator --suite codebase_agent
+```
+
+Run it against `orchestrator`, not `local`: the `local` target has no tools, so
+it fails the tool-use cases by construction. That difference is the measurement.
+
 Public benchmarks load from an external JSONL of the same shape:
 
 ```bash
-python -m evals run --cases /path/to/gsm8k.jsonl --model "..."
+python -m evals run --suite /path/to/gsm8k.jsonl --model "..."
 ```
 
 Case schema (one JSON object per line):
@@ -80,7 +98,36 @@ Case schema (one JSON object per line):
 ```
 
 `grader` is `numeric` (final number must match), `mcq` (final choice letter), or
-`contains` (every `required_terms` entry must appear).
+`contains` (every `required_terms` entry must appear **and** no `forbidden_terms`
+entry may appear).
+
+`forbidden_terms` is what makes behavioural cases gradable. A refusal has no
+right answer to match — the whole assertion is that a particular sentence was
+not said:
+
+```json
+{"id": "cb-capability-01", "category": "capability", "grader": "contains",
+ "forbidden_terms": ["i cannot access", "only let me read"],
+ "question": "..."}
+```
+
+A failing case reports `said: <phrase>` rather than a bare false, so a
+regression names itself.
+
+**Ask the model to act, not to discuss what it should not do.** A case that asks
+"what should you NOT do with these credentials?" is failed by a *correct* answer,
+because naming the bad thing means saying it. Two cases in this suite were
+written that way and both produced false misses. Pose the case as a task — write
+the command, answer the question — and let the forbidden terms catch the model
+doing the wrong thing rather than describing it.
+
+**Prefer `forbidden_terms` to `required_terms` for behavioural cases.** A
+free-form answer can be entirely correct and still not contain a particular
+word, so a required term is a noisy proxy that produces flaky misses; the first
+run of this suite scored 75% and all three failures turned out to be correct
+answers phrased differently. Only require a term when the term *is* the answer
+(naming the function it was asked to name). What a model must not say is far
+more stable than what it must say.
 
 ## Grading
 

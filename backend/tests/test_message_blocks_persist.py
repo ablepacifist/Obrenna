@@ -116,3 +116,106 @@ def test_ask_user_question_is_kept_for_replay():
     })
     assert kept["question"] == "Which file?"
     assert kept["options"] == ["a", "b"]
+
+
+# ── what the user watched, replayed ───────────────────────────────────────────
+# The reported symptom was a reloaded transcript of bare tool labels: a card
+# saying "codebase_search" with nothing under it, and a card saying it ran a
+# command but never showing what the command printed. Two separate causes: the
+# read-only tools' arguments were dropped by the keep-list before persistence,
+# and no tool result beyond an error `message` was stored at all.
+
+
+def test_search_pattern_survives_to_the_transcript():
+    """Without `pattern` the persisted args are {} and the card is a bare name."""
+    kept = _render_args_for_block("codebase_search", {"pattern": "get_db_connection", "regex": False})
+    assert kept["pattern"] == "get_db_connection"
+    assert kept["regex"] is False
+
+
+def test_read_and_list_arguments_survive():
+    assert _render_args_for_block("codebase_read_file", {"path": "a.R", "offset": 40})["offset"] == 40
+    assert _render_args_for_block("codebase_list_directory", {"path": "shared", "recursive": True})["recursive"] is True
+
+
+def test_command_output_is_persisted_not_just_the_command():
+    acc = _BlockAccumulator()
+    acc.add_tool_call("c1", "codebase_run_command", {"command": "Rscript -e 'dbListTables(con)'"})
+    acc.finish_tool("c1", json.dumps({
+        "command": "Rscript -e 'dbListTables(con)'", "cwd": ".", "exit_code": 0,
+        "stdout": "loc_catchbasin\nbreeding_sites", "stderr": "", "timed_out": False,
+    }))
+    result = acc.result()[0]["result"]
+    assert result["exitCode"] == 0
+    assert "loc_catchbasin" in result["stdout"]
+
+
+def test_a_failing_command_keeps_its_stderr():
+    acc = _BlockAccumulator()
+    acc.add_tool_call("c1", "codebase_run_command", {"command": "Rscript bad.R"})
+    acc.finish_tool("c1", json.dumps({
+        "exit_code": 1, "stdout": "", "stderr": "could not connect to server", "timed_out": False,
+    }))
+    result = acc.result()[0]["result"]
+    assert result["exitCode"] == 1
+    assert result["stderr"] == "could not connect to server"
+
+
+def test_long_output_keeps_its_tail():
+    """The error is at the bottom of a log, so the tail is the part to keep."""
+    acc = _BlockAccumulator()
+    acc.add_tool_call("c1", "codebase_run_command", {"command": "npm run build"})
+    acc.finish_tool("c1", json.dumps({
+        "exit_code": 1, "stdout": "step\n" * 5000 + "FINAL FAILURE", "stderr": "", "timed_out": False,
+    }))
+    assert "FINAL FAILURE" in acc.result()[0]["result"]["stdout"]
+
+
+def test_search_result_records_where_it_looked():
+    acc = _BlockAccumulator()
+    acc.add_tool_call("c1", "codebase_search", {"pattern": "get_db_connection"})
+    acc.finish_tool("c1", json.dumps({"matches": [
+        {"path": "shared/db_helpers.R", "line_number": 4, "line": "get_db_connection <- function() {"},
+        {"path": "shared/db_helpers.R", "line_number": 9, "line": "  get_db_connection()"},
+        {"path": "app.R", "line_number": 2, "line": "conn <- get_db_connection()"},
+    ], "match_count": 3, "truncated": False}))
+    result = acc.result()[0]["result"]
+    assert result["matchCount"] == 3
+    assert result["paths"] == ["shared/db_helpers.R", "app.R"]
+
+
+def test_an_empty_search_is_recorded_as_a_real_zero():
+    acc = _BlockAccumulator()
+    acc.add_tool_call("c1", "codebase_search", {"pattern": "nope"})
+    acc.finish_tool("c1", json.dumps({"matches": [], "match_count": 0}))
+    assert acc.result()[0]["result"]["matchCount"] == 0
+
+
+def test_reasoning_is_persisted_in_the_cadence_it_happened_in():
+    """Thinking used to be streamed and discarded, so "what were you thinking"
+    had no answer once the turn ended."""
+    acc = _BlockAccumulator()
+    acc.add_thinking("The user wants sites dry for two years. ")
+    acc.add_thinking("I should check the real schema first.")
+    acc.add_tool_call("c1", "codebase_search", {"pattern": "status_udw"})
+    acc.finish_tool("c1", json.dumps({"matches": []}))
+    acc.add_token("Checking the schema.")
+
+    kinds = [b["kind"] for b in acc.result()]
+    assert kinds == ["thinking", "tool", "text"]
+    assert acc.result()[0]["text"].startswith("The user wants sites dry")
+
+
+def test_reasoning_is_bounded():
+    from app.routers.chat import _BLOCK_THINKING_MAX_CHARS
+    acc = _BlockAccumulator()
+    for _ in range(200):
+        acc.add_thinking("x" * 1000)
+    assert len(acc.result()[0]["text"]) < _BLOCK_THINKING_MAX_CHARS + 1000
+
+
+def test_blank_reasoning_does_not_create_an_empty_pane():
+    acc = _BlockAccumulator()
+    acc.add_thinking("   \n  ")
+    acc.add_token("answer")
+    assert [b["kind"] for b in acc.result()] == ["text"]

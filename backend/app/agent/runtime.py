@@ -147,17 +147,31 @@ class ResolvedPlan:
             return val
         return 3
 
+    # Share of the context window one tool result may occupy, and the chars-per
+    # -token ratio used to convert. A fifth leaves room for the prompt band, the
+    # conversation, several results in a round, and the reply.
+    _TOOL_RESULT_CTX_SHARE = 0.20
+    _CHARS_PER_TOKEN = 4
+
     @property
     def tool_result_budget(self) -> int:
         """Per-orchestrator char budget for compacting a single tool result.
 
-        Sourced from the catalog model_definition (via the resolver). Defaults to
-        4000 chars when the resolver didn't populate it.
+        Scales with the context actually resolved for this machine, floored at
+        the catalog's per-model value. The catalog number has to be a static
+        worst case — the 9B orchestrator serves tiers whose ctx_min is 8192 and
+        whose ctx_max is 65536 — and holding every machine to that worst case is
+        what cut real source files off at roughly 1500 tokens on hardware with
+        four times the window to spare. That is the "it didn't look hard enough"
+        symptom: it looked, and the result was thrown away before it arrived.
         """
         val = self.orchestrator.get("tool_result_budget", 4000)
-        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
-            return val
-        return 4000
+        base = val if isinstance(val, int) and not isinstance(val, bool) and val > 0 else 4000
+        ctx = self.ctx
+        if isinstance(ctx, int) and not isinstance(ctx, bool) and ctx > 0:
+            scaled = int(ctx * self._CHARS_PER_TOKEN * self._TOOL_RESULT_CTX_SHARE)
+            return max(base, scaled)
+        return base
 
     @property
     def summarizer_model(self) -> str:
@@ -373,13 +387,32 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "to check before answering — never assume you lack access without having tried a "
     "tool call first.\n"
     "\n"
+    "0a. LOOKING FOR A FILE vs LOOKING FOR CODE. codebase_find_files searches "
+    "FILENAMES; codebase_search searches INSIDE files. To locate a document, a "
+    "config or a module ('where is the schema reference?'), call "
+    "codebase_find_files with a short fragment like 'schema' — searching file "
+    "contents for a document's title will not find it.\n"
+    "0. THIS PROJECT IS THE SOURCE OF TRUTH ABOUT ITSELF. Any question about "
+    "what this project contains or how it works — its database tables, schema, "
+    "models, API, config, dependencies, structure, or the contents of any file "
+    "— is answered by READING THE PROJECT with codebase_search, "
+    "codebase_list_directory and codebase_read_file. Do NOT answer such "
+    "questions from memory, and do NOT use web_search for them: this code is "
+    "private and is not on the web, so searching for it finds nothing and "
+    "wastes the turn. Reading a few files is always the right first move.\n"
+    "\n"
     "RULES FOR FILE ACTIONS — these prevent you from misleading the user:\n"
     "1. NEVER claim you created, edited, moved, or deleted a file unless a tool "
     "result in THIS turn confirmed it succeeded. If you have not called the tool "
     "yet, call it now — do not say 'Done!' first.\n"
-    "2. Report file paths EXACTLY as they appear in the tool result's 'path' field, "
-    "never from memory or assumption. If unsure where a file is, call "
-    "codebase_list_directory or codebase_search to find it before naming a path.\n"
+    "1b. The same applies to LOOKING. Never say you searched, read, or could not "
+    "find something unless a tool result in this turn shows it. 'My searches did "
+    "not locate it' with no search call is a fabrication.\n"
+    "1c. A FAILED file read is not proof a file is missing — your path was "
+    "probably wrong. The error says where the file really is, or to search. "
+    "Follow it.\n"
+    "2. Report file paths EXACTLY as they appear in the tool result's 'path' "
+    "field, never from memory. Unsure where a file is? codebase_find_files.\n"
     "3. To MOVE or RENAME a file, use codebase_move_file — do not write a copy and "
     "leave the original. To DELETE a file, use codebase_delete_file — do not try to "
     "blank it with codebase_edit_file. To create a new file at the project root, use "
@@ -392,6 +425,55 @@ CODEBASE_PROJECT_HINT_TEMPLATE = (
     "codebase_run_command and read the output. If exit_code is non-zero or stderr "
     "has an error, fix the code and run it again — iterate until it works before you "
     "report success. Never claim code runs without having run it.\n"
+    "4c. LIVE DATA (databases, APIs, services) — when the answer depends on what "
+    "is actually IN a system rather than what the code says about it, get the "
+    "real thing with codebase_run_command:\n"
+    "   - Find how the project already connects (a helper, an existing script) "
+    "and CALL IT. The project's .env/.Renviron is already loaded into every "
+    "command's environment, so a helper like get_db_connection() that reads "
+    "credentials from the environment just works. Never invent connection "
+    "strings, never ask the user for a password, never print credentials.\n"
+    "   - Introspect in the project's own language (`Rscript -e ...`, "
+    "`python -c ...`): list tables, describe columns, sample rows. Read the "
+    "output and use it. Prefer read-only queries; never modify data to answer "
+    "a question.\n"
+    "   - A NAME, code or status VALUE (a person, a site, a priority, a date) "
+    "is DATA, not code. Searching source for 'Alex.D' finds nothing because it "
+    "was never there — look it up in the database (SELECT DISTINCT on the "
+    "column) and use what comes back. Two failed code searches for a value "
+    "means you are searching the wrong thing entirely.\n"
+    "   - Schema docs go stale. If a doc and the live database disagree, the "
+    "database is right. Check the database, and say so if you could not.\n"
+    "4d. KEEP GOING UNTIL YOU HAVE THE ANSWER. These end a turn as a failure:\n"
+    "   - Asking the user for something you could look up. If the answer is in "
+    "the code, the config, or the database, GO GET IT. Never end with 'what "
+    "data source are you using?', 'what are the credentials?', or 'can you "
+    "point me to the docs?' -- read the project instead. Ask only about a "
+    "genuine preference or decision that the project cannot tell you.\n"
+    "   - Saying you cannot do something you have not tried THIS TURN. Your "
+    "tool list is the truth about what you can do: if codebase_run_command is "
+    "listed, you CAN execute code and query databases on that machine. Never "
+    "write 'I don't have access to', 'I cannot connect to', or 'the tools only "
+    "let me read files' when a tool for it is right there.\n"
+    "   - Treating an empty result as proof something is absent. Try a shorter "
+    "or partial name, regex=false, codebase_find_files, and listing the folder "
+    "you expect it in. Only after several real attempts may you say it is not "
+    "there -- and then say which attempts you made.\n"
+    "   - Repeating a call you already made. An identical search returns "
+    "identical bytes; if you have the result, use it or try something else.\n"
+    "   - Hedging about something you have already read. State what is in it: "
+    "'it may contain', 'potentially has', 'appears to define' are wrong when "
+    "the file is in front of you.\n"
+    "4e. NEVER HAND OVER CODE YOU COULD HAVE RUN. If you can run it, run it "
+    "first. Before writing SQL, look at the real schema (list the tables, "
+    "describe the columns, sample rows) and then run your query -- do not infer "
+    "column names from a doc or from the question's wording. Show the query you "
+    "actually executed and what it returned. If you genuinely could not run it, "
+    "say so in one plain sentence and say why.\n"
+    "4f. SAY WHAT YOU ARE DOING AS YOU GO. Before a tool call, one short line "
+    "on what you are looking for; after the result, one short line on what you "
+    "found and what it means for the answer. A run of tool calls with no words "
+    "between them leaves the user watching a progress bar.\n"
     "5. You DO have memory of your earlier actions this conversation: assistant "
     "turns are annotated with an '[Actions you actually performed this turn: …]' log "
     "of the real files you changed. Trust that log — never tell the user you have no "
@@ -458,6 +540,34 @@ WEB_SEARCH_HINT = (
     "search. Do NOT search for things you can compute or determine locally "
     "(arithmetic, the current time, the user's own files) or for pure opinion/"
     "creative tasks. After searching, cite the source URLs in your answer."
+)
+
+# Used INSTEAD of WEB_SEARCH_HINT when a codebase is also attached.
+#
+# The two hints otherwise compete and the wrong one wins. Observed in the wild:
+# asked "what are the main database tables in this project" with a codebase
+# attached, the orchestrator called web_search and then reported it had found
+# nothing -- searching the public internet for a private repo. The generic hint
+# lists "documentation" as a reason to search and says "when in doubt, search",
+# which a question about a project matches; its one guard ("the user's own
+# files") is a short clause buried at the end.
+#
+# So when a codebase is present, web_search is scoped explicitly to the outside
+# world and the codebase is named as the authority for anything about "this
+# project".
+WEB_SEARCH_HINT_WITH_CODEBASE = (
+    "The user has enabled web search for this chat, so you have the "
+    "`web_search` tool for facts about the OUTSIDE WORLD: news, releases, "
+    "prices, third-party library docs, error messages from other people's "
+    "software. Cite source URLs when you use it.\n"
+    "\n"
+    "A codebase is ALSO attached to this chat, and it takes precedence. "
+    "Anything about 'this project', 'the code', 'our schema', 'the database "
+    "tables', 'the API', how this system works, or what any file contains is "
+    "answered by READING THE CODEBASE with the codebase_* tools — never by "
+    "web_search. The web does not contain the user's private code, so "
+    "searching it for those questions returns nothing useful and wastes the "
+    "turn. If a question could be read from the project, read the project."
 )
 
 
@@ -674,6 +784,12 @@ async def orchestrate_turn(
         telemetry.mark_event()
         return event
 
+    # Every read-only call this turn, keyed by tool+args, with what it returned.
+    # Turn-scoped so a repeat is detectable across rounds -- the observed loop
+    # was the SAME search re-issued eight rounds running.
+    call_history: dict[str, str] = {}
+    repeat_counts: dict[str, int] = {}
+
     async def _handle_tool_calls_with_trace(
         calls: list[dict],
         mcp_client: Any,
@@ -683,7 +799,7 @@ async def orchestrate_turn(
         try:
             return await handle_tool_calls(
                 calls, mcp_client, trace_context=ctx, user_message=user_message, chat_id=chat_id,
-                blocked_calls=blocked,
+                blocked_calls=blocked, call_history=call_history, repeat_counts=repeat_counts,
             )
         except TypeError as exc:
             if "trace_context" not in str(exc):
@@ -1119,6 +1235,8 @@ async def orchestrate_turn(
     last_tool_payloads: list[tuple[str, str]] = []
     all_tokens = []
     had_malformed_tool_call = False
+    malformed_signature = None
+    malformed_repeat_count = 0
     narration_nudge_used = False
     # Anti-loop state for repeated identical failing run_command calls.
     last_failed_run_cmd: str | None = None
@@ -1497,6 +1615,11 @@ async def orchestrate_turn(
                     # turn with nothing (or looping the same failure blind).
                     had_malformed_tool_call = True
                     raw_preview = (event.get("raw") or "")[:500]
+                    if raw_preview == malformed_signature:
+                        malformed_repeat_count += 1
+                    else:
+                        malformed_signature = raw_preview
+                        malformed_repeat_count = 1
                     logger.warning(
                         "Malformed tool-call envelope from orchestrator (round %d): %r",
                         tool_round, raw_preview,
@@ -1505,6 +1628,19 @@ async def orchestrate_turn(
                         "orchestrator_tool_call_malformed",
                         **trace_context, round=tool_round, raw_preview=raw_preview,
                     )
+                    if malformed_repeat_count >= 2:
+                        logger.warning(
+                            "Aborting repeated malformed tool-call envelope after %d attempts.",
+                            malformed_repeat_count,
+                        )
+                        trace_event(
+                            "orchestrator_malformed_retry_aborted",
+                            **trace_context,
+                            round=tool_round,
+                            repeat_count=malformed_repeat_count,
+                        )
+                        all_tokens = []
+                        break
                     if finalization_round:
                         logger.warning(
                             "Malformed tool call during forced finalization; using tool-result fallback."
@@ -1806,9 +1942,16 @@ def _build_orchestrator_messages(
     # to both tool-call modes — native models otherwise only see the bare tool
     # description via the OpenAI tools field.
     if web_search_enabled:
+        # With a codebase attached, use the variant that scopes web_search to
+        # the outside world and names the codebase as the authority on "this
+        # project". The generic hint's "documentation" trigger and "when in
+        # doubt, search" otherwise beat the codebase tools on questions about
+        # the user's own code.
         messages.append({
             "role": "system",
-            "content": canonicalise_system_content(WEB_SEARCH_HINT),
+            "content": canonicalise_system_content(
+                WEB_SEARCH_HINT_WITH_CODEBASE if codebase_project_name else WEB_SEARCH_HINT
+            ),
         })
 
     # Band A‴: codebase-project usage hint, same rationale as the web-search
@@ -1861,13 +2004,110 @@ def _build_orchestrator_messages(
             "content": f"**Worker evidence pack summary:**\n{evidence_summary}",
         })
 
-    # Append previous conversation messages (if stateful turn)
-    messages.extend(previous_messages)
+    # Append previous conversation messages (if stateful turn). Broken
+    # prompt-JSON envelopes are not useful history: they teach the model to
+    # repeat the exact malformed call on every retry.
+    history = (
+        _sanitize_prompt_json_history(previous_messages)
+        if tool_call_mode == "prompt_json"
+        else previous_messages
+    )
+    if codebase_project_name:
+        history = _correct_capability_denials(history)
+    messages.extend(history)
 
     # Final user message
     messages.append({"role": "user", "content": user_message})
 
     return messages
+
+
+# Things the model said in earlier turns to talk itself out of tools it has.
+# Drawn verbatim from real transcripts; they come from the model's training
+# prior about chat assistants, not from anything in this app, which is why they
+# recur word-for-word.
+_CAPABILITY_DENIAL_MARKERS = (
+    "i cannot access",
+    "i can't access",
+    "i do not have access",
+    "i don't have access",
+    "cannot invoke",
+    "can't invoke",
+    "exposed through this interface",
+    "cannot connect to",
+    "can't connect to",
+    "only let me read",
+    "not directly query",
+    "cannot execute",
+    "can't execute",
+    "cannot query",
+    "would be speculative",
+    "credentials are not accessible",
+)
+
+_DENIAL_CORRECTION = (
+    "[Correction to the message above: the claim about lacking access was FALSE. "
+    "This conversation has live codebase tools, including codebase_run_command, "
+    "and the project's own .env is already loaded into the environment of every "
+    "command. Do not repeat that claim or ask the user for credentials -- call "
+    "the tool and report what actually came back.]"
+)
+
+
+def _correct_capability_denials(history: list[dict]) -> list[dict]:
+    """Annotate past assistant turns that wrongly claimed to lack access.
+
+    Without this the model copies itself. Once a turn has said "I cannot invoke
+    it without actual credentials", that sentence is in the context as its own
+    prior behaviour, and every later turn in the conversation reproduces it --
+    which is exactly what a user sees as "it STILL says it can't", long after
+    the underlying capability was fixed. A system rule loses to the model's own
+    transcript; correcting the transcript is what actually lands.
+    """
+    corrected: list[dict] = []
+    for message in history:
+        content = message.get("content")
+        if (
+            message.get("role") == "assistant"
+            and isinstance(content, str)
+            and _DENIAL_CORRECTION not in content
+            and any(marker in content.lower() for marker in _CAPABILITY_DENIAL_MARKERS)
+        ):
+            corrected.append({**message, "content": f"{content}\n\n{_DENIAL_CORRECTION}"})
+        else:
+            corrected.append(message)
+    return corrected
+
+
+_PROMPT_JSON_TOOL_START_RE = re.compile(
+    r'\{\s*"action"\s*:\s*"tool_calls?"\s*,',
+)
+
+
+def _sanitize_prompt_json_history(previous_messages: list[dict]) -> list[dict]:
+    """Remove unparseable prompt-JSON tool fragments from prior turns."""
+    sanitized: list[dict] = []
+    for message in previous_messages:
+        if message.get("role") != "assistant" or not isinstance(message.get("content"), str):
+            sanitized.append(message)
+            continue
+
+        content = message["content"]
+        marker = _PROMPT_JSON_TOOL_START_RE.search(content)
+        if marker is None:
+            sanitized.append(message)
+            continue
+
+        try:
+            json.JSONDecoder().raw_decode(content[marker.start():])
+        except json.JSONDecodeError:
+            prefix = content[:marker.start()].rstrip()
+            if prefix:
+                sanitized.append({**message, "content": prefix})
+            continue
+
+        sanitized.append(message)
+    return sanitized
 
 
 def _format_tool_arg_spec(input_schema: dict | None) -> str:
@@ -2014,6 +2254,84 @@ def _trim_file_read(content: str, per_result_budget: int) -> str:
     return content[:head] + "\n...[middle truncated]...\n" + content[-tail:]
 
 
+def _trim_run_command(content: str, per_result_budget: int) -> str:
+    """Trim a run_command result without ever losing the verdict.
+
+    The payload is ``{command, cwd, exit_code, stdout, stderr, timed_out}`` in
+    that order, so a blanket head-truncation deleted ``stderr`` and
+    ``timed_out`` outright whenever stdout was chatty — the model was handed a
+    command that appeared to have produced output and no error at all, and
+    reported success. exit_code, timed_out and stderr are small and are the
+    whole point, so they are kept in full and only stdout is budgeted.
+    """
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _head_truncate(content, per_result_budget)
+    if not isinstance(obj, dict) or "stdout" not in obj:
+        return _head_truncate(content, per_result_budget)
+
+    trimmed = dict(obj)
+    stderr = trimmed.get("stderr") if isinstance(trimmed.get("stderr"), str) else ""
+    # Whatever stderr needs, stdout gets the rest — but never less than a
+    # usable slice, or a noisy warning stream would starve the actual output.
+    stdout_budget = max(400, per_result_budget - len(stderr) - 200)
+    stdout = trimmed.get("stdout")
+    if isinstance(stdout, str) and len(stdout) > stdout_budget:
+        head = int(stdout_budget * 0.4)
+        tail = stdout_budget - head
+        trimmed["stdout"] = (
+            stdout[:head] + "\n... [stdout truncated] ...\n" + stdout[-tail:]
+        )
+    if len(stderr) > per_result_budget:
+        # Only reachable when stderr alone is enormous; keep the end, which is
+        # where the actual error is.
+        trimmed["stderr"] = "... [stderr truncated] ...\n" + stderr[-per_result_budget:]
+    return json.dumps(trimmed, ensure_ascii=False)
+
+
+def _trim_search_results(content: str, per_result_budget: int) -> str:
+    """Trim search results by shortening lines, never by dropping matches.
+
+    Which files contain a symbol is the answer; the text of each line is
+    supporting detail. Head-truncating cut the JSON mid-array, so the model saw
+    an arbitrary prefix of the matches and no indication there were more.
+    """
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _head_truncate(content, per_result_budget)
+    matches = obj.get("matches") if isinstance(obj, dict) else None
+    if not isinstance(matches, list) or not matches:
+        return _head_truncate(content, per_result_budget)
+
+    per_match = max(80, per_result_budget // len(matches))
+    trimmed_matches = []
+    for match in matches:
+        if not isinstance(match, dict):
+            trimmed_matches.append(match)
+            continue
+        entry = dict(match)
+        line = entry.get("line")
+        if isinstance(line, str) and len(line) > per_match:
+            entry["line"] = line[:per_match].rstrip() + "…"
+        # Context is the first thing to go: useful, but never at the cost of
+        # losing the path and line number of a match.
+        if per_match < 160:
+            entry.pop("before", None)
+            entry.pop("after", None)
+        else:
+            for side in ("before", "after"):
+                lines = entry.get(side)
+                if isinstance(lines, list):
+                    entry[side] = [
+                        (item[:per_match] if isinstance(item, str) else item)
+                        for item in lines
+                    ]
+        trimmed_matches.append(entry)
+    return json.dumps({**obj, "matches": trimmed_matches}, ensure_ascii=False)
+
+
 def _trim_tool_result(tool_name: str, content: str, per_result_budget: int) -> str:
     """Per-tool structural trim. NOT a blanket head-truncation — the shape carries
     the sufficiency information the orchestrator needs to decide whether it has
@@ -2024,8 +2342,15 @@ def _trim_tool_result(tool_name: str, content: str, per_result_budget: int) -> s
         return content
     if tool_name == "web_search":
         return _trim_web_search(content, per_result_budget)
-    if tool_name == "file_read":
+    # codebase_read_file was falling through to the blanket head-truncate, so a
+    # file was cut at an arbitrary byte — which is how the model could read a
+    # helper module and still be unsure what was in it.
+    if tool_name in ("file_read", "codebase_read_file"):
         return _trim_file_read(content, per_result_budget)
+    if tool_name == "codebase_run_command":
+        return _trim_run_command(content, per_result_budget)
+    if tool_name == "codebase_search":
+        return _trim_search_results(content, per_result_budget)
     return _head_truncate(content, per_result_budget)
 
 
@@ -2131,9 +2456,13 @@ def _run_command_failed(result_content: str) -> bool:
     try:
         data = json.loads(result_content)
     except (json.JSONDecodeError, TypeError):
-        return False
+        # Unparseable means something went wrong, not that all is well: a bare
+        # "Tool error: ..." string and a payload cut mid-JSON both land here,
+        # and both used to read as success — so the model was never nudged off
+        # exactly the failures that produced the most output.
+        return True
     if not isinstance(data, dict):
-        return False
+        return True
     if data.get("error") or data.get("timed_out"):
         return True
     exit_code = data.get("exit_code")
@@ -2202,6 +2531,12 @@ def _fallback_answer_from_tool_results(
             if isinstance(item, dict) and (item.get("title") or item.get("snippet")):
                 search_items.append(item)
 
+        # A repeat notice is scaffolding aimed at the model, not evidence. It
+        # used to be dumped verbatim into the user's answer, so a turn that
+        # looped ended by showing them three copies of "You already ran this
+        # exact call" and nothing about their question.
+        if isinstance(parsed, dict) and parsed.get("repeated_call"):
+            continue
         if not candidates and raw:
             other_notes.append(f"{tool_name}: {raw[:300]}")
 
@@ -2344,6 +2679,41 @@ def _repair_tool_args(
     )
 
 
+# Only read-only lookups are de-duplicated. Re-running a command or a write can
+# legitimately be the point (re-run the tests after a fix), and answering one
+# from a cache would be a lie about what happened on disk.
+_DEDUPABLE_TOOLS = frozenset({
+    "codebase_search",
+    "codebase_find_files",
+    "codebase_read_file",
+    "codebase_list_directory",
+    "web_search",
+    "file_read",
+})
+
+
+def _is_project_file_read(tool_name: str, args: dict) -> bool:
+    """A ``file_read`` aimed at a project path rather than an uploaded file.
+
+    ``file_id`` reads are genuine attachment reads and are left alone; only a
+    bare ``path`` is the confusion case, since that path can only have come
+    from looking at the project.
+    """
+    if tool_name != "file_read" or not isinstance(args, dict):
+        return False
+    return bool(args.get("path")) and not args.get("file_id")
+
+
+def _call_signature(tool_name: str, args: dict) -> str:
+    """Stable key for "the same call again", or "" if it must not be de-duped."""
+    if tool_name not in _DEDUPABLE_TOOLS:
+        return ""
+    try:
+        return f"{tool_name}:{json.dumps(args, sort_keys=True, default=str)}"
+    except (TypeError, ValueError):
+        return ""
+
+
 async def handle_tool_calls(
     tool_calls: list[dict],
     mcp_client: Any,
@@ -2352,6 +2722,8 @@ async def handle_tool_calls(
     user_message: str | None = None,
     chat_id: str | None = None,
     blocked_calls: dict[str, str] | None = None,
+    call_history: dict[str, str] | None = None,
+    repeat_counts: dict[str, int] | None = None,
 ) -> list[dict]:
     """Execute tool calls returned by the orchestrator.
 
@@ -2366,6 +2738,12 @@ async def handle_tool_calls(
             are NOT dispatched; the reason is returned as a non-retryable tool
             error so the model learns the change didn't happen and why. They
             stay in ``tool_calls`` so result ordering is unchanged.
+        call_history: Turn-scoped ``{signature: previous result}`` for read-only
+            calls. A repeat of an identical call is answered from here instead
+            of being re-dispatched, with a note that it already ran. Without it
+            a model that has found its answer can re-issue the same search every
+            round until the round cap, then stop mid-sentence having spent the
+            whole turn confirming what it already knew.
 
     Returns:
         List of tool result dicts with keys: tool_call_id, tool_name, content.
@@ -2410,6 +2788,9 @@ async def handle_tool_calls(
     trace_event("tool_plan_built", **(trace_context or {}), plan=plan)
 
     results: list[dict | None] = [None] * len(tool_calls)
+    # Turn-scoped when the caller supplies it: the escalation only works if
+    # a repeat in round 5 knows about the one in round 4.
+    repeat_counts = repeat_counts if repeat_counts is not None else {}
 
     async def _exec(item: dict) -> dict:
         tool_name = item["name"]
@@ -2465,6 +2846,52 @@ async def handle_tool_calls(
                 "tool_name": tool_name,
                 "content": json.dumps({"error": True, "message": item["arg_error"], "retryable": True}),
             }
+        # An identical read-only call already made this turn is answered from
+        # what it returned the first time, with an explicit instruction to move
+        # on. Re-dispatching would return the same bytes and teach the model
+        # nothing; observed in the wild as the same search re-issued every round
+        # until the round cap, ending the turn mid-sentence.
+        signature = _call_signature(tool_name, item["args"])
+        if call_history is not None and signature and signature in call_history:
+            repeats = repeat_counts.get(signature, 0) + 1
+            repeat_counts[signature] = repeats
+            trace_event(
+                "tool_call_repeat_suppressed",
+                **(trace_context or {}),
+                tool_name=tool_name,
+                call_id=item["call_id"],
+                arguments=item["args"],
+                repeat_count=repeats,
+            )
+            # Escalate. A single polite note did not break the loop in the wild:
+            # the model acknowledged it and re-issued the same search anyway,
+            # burning the whole round budget and ending with no answer at all.
+            if repeats == 1:
+                message = (
+                    f"You already ran this exact {tool_name} call in this turn. It was not "
+                    "run again — its original result is below, unchanged. Repeating it "
+                    "cannot tell you anything new. Either use this result to answer, or "
+                    "do something DIFFERENT: a different pattern, a different path, a "
+                    "different tool."
+                )
+            else:
+                message = (
+                    f"STOP. This is repeat #{repeats} of the same {tool_name} call. Searching "
+                    "is not working for this. If you are looking for a VALUE (a name, a code, "
+                    "a status) it is DATA — query the database with codebase_run_command "
+                    "instead. Otherwise answer the user now with what you already have, and "
+                    "say plainly what you could not find. Do NOT search again."
+                )
+            return {
+                "tool_call_id": item["call_id"],
+                "tool_name": tool_name,
+                "content": json.dumps({
+                    "repeated_call": True,
+                    "repeat_count": repeats,
+                    "message": message,
+                    "original_result": call_history[signature],
+                }),
+            }
         try:
             trace_event(
                 "tool_call_start",
@@ -2474,10 +2901,31 @@ async def handle_tool_calls(
                 arguments=item["args"],
                 parallel=item["parallel"],
             )
-            if tool_name.startswith("codebase_") and chat_id is not None:
+            dispatch_name, dispatch_args = tool_name, item["args"]
+            substituted_from = None
+            if chat_id is not None and _is_project_file_read(tool_name, dispatch_args):
+                # file_read is the built-in attachment/allowlist reader; the model
+                # reaches for it by name when it wants a project file and gets
+                # "Path not in allowlist: documents/DATABASE_SCHEMA_REFERENCE.md",
+                # which reads as "that document is unavailable" — it then stopped
+                # trying to read docs at all. Route it to the codebase instead.
+                if get_active_codebase_project(chat_id) is not None:
+                    dispatch_name = "codebase_read_file"
+                    dispatch_args = {"path": dispatch_args.get("path", "")}
+                    substituted_from = tool_name
+            if dispatch_name.startswith("codebase_") and chat_id is not None:
                 codebase_project = get_active_codebase_project(chat_id)
                 if codebase_project is not None:
-                    result = await call_codebase_tool(chat_id, codebase_project, tool_name, item["args"])
+                    result = await call_codebase_tool(chat_id, codebase_project, dispatch_name, dispatch_args)
+                    if substituted_from and isinstance(result, dict):
+                        result = {
+                            **result,
+                            "note": (
+                                f"'{substituted_from}' does not read project files — this was read "
+                                "with codebase_read_file. Use codebase_read_file for anything in "
+                                "this project."
+                            ),
+                        }
                 else:
                     result = {"error": True, "message": "No active codebase project is bound to this chat."}
             else:
@@ -2487,6 +2935,8 @@ async def handle_tool_calls(
                 else:
                     result = await mcp_client.call_tool(tool_name, item["args"])
             content = result if isinstance(result, str) else json.dumps(result)
+            if call_history is not None and signature:
+                call_history[signature] = content
             trace_event(
                 "tool_call_result",
                 **(trace_context or {}),

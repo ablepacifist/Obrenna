@@ -442,8 +442,39 @@ def build_fingerprint(detected: dict) -> HardwareFingerprint:
 
 
 def build_live(detected: dict) -> LiveFreeResources:
-    """Convert a probe dict into live free resources."""
+    """Convert a probe dict into the capacity ``fit()`` should size against.
+
+    Uses TOTAL capacity, not the momentary free reading, and that is
+    deliberate. ``fit()`` computes ``required = model_weight + kv_cache +
+    fixed`` — the model weight is *inside* ``required``, and ``fixed`` already
+    covers display and framework overhead. So it is answering "what context
+    fits if we load this model onto this card", which is a total-capacity
+    question.
+
+    Comparing that against *free* VRAM double-counts the weight whenever the
+    model is already resident, and makes the resolved plan depend on whether
+    Ollama happened to be warm: on this machine the probe reported 2.7GB free
+    of 10GB (model loaded), nothing fit, and context collapsed to ``ctx_min``.
+    The visible symptom was replies truncated mid-sentence — a turn ending at
+    exactly 8192 tokens (prompt 7583 + reply 609) on a card that comfortably
+    fits 16384 at 7.21GB. Sizing on total makes the plan deterministic instead
+    of a function of warm-vs-cold.
+
+    Both key spellings are accepted because two probe shapes reach this:
+    ``_probe_all()`` emits ``gpu_vram_total_gb``/``ram_total_gb`` while
+    ``detect_hardware()``'s display summary emits ``vram_gb``/``ram_gb``.
+    """
+    vram_total = (
+        detected.get("gpu_vram_total_gb")
+        or detected.get("vram_gb")
+        or 0.0
+    )
+    ram_total = (
+        detected.get("ram_total_gb")
+        or detected.get("ram_gb")
+        or 0.0
+    )
     return LiveFreeResources(
-        gpu_vram_free_gb=detected.get("gpu_vram_free_gb") or 0.0,
-        ram_free_gb=detected.get("ram_free_gb") or 0.0,
+        gpu_vram_free_gb=vram_total,
+        ram_free_gb=ram_total,
     )

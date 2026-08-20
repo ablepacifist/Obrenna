@@ -29,6 +29,19 @@ FALLBACK_NARRATION: dict[str, str] = {
     "get_time": "Looking up the current time",
     "file_read": "Reading a file",
     "get_location": "Finding your location",
+    # The codebase tools had no entries at all, so on a setup with no utility
+    # model every one of them rendered as a bare tool name with no text under
+    # it -- which is most of what the user sees during a coding turn.
+    "codebase_list_directory": "Listing the project",
+    "codebase_read_file": "Reading a project file",
+    "codebase_search": "Searching the codebase",
+    "codebase_find_files": "Looking for files by name",
+    "codebase_edit_file": "Editing a project file",
+    "codebase_write_file": "Writing a project file",
+    "codebase_delete_file": "Deleting a project file",
+    "codebase_move_file": "Moving a project file",
+    "codebase_run_command": "Running a command in the project",
+    "ask_user": "Asking you a question",
 }
 
 # Bounded so a slow helper model can never stall the turn. Narration runs
@@ -57,8 +70,14 @@ async def narrate_tool_call(
     """Return a one-line human narration of a tool call, or None on any failure."""
     chosen = config.model_for("utility") or config.model_for("summarizer")
     if not chosen:
-        return None
-    purpose = (tool_def_by_name(tool_name) or {}).get("description", "")
+        return FALLBACK_NARRATION.get(tool_name)
+    # tool_def_by_name only knows the built-in TOOL_DEFS; the codebase_* tools
+    # are assembled per-project, so the static line is the only purpose hint
+    # available for them.
+    purpose = (
+        (tool_def_by_name(tool_name) or {}).get("description", "")
+        or FALLBACK_NARRATION.get(tool_name, "")
+    )
     try:
         args_json = json.dumps(arguments, default=str)[:300]
     except (TypeError, ValueError):
@@ -75,9 +94,9 @@ async def narrate_tool_call(
         )
     except Exception as exc:  # noqa: BLE001 - narration is best-effort
         logger.debug("tool narration failed for %s: %s", tool_name, exc)
-        return None
+        return FALLBACK_NARRATION.get(tool_name)
     cleaned = (text or "").strip().strip('"').strip()
-    return cleaned[:140] or None
+    return cleaned[:140] or FALLBACK_NARRATION.get(tool_name)
 
 
 def _call_name(tc: dict) -> str:

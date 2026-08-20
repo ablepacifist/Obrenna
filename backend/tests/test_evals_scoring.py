@@ -177,3 +177,55 @@ class TestSummarize:
     def test_empty_results_do_not_crash(self):
         out = summarize("local", "m", [])
         assert out.cases == 0 and out.accuracy == 0.0
+
+
+# ── behavioural grading ───────────────────────────────────────────────────────
+# Some failures are things the model SAYS, not answers it gets wrong: claiming
+# it cannot reach a database it can reach, hedging about a file it has read,
+# ending a turn by asking the user for a fact that is in the repo. Those cases
+# have no answer to match — only wrong things to not say.
+
+
+def test_a_forbidden_phrase_fails_the_case():
+    ok, extracted = grade(
+        "I do not have access to your live database.",
+        grader="contains", expected="",
+        forbidden_terms=["i do not have access"],
+    )
+    assert ok is False
+    assert "said:" in extracted, "the report must name what it said, for triage"
+
+
+def test_a_clean_response_passes_on_forbidden_terms_alone():
+    ok, _ = grade(
+        "Yes — I can run an Rscript against it with codebase_run_command.",
+        grader="contains", expected="",
+        forbidden_terms=["i do not have access"],
+    )
+    assert ok is True
+
+
+def test_forbidden_matching_is_case_insensitive():
+    ok, _ = grade("I CANNOT ACCESS that.", grader="contains", expected="",
+                  forbidden_terms=["i cannot access"])
+    assert ok is False
+
+
+def test_required_and_forbidden_terms_combine():
+    args = dict(grader="contains", expected="",
+                required_terms=["get_db_connection"], forbidden_terms=["potentially"])
+    assert grade("It defines get_db_connection.", **args)[0] is True
+    # Right content, wrong hedge — still a failure.
+    assert grade("It potentially defines get_db_connection.", **args)[0] is False
+    # No hedge, but never answered.
+    assert grade("The file exists.", **args)[0] is False
+
+
+def test_a_case_with_no_terms_at_all_is_not_a_free_pass():
+    assert grade("anything", grader="contains", expected="")[0] is False
+
+
+def test_forbidden_terms_are_optional():
+    """Existing required-only cases must grade exactly as before."""
+    assert grade("the capital is Paris", grader="contains", expected="",
+                 required_terms=["paris"])[0] is True

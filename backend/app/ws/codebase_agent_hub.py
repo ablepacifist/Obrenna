@@ -21,12 +21,39 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 20.0
 
+# Ops that have existed since the first released agent. An agent whose hello
+# carries no op list predates capability reporting, so this is what it can be
+# assumed to support.
+LEGACY_OPS = frozenset({
+    "register_project", "update_project", "delete_project",
+    "list_directory", "read_file", "search",
+    "edit_file", "write_file", "delete_file", "move_file",
+    "run_command", "list_changes", "revert_change",
+})
+
 
 class DeviceConnection:
     def __init__(self, device_id: str, websocket: WebSocket):
         self.device_id = device_id
         self.websocket = websocket
         self._pending: dict[str, asyncio.Future] = {}
+        # Requests we stopped waiting for. Kept so a late reply is recognised as
+        # late rather than silently dropped as unknown.
+        self._abandoned: set[str] = set()
+        # Ops this agent build can perform, from its hello frame. None means an
+        # agent too old to say, which is treated as "only the original ops".
+        self.supported_ops: set[str] | None = None
+
+    def supports(self, op: str) -> bool:
+        """Whether this device can perform ``op``.
+
+        Unknown (an agent predating capability reporting) is answered from the
+        set every released agent has always had, so a stale agent silently
+        loses only the new tools instead of erroring on them mid-turn.
+        """
+        if self.supported_ops is None:
+            return op in LEGACY_OPS
+        return op in self.supported_ops
 
     async def send_command(
         self, op: str, params: dict[str, Any], timeout: float = DEFAULT_TIMEOUT
@@ -42,7 +69,16 @@ class DeviceConnection:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
-            raise ConnectionError(f"Device did not respond in time for '{op}'")
+            self._abandoned.add(request_id)
+            # Say what actually happened. The command was delivered and is very
+            # likely still running on the user's machine -- calling that "no
+            # response" invites the model to run a mutating command a second
+            # time while the first one is mid-flight.
+            raise ConnectionError(
+                f"No reply from the device within {timeout:.0f}s for '{op}'. The command was "
+                "delivered and may still be running there. Do not simply repeat it -- check "
+                "whether it already took effect, or run it again with a longer timeout."
+            )
         finally:
             self._pending.pop(request_id, None)
 
@@ -50,6 +86,16 @@ class DeviceConnection:
         fut = self._pending.get(request_id)
         if fut is not None and not fut.done():
             fut.set_result(payload)
+        elif request_id in self._abandoned:
+            # The reply arrived after we gave up. Nothing can consume it now,
+            # but it must not vanish without trace: this is the signature of a
+            # timeout set too tight, and the only place it is observable.
+            self._abandoned.discard(request_id)
+            logger.warning(
+                "codebase-agent %s replied to request %s after it timed out; "
+                "the command completed but its output was discarded",
+                self.device_id, request_id,
+            )
 
     def fail_all(self, error: Exception) -> None:
         for fut in self._pending.values():

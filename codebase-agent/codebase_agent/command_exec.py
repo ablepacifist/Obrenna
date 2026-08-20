@@ -10,6 +10,10 @@ commands on the machine the agent is installed on. It is bounded, not sandboxed:
   * a wall-clock timeout kills runaway/hung commands,
   * stdout/stderr are captured and truncated to a cap before feed-back.
 
+Commands also receive the project's own .env/.Renviron (see project_env), so a
+script that reads its credentials the way the project already reads them works
+here as it does in the user's own shell.
+
 It does NOT try to whitelist commands or block "dangerous" ones — that is a
 false sense of security on a shell, and Claude Code (the model this emulates)
 runs real commands too. The real guardrails are device approval + write_enabled
@@ -23,6 +27,8 @@ from pathlib import Path
 
 from .fs_tools import FsError
 from .pathsafety import resolve_safe_path
+from .project_env import build_command_env
+from .system_env import looks_like_missing_program, missing_program_hint
 
 OUTPUT_CHAR_CAP = 20_000
 DEFAULT_TIMEOUT = 120
@@ -81,10 +87,21 @@ def run_command(root: Path, command: str, *, cwd: str = ".", timeout: int | None
             timeout=t,
             encoding="utf-8",
             errors="replace",
+            # The project's own .env/.Renviron, so its connection helpers work
+            # here exactly as they do when the user runs them by hand. The
+            # values never leave this process's child - see project_env.
+            env=build_command_env(root),
         )
+        stderr = _cap(proc.stderr)
+        # "'Rscript' is not recognized" was read by a model as proof R was not
+        # installed; it told the user so and stopped. It means only that the
+        # agent's inherited PATH does not have it -- often because the agent
+        # started before it was installed.
+        if proc.returncode != 0 and looks_like_missing_program(stderr, proc.stdout or ""):
+            stderr += missing_program_hint(command)
         return CommandResult(
             command=command, cwd=cwd or ".", exit_code=proc.returncode,
-            stdout=_cap(proc.stdout), stderr=_cap(proc.stderr), timed_out=False,
+            stdout=_cap(proc.stdout), stderr=stderr, timed_out=False,
         )
     except subprocess.TimeoutExpired as exc:
         err = _decode(exc.stderr)

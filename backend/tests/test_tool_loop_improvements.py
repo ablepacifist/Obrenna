@@ -136,11 +136,14 @@ def test_catalog_per_orchestrator_capabilities_match_plan():
     the runtime now sources (instead of the dead global max_tool_rounds)."""
     cat = load_catalog()
     # max_tool_rounds was raised across orchestrators so build->run->fix->run
-    # coding loops have room to iterate (it's a ceiling, not a target).
+    # coding loops have room to iterate (it's a ceiling, not a target). The 9B
+    # went further, to 12: the codebase rules now require retrying a search that
+    # returned nothing rather than accepting it, and telemetry showed real
+    # exploration turns already using 9-11 rounds against the old cap of 8.
     expected = {
         "qwen3.5-0.8b-claude-opus-reasoning-distilled": (True, 2, 3000),
         "qwen3.5-4b-claude-opus-reasoning-distilled-v2": (True, 6, 4000),
-        "qwen3.5-9b-claude-opus-reasoning-distilled": (True, 8, 6000),
+        "qwen3.5-9b-claude-opus-reasoning-distilled": (True, 12, 6000),
         "qwen3.5-27b": (False, 8, 10000),
         "qwen3.6-35b-a3b": (False, 8, 12000),
     }

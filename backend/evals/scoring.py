@@ -96,7 +96,14 @@ def extract_choice(text: str) -> str:
     return matches[-1].upper() if matches else ""
 
 
-def grade(response: str, *, grader: str, expected: str, required_terms: list[str] | None = None) -> tuple[bool, str]:
+def grade(
+    response: str,
+    *,
+    grader: str,
+    expected: str,
+    required_terms: list[str] | None = None,
+    forbidden_terms: list[str] | None = None,
+) -> tuple[bool, str]:
     """Grade one response. Returns ``(correct, extracted)``.
 
     ``extracted`` is recorded on the result so a failing case can be triaged
@@ -115,9 +122,16 @@ def grade(response: str, *, grader: str, expected: str, required_terms: list[str
 
     if grader == "contains":
         terms = required_terms or ([expected] if expected else [])
+        banned = forbidden_terms or []
         haystack = text.lower()
         missing = [t for t in terms if t.lower() not in haystack]
-        got = "all terms" if not missing else f"missing: {', '.join(missing)}"
-        return (not missing and bool(terms)), got
+        # A behavioural case can have only forbidden terms: the whole assertion
+        # is "it did not say it was unable to".
+        present = [t for t in banned if t.lower() in haystack]
+        if present:
+            return False, f"said: {', '.join(present)}"
+        if missing:
+            return False, f"missing: {', '.join(missing)}"
+        return bool(terms or banned), "all terms"
 
     raise ValueError(f"unknown grader: {grader!r}")
