@@ -95,6 +95,8 @@ async def codebase_agent_connect(websocket: WebSocket):
     # "Unknown operation" and reads to the model as an impossible task.
     ops = hello.get("ops")
     conn.supported_ops = set(ops) if isinstance(ops, list) else None
+    platform = hello.get("platform")
+    conn.platform = platform if isinstance(platform, str) else None
     await websocket.send_text(json.dumps({"type": "hello_ack", "approved": device.approved}))
     logger.info("codebase-agent device connected: %s (%s), approved=%s", device_name, device_id, device.approved)
 

@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import sys
 
 import websockets
 
@@ -72,6 +74,10 @@ async def _run_once(server: str, device_id: str, device_name: str, token: str = 
             "device_id": device_id,
             "device_name": device_name,
             "ops": supported_ops(),
+            # So the backend can tell the model which shell its commands land
+            # in. Without it a model on a Windows device spends rounds
+            # discovering that wc, grep and Get-ChildItem are not there.
+            "platform": "windows" if os.name == "nt" else sys.platform,
         }))
         ack = json.loads(await ws.recv())
         if ack.get("approved"):

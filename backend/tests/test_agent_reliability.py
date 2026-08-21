@@ -321,3 +321,73 @@ class TestMalformedGuidance:
     def test_unknown_tool_gets_generic_advice(self):
         msg = _malformed_tool_call_guidance('{"garbled')
         assert "could not be parsed" in msg.lower()
+
+
+class TestWrittenCommandTriggersTheNudge:
+    """The model typed a command and explained what it would show, twice, after
+    it had already connected to the live database. The old guard could not see
+    it: those replies run past the 320-character cut-off it bails on."""
+
+    @pytest.mark.asyncio
+    async def test_a_written_command_is_nudged_into_being_run(self, monkeypatch):
+        rt = _patch_common(monkeypatch)
+        calls = {"n": 0}
+        guidance = {"seen": ""}
+
+        async def fake_stream(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield {"type": "token", "content": (
+                    "Next Steps to Build the Correct SQL\n\n"
+                    "I need to examine the actual column names in the relevant tables. "
+                    "Let me query a few key ones:\n\n"
+                    "Rscript -e \"source('shared/db_helpers.R'); con <- get_db_connection(); "
+                    "dbGetQuery(con, 'SELECT column_name FROM information_schema.columns')\"\n\n"
+                    "This will show me the exact columns available for priority (GREEN), "
+                    "fosarea values, and date fields."
+                )}
+            else:
+                messages = args[1]
+                guidance["seen"] = " ".join(
+                    (m.get("content") or "") for m in messages if m.get("role") == "user"
+                )
+                yield {"type": "token", "content": "The priority column is 'priority'."}
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        events = [e async for e in orchestrate_turn(
+            "what columns are there?", "chat-written-cmd", None, _config(), _plan(),
+            workers_enabled=False,
+        )]
+
+        assert calls["n"] == 2, "the written command must trigger exactly one retry"
+        assert "WROTE a command instead of RUNNING it" in guidance["seen"], (
+            "the nudge must name the specific mistake, not the generic one"
+        )
+        assert any(e.type == "token" and "priority" in e.payload.get("text", "")
+                   for e in events)
+        assert not any(e.type == "error" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_an_answer_showing_a_command_is_not_nudged(self, monkeypatch):
+        """Reporting a command already run, or offering one for the user to run,
+        is a finished answer — nudging it would loop on correct behaviour."""
+        rt = _patch_common(monkeypatch)
+        calls = {"n": 0}
+
+        async def fake_stream(*args, **kwargs):
+            calls["n"] += 1
+            yield {"type": "token", "content": (
+                "I ran `Rscript -e \"dbListTables(con)\"` and it returned 501 tables, "
+                "including loc_breeding_site_cards_sjsreast2. The connection works, and "
+                "the priority column lives on the breeding site cards table."
+            )}
+
+        monkeypatch.setattr(rt, "chat_completion_stream", fake_stream)
+
+        events = [e async for e in orchestrate_turn(
+            "did it work?", "chat-report", None, _config(), _plan(), workers_enabled=False,
+        )]
+
+        assert calls["n"] == 1, "a finished report must be accepted as the answer"
+        assert not any(e.type == "error" for e in events)

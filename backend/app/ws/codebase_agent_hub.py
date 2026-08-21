@@ -43,6 +43,28 @@ class DeviceConnection:
         # Ops this agent build can perform, from its hello frame. None means an
         # agent too old to say, which is treated as "only the original ops".
         self.supported_ops: set[str] | None = None
+        # "windows", "linux", "darwin", or None from an agent too old to say.
+        self.platform: str | None = None
+
+    def shell_hint(self) -> str:
+        """One line telling the model which shell its commands land in.
+
+        A model with no idea reaches for POSIX tools by default and burns a
+        round each on `wc`, `grep`, and `Get-ChildItem` before finding
+        something that exists.
+        """
+        if self.platform == "windows":
+            return (
+                " THIS MACHINE IS WINDOWS and commands run through cmd.exe, not bash or "
+                "PowerShell. For anything that counts, filters or aggregates, write a "
+                "`python -c \"...\"` one-liner and let it do the work — that is the reliable "
+                "route and it returns the finished answer, not a list for you to tally by "
+                "hand. POSIX tools (wc, grep, sed, head, which, unix find) and PowerShell "
+                "cmdlets (Get-ChildItem) do NOT exist here; dir, findstr and where do."
+            )
+        if self.platform in ("linux", "darwin"):
+            return " Commands run through /bin/sh on a Unix machine."
+        return ""
 
     def supports(self, op: str) -> bool:
         """Whether this device can perform ``op``.

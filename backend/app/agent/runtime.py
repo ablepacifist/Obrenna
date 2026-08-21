@@ -1760,9 +1760,19 @@ async def orchestrate_turn(
                 "orchestrator_narration_nudge", **trace_context, round=tool_round,
                 fragment="".join(all_tokens)[:200],
             )
+            wrote_a_command = bool(_PROMISED_COMMAND_RE.search("".join(all_tokens)))
             orchestrator_messages.append({
                 "role": "user",
                 "content": (
+                    # Name the exact mistake. The generic version was in place
+                    # while a model typed out an Rscript invocation, said "this
+                    # will show me the columns", and stopped — twice in one
+                    # conversation.
+                    "You WROTE a command instead of RUNNING it. Writing it in your reply does "
+                    "nothing — the user sees text, no command executes, and you learn nothing. "
+                    "Call codebase_run_command NOW with exactly that command, then answer from "
+                    "its real output."
+                    if wrote_a_command else
                     "You said you would take an action (e.g. read, list, edit, or create a file) "
                     "but you did not actually call any tool — you stopped after the preamble. "
                     "Either call the tool now, or, if you already have what you need, give the "
@@ -2392,6 +2402,26 @@ def _compact_tool_results(
 # it ends mid-thought on a colon, or is a short line built around a first-person
 # intention verb ("let me read...", "I'll check..."). Kept deliberately narrow
 # so a genuine short answer ("Yes, that file exists.") is never misclassified.
+# A line that IS a command — the thing the model should have passed to
+# codebase_run_command instead of typing out. Anchored to line start (inside or
+# outside a code fence) so an incidental mention in prose doesn't match.
+_PROMISED_COMMAND_RE = re.compile(
+    r"(?mi)^\s*(?:```[\w-]*\s*)?(?:\$\s*|>\s*)?"
+    r"(?:Rscript|python3?|npx?|node|pytest|psql|pip3?|cargo|dotnet|bash|sh|make)\b"
+    r"[^\n]*\S",
+)
+
+# Framing that marks a command as something not yet done. Without this a reply
+# that legitimately SHOWS the user a command to run themselves would be nudged.
+_FUTURE_INTENT_RE = re.compile(
+    r"\b("
+    r"this will|that will|this should|let me|i'?ll|i will|i'?m going to|"
+    r"i am going to|let'?s|next,? i|now i|going to run|will run|will show|"
+    r"will list|will confirm|will prove|let me run"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _NARRATION_INTENT_RE = re.compile(
     r"\b("
     r"let me|i'?ll|i will|i'?m going to|i am going to|let'?s|"
@@ -2485,6 +2515,13 @@ def _looks_like_unfinished_narration(text: str) -> bool:
         # Genuinely empty output is handled by the tool-result / empty-reply
         # fallbacks, not here — don't claim it as narration.
         return False
+    # A written-out command is the same failure in a longer coat: the model
+    # produced the exact call it should have made, as prose, then described what
+    # it "will" show. Checked before the length gate because this form is
+    # verbose by nature — the observed cases ran to several hundred characters
+    # of command plus explanation, so the gate below threw them straight out.
+    if _PROMISED_COMMAND_RE.search(stripped) and _FUTURE_INTENT_RE.search(stripped):
+        return True
     # Long answers are real answers, not preambles.
     if len(stripped) > 320:
         return False

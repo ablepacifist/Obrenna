@@ -115,3 +115,57 @@ class TestToolAdvertising:
         names = [d["name"] for d in ctd.list_enabled_codebase_tool_defs("chat1")]
         assert "codebase_search" in names
         assert "codebase_run_command" in names
+
+
+class TestShellHint:
+    """A model with no idea which shell it is in reaches for POSIX tools.
+
+    Observed: asked to count files, it spent one round on `find | wc -l` and
+    another on `Get-ChildItem` before a `python -c` one-liner worked. Both
+    failures were avoidable — the agent knows what OS it is on.
+    """
+
+    def test_a_windows_agent_warns_about_posix_tools(self):
+        hint = conn_with_platform("windows").shell_hint()
+        assert "cmd.exe" in hint
+        for tool in ("wc", "grep", "Get-ChildItem"):
+            assert tool in hint
+
+    def test_a_windows_agent_is_pointed_at_what_does_work(self):
+        hint = conn_with_platform("windows").shell_hint()
+        assert "findstr" in hint
+        assert "python -c" in hint
+
+    def test_a_unix_agent_gets_its_own_line(self):
+        assert "/bin/sh" in conn_with_platform("linux").shell_hint()
+
+    def test_an_agent_that_does_not_say_gets_no_guess(self):
+        """Guessing the wrong shell is worse than saying nothing."""
+        assert conn_with_platform(None).shell_hint() == ""
+
+    def test_the_hint_lands_on_the_command_tool_only(self, monkeypatch):
+        import app.mcp.codebase_tool_dispatch as ctd
+
+        class Project:
+            name = "p"
+            device_id = "dev1"
+            write_enabled = True
+            id = "p1"
+
+        class Hub:
+            def get(self, device_id):
+                return conn_with_platform("windows", ops=set(LEGACY_OPS))
+
+        monkeypatch.setattr(ctd, "get_active_codebase_project", lambda cid: Project())
+        monkeypatch.setattr(ctd, "get_codebase_agent_hub", lambda: Hub())
+
+        defs = {d["name"]: d["description"] for d in ctd.list_enabled_codebase_tool_defs("c1")}
+        assert "cmd.exe" in defs["codebase_run_command"]
+        assert "cmd.exe" not in defs["codebase_search"]
+
+
+def conn_with_platform(platform, ops=None):
+    c = DeviceConnection("dev1", websocket=None)
+    c.platform = platform
+    c.supported_ops = ops
+    return c

@@ -319,6 +319,13 @@ def list_enabled_codebase_tool_defs(chat_id: str) -> list[dict[str, Any]]:
     # it: the model reads that as the task being impossible and abandons the
     # whole approach, rather than reaching for the tool that does exist.
     conn = get_codebase_agent_hub().get(project.device_id)
+    shell_hint = getattr(conn, "shell_hint", None)
+    if callable(shell_hint):
+        hint = shell_hint()
+        if hint:
+            for d in defs:
+                if d["name"] == "codebase_run_command":
+                    d["description"] += hint
     supports = getattr(conn, "supports", None)
     # Filter only when the transport can actually answer the question. An
     # in-process or stubbed connection has no capability view, and defaulting
